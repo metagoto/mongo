@@ -42,7 +42,6 @@
 
 namespace mongo {
 
-    extern bool quota, cpu;
     bool useJNI = true;
 
     /* only off if --nocursors which is for debugging. */
@@ -534,9 +533,9 @@ int main(int argc, char* argv[], char *envp[] )
         ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
         ("dbpath", po::value<string>()->default_value("/data/db/"), "directory for datafiles")
         ("quiet", "quieter output")
-#ifndef _WIN32
         ("logpath", po::value<string>() , "file to send all output to instead of stdout" )
         ("logappend" , "appnd to logpath instead of over-writing" )
+#ifndef _WIN32
         ("fork" , "fork server process" )
 #endif
         ("cpu", "periodically show cpu and iowait utilization")
@@ -686,7 +685,7 @@ int main(int argc, char* argv[], char *envp[] )
             }
         }
         if (params.count("cpu")) {
-            cpu = true;
+            cmdLine.cpu = true;
         }
         if (params.count("noauth")) {
             noauth = true;
@@ -695,7 +694,7 @@ int main(int argc, char* argv[], char *envp[] )
             noauth = false;
         }
         if (params.count("quota")) {
-            quota = true;
+            cmdLine.quota = true;
         }
         if (params.count("objcheck")) {
             objcheck = true;
@@ -707,29 +706,23 @@ int main(int argc, char* argv[], char *envp[] )
 #ifndef _WIN32
         if (params.count("fork")) {
             if ( ! params.count( "logpath" ) ){
-                cerr << "--fork has to be used with --logpath" << endl;
+                cout << "--fork has to be used with --logpath" << endl;
                 return -1;
             }
             pid_t c = fork();
             if ( c ){
-                cerr << "forked process: " << c << endl;
+                cout << "forked process: " << c << endl;
                 ::exit(0);
             }
             setsid();
             setupSignals();
         }
+#endif
         if (params.count("logpath")) {
             string lp = params["logpath"].as<string>();
             uassert( "logpath has to be non-zero" , lp.size() );
-            cout << "all output going to: " << lp << endl;
-            int fd = open( lp.c_str() ,
-                           O_CREAT | O_WRONLY | ( params.count("logappend" ) ? O_APPEND : O_TRUNC ) ,
-                           S_IRUSR | S_IWUSR );
-            assert( fd );
-            assert( dup2( fd , STDOUT_FILENO ) > 0 );
-            assert( dup2( fd , STDERR_FILENO ) > 0 );
+            initLogging( lp , params.count( "logappend" ) );
         }
-#endif
         if (params.count("nocursors")) {
             useCursors = false;
         }
