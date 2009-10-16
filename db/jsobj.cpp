@@ -30,11 +30,14 @@
 #include "jsobjmanipulator.h"
 #include "../util/optime.h"
 #include <boost/static_assert.hpp>
+#undef assert
+#define assert xassert
 
 // make sure our assumptions are valid
 BOOST_STATIC_ASSERT( sizeof(int) == 4 );
 BOOST_STATIC_ASSERT( sizeof(long long) == 8 );
 BOOST_STATIC_ASSERT( sizeof(double) == 8 );
+BOOST_STATIC_ASSERT( sizeof(mongo::OID) == 12 );
 
 namespace mongo {
 
