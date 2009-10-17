@@ -14,7 +14,7 @@ namespace mongo {
     mongo::BSONObj v8ToMongo( v8::Handle<v8::Object> o );
 
     void v8ToMongoElement( BSONObjBuilder & b , v8::Handle<v8::String> name , 
-                           const string sname , v8::Handle<v8::Value> value );
+                           const std::string sname , v8::Handle<v8::Value> value );
     v8::Handle<v8::Value> mongoToV8Element( const BSONElement &f );
     
     v8::Function * getNamedCons( const char * name );

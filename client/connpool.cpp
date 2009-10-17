@@ -23,6 +23,8 @@
 #include "connpool.h"
 #include "../db/commands.h"
 
+using namespace std;
+
 namespace mongo {
 
     DBConnectionPool pool;

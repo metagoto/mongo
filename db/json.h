@@ -33,7 +33,7 @@ namespace mongo {
      \throws MsgAssertionException if parsing fails.  The message included with
      this assertion includes a rough indication of where parsing failed.
     */
-    BSONObj fromjson(const string &str);
+    BSONObj fromjson(const std::string &str);
 
     BSONObj fromjson(const char *str);
 

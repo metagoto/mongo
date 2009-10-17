@@ -58,7 +58,7 @@ public:
                  filenamew.c_str(), GENERIC_WRITE | GENERIC_READ, FILE_SHARE_READ,
                  NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if( !is_open() ) {
-            out() << "CreateFile failed " << filename << endl;
+            out() << "CreateFile failed " << filename << std::endl;
         }
         else 
             _bad = false;
@@ -124,7 +124,7 @@ public:
     void open(const char *filename) {
         fd = ::open(filename, O_CREAT | O_RDWR | O_NOATIME, S_IRUSR | S_IWUSR);
         if ( fd <= 0 ) {
-            out() << "couldn't open " << filename << ' ' << errno << endl;
+            out() << "couldn't open " << filename << ' ' << errno << std::endl;
             return;
         }
         _bad = false;

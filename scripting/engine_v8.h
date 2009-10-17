@@ -24,7 +24,7 @@ namespace mongo {
         
         v8::Handle<v8::Value> get( const char * field );
         virtual double getNumber( const char *field );
-        virtual string getString( const char *field );
+        virtual std::string getString( const char *field );
         virtual bool getBoolean( const char *field );
         virtual BSONObj getObject( const char *field );
         
@@ -39,8 +39,8 @@ namespace mongo {
         
         virtual ScriptingFunction _createFunction( const char * code );
         virtual int invoke( ScriptingFunction func , const BSONObj& args, int timeoutMs = 0 , bool ignoreReturn = false );
-        virtual bool exec( const string& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs );
-        virtual string getError(){ return _error; }
+        virtual bool exec( const std::string& code , const std::string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs );
+        virtual std::string getError(){ return _error; }
         
         virtual void injectNative( const char *field, NativeFunction func ){
             Handle< FunctionTemplate > f( v8::FunctionTemplate::New( nativeCallback ) );
@@ -62,13 +62,13 @@ namespace mongo {
         Context::Scope _scope;
         Handle<v8::Object> _global;
 
-        string _error;
-        vector< v8::Handle<Value> > _funcs;
+        std::string _error;
+        std::vector< v8::Handle<Value> > _funcs;
         v8::Handle<v8::Object> _this;
 
         enum ConnectState { NOT , LOCAL , EXTERNAL };
         ConnectState _connectState;
-        string _localDBName;
+        std::string _localDBName;
     };
     
     class V8ScriptEngine : public ScriptEngine {

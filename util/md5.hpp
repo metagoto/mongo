@@ -21,7 +21,7 @@ namespace mongo {
     
     inline std::string digestToString( md5digest digest ){
         static const char * letters = "0123456789abcdef";
-        stringstream ss;
+        std::stringstream ss;
         for ( int i=0; i<16; i++){
             unsigned char c = digest[i];
             ss << letters[ ( c >> 4 ) & 0xf ] << letters[ c & 0xf ];
@@ -29,7 +29,7 @@ namespace mongo {
         return ss.str();
     }
 
-    inline std::string md5simpledigest( string s ){
+    inline std::string md5simpledigest( std::string s ){
         md5digest d;
         md5( s.c_str() , d );
         return digestToString( d );

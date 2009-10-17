@@ -35,7 +35,7 @@ namespace mongo {
     }
 
     /* use "addr2line -CFe <exe>" to parse. */
-    inline void printStackTrace( ostream &o = cout ) {
+    inline void printStackTrace( std::ostream &o = std::cout ) {
         void *b[20];
         size_t size;
         char **strings;
@@ -45,7 +45,7 @@ namespace mongo {
         strings = backtrace_symbols(b, size);
 
         for (i = 0; i < size; i++)
-            o << hex << b[i] << dec << ' ';
+            o << std::hex << b[i] << std::dec << ' ';
         o << '\n';
         for (i = 0; i < size; i++)
             o << ' ' << strings[i] << '\n';
@@ -53,7 +53,7 @@ namespace mongo {
         free (strings);
     }
 #else
-    inline void printStackTrace( ostream &o = cout ) { }
+    inline void printStackTrace( std::ostream &o = std::cout ) { }
 #endif
 
     /* set to TRUE if we are exiting */
@@ -64,7 +64,7 @@ namespace mongo {
        note this can be slow if there are a lot with the same key.
     */
     template<class C,class K,class V> inline typename C::iterator kv_find(C& c, const K& k,const V& v) {
-        pair<typename C::iterator,typename C::iterator> p = c.equal_range(k);
+        std::pair<typename C::iterator,typename C::iterator> p = c.equal_range(k);
 
         for ( typename C::iterator it=p.first; it!=p.second; ++it)
             if ( it->second == v )
@@ -85,16 +85,16 @@ namespace mongo {
             while ( len > 0 ) {
                 for ( int i = 0; i < 16; i++ ) {
                     if ( *p >= 32 && *p <= 126 )
-                        cout << *p;
+                        std::cout << *p;
                     else
-                        cout << '.';
+                        std::cout << '.';
                     p++;
                 }
-                cout << "  ";
+                std::cout << "  ";
                 p -= 16;
                 for ( int i = 0; i < 16; i++ )
-                    cout << (unsigned) ((unsigned char)*p++) << ' ';
-                cout << endl;
+                    std::cout << (unsigned) ((unsigned char)*p++) << ' ';
+                std::cout << std::endl;
                 len -= 16;
             }
         } catch (...) {
@@ -139,7 +139,7 @@ namespace mongo {
 
 namespace mongo {
 
-    inline void time_t_to_String(time_t t, char *buf) {
+    inline void time_t_to_String(std::time_t t, char *buf) {
 #if defined(_WIN32)
         ctime_s(buf, 64, &t);
 #else
@@ -335,7 +335,7 @@ namespace mongo {
     public:
         ProgressMeter( long long total , int secondsBetween = 3 , int checkInterval = 100 )
             : _total( total ) , _secondsBetween( secondsBetween ) , _checkInterval( checkInterval ) ,
-              _done(0) , _hits(0) , _lastTime( (int) time(0) ){
+              _done(0) , _hits(0) , _lastTime( (int) std::time(0) ){
         }
         
         bool hit( int n = 1 ){
@@ -344,13 +344,13 @@ namespace mongo {
             if ( _hits % _checkInterval )
                 return false;
             
-            int t = (int) time(0);
+            int t = (int) std::time(0);
             if ( t - _lastTime < _secondsBetween )
                 return false;
             
             if ( _total > 0 ){
                 int per = (int)( ( (double)_done * 100.0 ) / (double)_total );
-                cout << "\t\t" << _done << "/" << _total << "\t" << per << "%" << endl;
+                std::cout << "\t\t" << _done << "/" << _total << "\t" << per << "%" << std::endl;
             }
             _lastTime = t;
             return true;

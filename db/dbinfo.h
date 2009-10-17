@@ -30,7 +30,7 @@ namespace mongo {
        attributes will be added later.
     */
     class DBInfo {
-        string ns;
+        std::string ns;
         DBContext *context;
     public:
         ~DBInfo() {
@@ -38,12 +38,12 @@ namespace mongo {
         }
         DBInfo(const char *db)
         {
-            ns = string("local.dbinfo.") + db;
+            ns = std::string("local.dbinfo.") + db;
             context = new DBContext(ns);
         }
 
         BSONObj getDbInfoObj() {
-            auto_ptr<Cursor> c = DataFileMgr::findAll(ns.c_str());
+            std::auto_ptr<Cursor> c = DataFileMgr::findAll(ns.c_str());
             if ( !c->ok() )
                 return BSONObj();
             return c->current();

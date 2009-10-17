@@ -24,6 +24,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace BtreeTests {
 
     class Base {

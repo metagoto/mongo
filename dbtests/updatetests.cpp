@@ -27,6 +27,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace UpdateTests {
 
     class ClientBase {

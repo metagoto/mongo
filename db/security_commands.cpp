@@ -14,6 +14,8 @@
 #include "jsobj.h"
 #include "client.h"
 
+using namespace std;
+
 namespace mongo {
 
 /* authentication

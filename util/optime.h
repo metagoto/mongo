@@ -45,7 +45,7 @@ namespace mongo {
             i = 0;
         }
         static OpTime now() {
-            unsigned t = (unsigned) time(0);
+            unsigned t = (unsigned) std::time(0);
 //            DEV assertInWriteLock();
             if ( last.secs == t ) {
                 last.i++;
@@ -70,21 +70,21 @@ namespace mongo {
             return secs == 0;
         }
         
-        string toStringLong() const {
+        std::string toStringLong() const {
             char buf[64];
             time_t_to_String(secs, buf);
-            stringstream ss;
+            std::stringstream ss;
             ss << buf << ' ';
-            ss << hex << secs << ':' << i;
+            ss << std::hex << secs << ':' << i;
             return ss.str();
         }
         
-        string toString() const {
-            stringstream ss;
-            ss << hex << secs << ':' << i;
+        std::string toString() const {
+            std::stringstream ss;
+            ss << std::hex << secs << ':' << i;
             return ss.str();
         }
-        operator string() const { return toString(); }
+        operator std::string() const { return toString(); }
         bool operator==(const OpTime& r) const {
             return i == r.i && secs == r.secs;
         }

@@ -7,6 +7,8 @@
 #include "../db/commands.h"
 #include "server.h"
 
+using namespace std;
+
 namespace mongo {
 
     // ----- Strategy ------

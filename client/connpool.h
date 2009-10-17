@@ -53,15 +53,15 @@ namespace mongo {
     */
     class DBConnectionPool {
         boost::mutex poolMutex;
-        map<string,PoolForHost*> pools; // servername -> pool
-        list<DBConnectionHook*> _hooks;
+        std::map<std::string,PoolForHost*> pools; // servername -> pool
+        std::list<DBConnectionHook*> _hooks;
         
         void onCreate( DBClientBase * conn );
         void onHandedOut( DBClientBase * conn );
     public:
         void flush();
-        DBClientBase *get(const string& host);
-        void release(const string& host, DBClientBase *c) {
+        DBClientBase *get(const std::string& host);
+        void release(const std::string& host, DBClientBase *c) {
             if ( c->isFailed() )
                 return;
             boostlock L(poolMutex);
@@ -76,7 +76,7 @@ namespace mongo {
        clean up nicely.
     */
     class ScopedDbConnection {
-        const string host;
+        const std::string host;
         DBClientBase *_conn;
     public:
         /** get the associated connection object */
@@ -92,7 +92,7 @@ namespace mongo {
         }
 
         /** throws UserException if can't connect */
-        ScopedDbConnection(const string& _host) :
+        ScopedDbConnection(const std::string& _host) :
                 host(_host), _conn( pool.get(_host) ) {
             //cout << " for: " << _host << " got conn: " << _conn << endl;
         }
@@ -127,7 +127,7 @@ namespace mongo {
         ~ScopedDbConnection() {
             if ( _conn && ! _conn->isFailed() ) {
                 /* see done() comments above for why we log this line */
-                log() << "~ScopedDBConnection: _conn != null" << endl;
+                log() << "~ScopedDBConnection: _conn != null" << std::endl;
                 kill();
             }
         }

@@ -68,7 +68,7 @@ namespace mongo {
             b.append("ns", ns);
             b.append("query", query);
             b.append("inLock",  dbMutexInfo.isLocked());
-            stringstream clientStr;
+            std::stringstream clientStr;
             clientStr << inet_ntoa( client.sin_addr ) << ":" << ntohs( client.sin_port );
             b.append("client", clientStr.str());
             return b.obj();

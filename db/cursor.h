@@ -92,7 +92,7 @@ namespace mongo {
         /* called before query getmore block is iterated */
         virtual void checkLocation() { }
 
-        virtual string toString() {
+        virtual std::string toString() {
             return "abstract?";
         }
 
@@ -174,7 +174,7 @@ namespace mongo {
         BasicCursor(const AdvanceStrategy *_s = forward()) : s( _s ) {
             init();
         }
-        virtual string toString() {
+        virtual std::string toString() {
             return "BasicCursor";
         }
         virtual void setTailable() {
@@ -192,7 +192,7 @@ namespace mongo {
     public:
         ReverseCursor(DiskLoc dl) : BasicCursor( dl, reverse() ) { }
         ReverseCursor() : BasicCursor( reverse() ) { }
-        virtual string toString() {
+        virtual std::string toString() {
             return "ReverseCursor";
         }
     };
@@ -202,7 +202,7 @@ namespace mongo {
     class ForwardCappedCursor : public BasicCursor, public AdvanceStrategy {
     public:
         ForwardCappedCursor( NamespaceDetails *nsd = 0, const DiskLoc &startLoc = DiskLoc() );
-        virtual string toString() {
+        virtual std::string toString() {
             return "ForwardCappedCursor";
         }
         virtual DiskLoc next( const DiskLoc &prev ) const;
@@ -214,7 +214,7 @@ namespace mongo {
     class ReverseCappedCursor : public BasicCursor, public AdvanceStrategy {
     public:
         ReverseCappedCursor( NamespaceDetails *nsd = 0, const DiskLoc &startLoc = DiskLoc() );
-        virtual string toString() {
+        virtual std::string toString() {
             return "ReverseCappedCursor";
         }
         virtual DiskLoc next( const DiskLoc &prev ) const;

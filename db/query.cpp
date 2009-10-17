@@ -35,6 +35,8 @@
 #include "queryoptimizer.h"
 #include "lasterror.h"
 
+using namespace std;
+
 namespace mongo {
 
     /* We cut off further objects once we cross this threshold; thus, you might get

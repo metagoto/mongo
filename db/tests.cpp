@@ -22,6 +22,8 @@
 #include "stdafx.h"
 #include "../util/mmap.h"
 
+using namespace std;
+
 namespace mongo {
 
     int test2_old9() {

@@ -21,6 +21,8 @@
 #include "assert.h"
 #include "file.h"
 
+using namespace std;
+
 namespace mongo {
 
 	string getDbContext();

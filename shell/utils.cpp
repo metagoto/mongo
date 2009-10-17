@@ -21,6 +21,9 @@
 #include "../util/md5.hpp"
 #include "utils.h"
 
+using namespace std;
+using namespace boost::filesystem;
+
 namespace mongo {
 
     namespace shellUtils {

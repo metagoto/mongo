@@ -35,24 +35,24 @@ class RecCache {
     };
     boost::mutex &rcmutex; // mainly to coordinate with the lazy writer thread
     unsigned recsize;
-    map<DiskLoc, Node*> m; // the cache
+    std::map<DiskLoc, Node*> m; // the cache
     Node *newest, *oldest;
     unsigned nnodes;
-    set<DiskLoc> dirtyl;
-    vector<BasicRecStore*> stores; // DiskLoc::a() indicates the index into this vector
-    map<string, BasicRecStore*> storesByNsKey; // nskey -> BasicRecStore*
+    std::set<DiskLoc> dirtyl;
+    std::vector<BasicRecStore*> stores; // DiskLoc::a() indicates the index into this vector
+    std::map<std::string, BasicRecStore*> storesByNsKey; // nskey -> BasicRecStore*
 public:
     static unsigned MAXNODES;
     enum BaseValue { Base = 10000 };
 private:
-    BasicRecStore* _initStore(string fname);
+    BasicRecStore* _initStore(std::string fname);
     BasicRecStore* initStore(int n);
-    string findStoreFilename(const char *_ns, bool& found);
-    void initStoreByNs(const char *ns, const string& nskey);
+    std::string findStoreFilename(const char *_ns, bool& found);
+    void initStoreByNs(const char *ns, const std::string& nskey);
     void closeStore(BasicRecStore *rs);
 
-    static string directory();
-    static string mknskey(const char *ns) { 
+    static std::string directory();
+    static std::string mknskey(const char *ns) { 
         return directory() + ns;
     }
 
@@ -69,7 +69,7 @@ private:
         return *initStore(n);
     }
     BasicRecStore& store(const char *ns) {
-        string nskey = mknskey(ns);
+        std::string nskey = mknskey(ns);
         BasicRecStore *&rs = storesByNsKey[nskey];
         if( rs )
             return *rs;
@@ -77,7 +77,7 @@ private:
         return *rs;
     }
 
-    void writeDirty( set<DiskLoc>::iterator i, bool rawLog = false );
+    void writeDirty( std::set<DiskLoc>::iterator i, bool rawLog = false );
     void writeIfDirty(Node *n);
     void touch(Node* n) { 
         if( n == newest )
@@ -141,7 +141,7 @@ public:
     void dirty(DiskLoc d) {
         assert( d.a() >= Base );
         boostlock lk(rcmutex);
-        map<DiskLoc, Node*>::iterator i = m.find(d);
+        std::map<DiskLoc, Node*>::iterator i = m.find(d);
         if( i != m.end() ) {
             Node *n = i->second;
             if( !n->dirty ) { 
@@ -156,7 +156,7 @@ public:
         assert( len == recsize );
 
         boostlock lk(rcmutex);
-        map<DiskLoc, Node*>::iterator i = m.find(d);
+        std::map<DiskLoc, Node*>::iterator i = m.find(d);
         if( i != m.end() ) {
             touch(i->second);
             return i->second->data;
@@ -165,7 +165,7 @@ public:
         Node *n = mkNode();
         n->loc = d;
         store(d).get(fileOfs(d), n->data, recsize); // could throw exception
-        m.insert( pair<DiskLoc, Node*>(d, n) );
+        m.insert( std::pair<DiskLoc, Node*>(d, n) );
         return n->data;
     }
 
@@ -186,7 +186,7 @@ public:
         return d;
     }
 
-    void closeFiles(string dbname, string path);
+    void closeFiles(std::string dbname, std::string path);
 
     // at termination: write dirty pages and close all files
     void closing();
@@ -218,7 +218,7 @@ public:
     }
 
     /* close datafiles associated with the db specified. */
-    virtual void closeFiles(string dbname, string path) {
+    virtual void closeFiles(std::string dbname, std::string path) {
         theRecCache.closeFiles(dbname, dbpath);
     }
 };

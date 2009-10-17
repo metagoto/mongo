@@ -46,8 +46,8 @@ namespace mongo {
            requested sort order */
         bool unhelpful() const { return unhelpful_; }
         int direction() const { return direction_; }
-        auto_ptr< Cursor > newCursor( const DiskLoc &startLoc = DiskLoc() ) const;
-        auto_ptr< Cursor > newReverseCursor() const;
+        std::auto_ptr< Cursor > newCursor( const DiskLoc &startLoc = DiskLoc() ) const;
+        std::auto_ptr< Cursor > newReverseCursor() const;
         BSONObj indexKey() const;
         const char *ns() const { return fbs_.ns(); }
         BSONObj query() const { return fbs_.query(); }
@@ -84,11 +84,11 @@ namespace mongo {
         virtual QueryOp *clone() const = 0;
         bool complete() const { return complete_; }
         bool error() const { return error_; }
-        string exceptionMessage() const { return exceptionMessage_; }
+        std::string exceptionMessage() const { return exceptionMessage_; }
         const QueryPlan &qp() const { return *qp_; }
         // To be called by QueryPlanSet::Runner only.
         void setQueryPlan( const QueryPlan *qp ) { qp_ = qp; }
-        void setExceptionMessage( const string &exceptionMessage ) {
+        void setExceptionMessage( const std::string &exceptionMessage ) {
             error_ = true;
             exceptionMessage_ = exceptionMessage;
         }
@@ -96,7 +96,7 @@ namespace mongo {
         void setComplete() { complete_ = true; }
     private:
         bool complete_;
-        string exceptionMessage_;
+        std::string exceptionMessage_;
         const QueryPlan *qp_;
         bool error_;
     };
@@ -113,9 +113,9 @@ namespace mongo {
                      const BSONObj &min = BSONObj(),
                      const BSONObj &max = BSONObj() );
         int nPlans() const { return plans_.size(); }
-        shared_ptr< QueryOp > runOp( QueryOp &op );
+        boost::shared_ptr< QueryOp > runOp( QueryOp &op );
         template< class T >
-        shared_ptr< T > runOp( T &op ) {
+        boost::shared_ptr< T > runOp( T &op ) {
             return dynamic_pointer_cast< T >( runOp( static_cast< QueryOp& >( op ) ) );
         }
         const FieldRangeSet &fbs() const { return fbs_; }
@@ -124,7 +124,7 @@ namespace mongo {
     private:
         void addOtherPlans( bool checkFirst );
         typedef boost::shared_ptr< QueryPlan > PlanPtr;
-        typedef vector< PlanPtr > PlanSet;
+        typedef std::vector< PlanPtr > PlanSet;
         void addPlan( PlanPtr plan, bool checkFirst ) {
             if ( checkFirst && plan->indexKey().woCompare( plans_[ 0 ]->indexKey() ) == 0 )
                 return;
@@ -134,7 +134,7 @@ namespace mongo {
         void addHint( IndexDetails &id );
         struct Runner {
             Runner( QueryPlanSet &plans, QueryOp &op );
-            shared_ptr< QueryOp > run();
+            boost::shared_ptr< QueryOp > run();
             QueryOp &op_;
             QueryPlanSet &plans_;
             static void initOp( QueryOp &op );
@@ -154,6 +154,6 @@ namespace mongo {
     };
 
     // NOTE min, max, and keyPattern will be updated to be consistent with the selected index.
-    IndexDetails *indexDetailsForRange( const char *ns, string &errmsg, BSONObj &min, BSONObj &max, BSONObj &keyPattern );
+    IndexDetails *indexDetailsForRange( const char *ns, std::string &errmsg, BSONObj &min, BSONObj &max, BSONObj &keyPattern );
         
 } // namespace mongo

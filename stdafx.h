@@ -65,7 +65,7 @@ namespace mongo {
      */
     void exit( ExitCode returnCode );
     bool inShutdown();
-    
+
 } // namespace mongo
 
 #include <memory>
@@ -85,7 +85,7 @@ namespace mongo {
 #include "string.h"
 #include "limits.h"
 
-using namespace std;
+///using namespace std;
 
 #undef yassert
 #include <boost/archive/iterators/base64_from_binary.hpp>
@@ -117,7 +117,7 @@ using namespace std;
 #undef assert
 #define assert xassert
 #define yassert 1
-using namespace boost::filesystem;
+///using namespace boost::filesystem;
 
 #include "util/debug_util.h"
 #include "util/goodies.h"
@@ -128,7 +128,7 @@ using namespace boost::filesystem;
 namespace mongo {
 
     void sayDbContext(const char *msg = 0);
-    void rawOut( const string &s );
+    void rawOut( const std::string &s );
 
 } // namespace mongo
 
@@ -136,7 +136,7 @@ namespace mongo {
 
     const char * gitVersion();
     const char * sysInfo();
-    string mongodVersion();
+    std::string mongodVersion();
     
     void printGitVersion();
     void printSysInfo();

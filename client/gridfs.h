@@ -49,7 +49,7 @@ namespace mongo {
          * @param dbName - root database name
          * @param prefix - if you want your data somewhere besides <dbname>.fs
          */
-        GridFS( DBClientBase& client , const string& dbName , const string& prefix="fs" );
+        GridFS( DBClientBase& client , const std::string& dbName , const std::string& prefix="fs" );
         ~GridFS();
 
         /**
@@ -61,7 +61,7 @@ namespace mongo {
          *                    (default is to omit)
          * @return the file object
          */
-        BSONObj storeFile( const string& fileName , const string& remoteName="" , const string& contentType="");
+        BSONObj storeFile( const std::string& fileName , const std::string& remoteName="" , const std::string& contentType="");
 
         /**
          * puts the file represented by data into the db
@@ -73,13 +73,13 @@ namespace mongo {
          *                    (default is to omit)
          * @return the file object
          */
-        BSONObj storeFile( const char* data , size_t length , const string& remoteName , const string& contentType);
+        BSONObj storeFile( const char* data , size_t length , const std::string& remoteName , const std::string& contentType);
         /**
          * removes file referenced by fileName from the db
          * @param fileName filename (in GridFS) of the file to remove
          * @return the file object
          */
-        void removeFile( const string& fileName );
+        void removeFile( const std::string& fileName );
 
         /**
          * returns a file object matching the query
@@ -89,27 +89,27 @@ namespace mongo {
         /**
          * equiv to findFile( { filename : filename } )
          */
-        GridFile findFile( const string& fileName );
+        GridFile findFile( const std::string& fileName );
 
         /**
          * convenience method to get all the files
          */
-        auto_ptr<DBClientCursor> list();
+        std::auto_ptr<DBClientCursor> list();
 
         /**
          * convenience method to get all the files with a filter
          */
-        auto_ptr<DBClientCursor> list( BSONObj query );
+        std::auto_ptr<DBClientCursor> list( BSONObj query );
 
     private:
         DBClientBase& _client;
-        string _dbName;
-        string _prefix;
-        string _filesNS;
-        string _chunksNS;
+        std::string _dbName;
+        std::string _prefix;
+        std::string _filesNS;
+        std::string _chunksNS;
 
         // insert fileobject. All chunks must be in DB.
-        BSONObj insertFile(const string& name, const OID& id, unsigned length, const string& contentType);
+        BSONObj insertFile(const std::string& name, const OID& id, unsigned length, const std::string& contentType);
 
         friend class GridFile;
     };
@@ -127,7 +127,7 @@ namespace mongo {
             return ! _obj.isEmpty();
         }
 
-        string getFilename(){
+        std::string getFilename(){
             return _obj["filename"].str();
         }
 
@@ -143,7 +143,7 @@ namespace mongo {
             return _obj["uploadDate"].date();
         }
 
-        string getMD5(){
+        std::string getMD5(){
             return _obj["md5"].str();
         }
 
@@ -158,12 +158,12 @@ namespace mongo {
         /**
            write the file to the output stream
          */
-        gridfs_offset write( ostream & out );
+        gridfs_offset write( std::ostream & out );
 
         /**
            write the file to this filename
          */
-        gridfs_offset write( const string& where );
+        gridfs_offset write( const std::string& where );
 
     private:
         GridFile( GridFS * grid , BSONObj obj );

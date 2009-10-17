@@ -27,6 +27,8 @@
 #include "instance.h"
 #include "repl.h"
 
+using namespace std;
+
 namespace mongo {
 
     void ensureHaveIdIndex(const char *ns);

@@ -49,15 +49,15 @@ namespace mongo {
         };
 
         int state;
-        string info; // commentary about our current state
-        string arbHost;  // "-" for no arbiter.  "host[:port]"
+        std::string info; // commentary about our current state
+        std::string arbHost;  // "-" for no arbiter.  "host[:port]"
         int remotePort;
-        string remoteHost;
-        string remote; // host:port if port specified.
+        std::string remoteHost;
+        std::string remote; // host:port if port specified.
 //    int date; // -1 not yet set; 0=slave; 1=master
 
-        string getInfo() {
-            stringstream ss;
+        std::string getInfo() {
+            std::stringstream ss;
             ss << "  state:   ";
             if ( state == 1 ) ss << "1 State_Master ";
             else if ( state == 0 ) ss << "0 State_Slave";
@@ -74,7 +74,7 @@ namespace mongo {
         ReplPair(const char *remoteEnd, const char *arbiter);
         virtual ~ReplPair() {}
 
-        bool dominant(const string& myname) {
+        bool dominant(const std::string& myname) {
             if ( myname == remoteHost )
                 return cmdLine.port > remotePort;
             return myname > remoteHost;
@@ -88,7 +88,7 @@ namespace mongo {
         void setMaster(int n, const char *_comment = "");
 
         /* negotiate with our peer who is master; returns state of peer */
-        int negotiate(DBClientConnection *conn, string method);
+        int negotiate(DBClientConnection *conn, std::string method);
 
         /* peer unreachable, try our arbitrator */
         void arbitrate();
@@ -150,7 +150,7 @@ namespace mongo {
         remoteHost = remoteEnd;
         const char *p = strchr(remoteEnd, ':');
         if ( p ) {
-            remoteHost = string(remoteEnd, p-remoteEnd);
+            remoteHost = std::string(remoteEnd, p-remoteEnd);
             remotePort = atoi(p+1);
             uassert("bad port #", remotePort > 0 && remotePort < 0x10000 );
             if ( remotePort == CmdLine::DefaultDBPort )

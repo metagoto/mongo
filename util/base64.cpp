@@ -19,6 +19,8 @@
 
 #include "stdafx.h"
 
+using namespace std;
+
 namespace mongo {
     namespace base64 {
         

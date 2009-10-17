@@ -23,6 +23,8 @@
 #include "pdfile.h"
 #include "queryoptimizer.h"
 
+using namespace std;
+
 namespace mongo {
     
     FieldRange::FieldRange( const BSONElement &e, bool optimize ) {

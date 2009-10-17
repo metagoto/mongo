@@ -5,6 +5,8 @@
 #include "message.h"
 #include "message_server.h"
 
+using namespace std;
+
 namespace mongo {
 
     namespace pms {

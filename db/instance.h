@@ -37,22 +37,22 @@ namespace mongo {
 
     int getOpLogging();
 
-    extern string dbExecCommand;
+    extern std::string dbExecCommand;
 
 #define OPWRITE if( getOpLogging() & 1 ) _oplog.write((char *) m.data, m.data->len);
 #define OPREAD if( getOpLogging() & 2 ) _oplog.readop((char *) m.data, m.data->len);
 
     struct OpLog {
-        ofstream *f;
+        std::ofstream *f;
         OpLog() : f(0) { }
         void init() {
             OPLOG {
-                stringstream ss;
-                ss << "oplog." << hex << time(0);
-                string name = ss.str();
-                f = new ofstream(name.c_str(), ios::out | ios::binary);
+                std::stringstream ss;
+                ss << "oplog." << std::hex << std::time(0);
+                std::string name = ss.str();
+                f = new std::ofstream(name.c_str(), std::ios::out | std::ios::binary);
                 if ( ! f->good() ) {
-                    problem() << "couldn't open log stream" << endl;
+                    problem() << "couldn't open log stream" << std::endl;
                     throw 1717;
                 }
             }
@@ -94,12 +94,12 @@ namespace mongo {
     bool assembleResponse( Message &m, DbResponse &dbresponse, const sockaddr_in &client = unknownAddress.sa );
 
     void receivedKillCursors(Message& m);
-    void receivedUpdate(Message& m, stringstream& ss);
-    void receivedDelete(Message& m, stringstream& ss);
-    void receivedInsert(Message& m, stringstream& ss);
-    void receivedGetMore(DbResponse& dbresponse, /*AbstractMessagingPort& dbMsgPort, */Message& m, stringstream& ss);
-    void receivedQuery(DbResponse& dbresponse, /*AbstractMessagingPort& dbMsgPort, */Message& m, stringstream& ss, bool logit);
-    void getDatabaseNames( vector< string > &names );
+    void receivedUpdate(Message& m, std::stringstream& ss);
+    void receivedDelete(Message& m, std::stringstream& ss);
+    void receivedInsert(Message& m, std::stringstream& ss);
+    void receivedGetMore(DbResponse& dbresponse, /*AbstractMessagingPort& dbMsgPort, */Message& m, std::stringstream& ss);
+    void receivedQuery(DbResponse& dbresponse, /*AbstractMessagingPort& dbMsgPort, */Message& m, std::stringstream& ss, bool logit);
+    void getDatabaseNames( std::vector< std::string > &names );
 
     // must call with db lock
     void registerListenerSocket( int socket );
@@ -110,10 +110,10 @@ namespace mongo {
         virtual bool isFailed() const {
             return false;
         }
-        virtual string toString() {
+        virtual std::string toString() {
             return "DBDirectClient";
         }
-        virtual string getServerAddress() const{
+        virtual std::string getServerAddress() const{
             return "localhost"; // TODO: should this have the port?
         }
         virtual bool call( Message &toSend, Message &response, bool assertOk=true );
@@ -150,7 +150,7 @@ namespace mongo {
         private:
             static AlwaysAuthorized always;
             AuthenticationInfo *oldAuth;
-            string oldName;
+            std::string oldName;
         };
     };
 

@@ -38,7 +38,7 @@ namespace mongo {
     };
 
     class AuthenticationInfo : boost::noncopyable {
-        map<string, Auth> m; // dbname -> auth
+        std::map<std::string, Auth> m; // dbname -> auth
 		static int warned;
     public:
 		bool isLocalHost;
@@ -65,7 +65,7 @@ namespace mongo {
 					return false;
 				if( warned == 0 ) {
 					warned++;
-					log() << "warning: no users configured in admin.system.users, allowing localhost access" << endl;
+					log() << "warning: no users configured in admin.system.users, allowing localhost access" << std::endl;
 				}
 				return true;
 			}

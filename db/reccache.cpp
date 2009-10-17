@@ -6,6 +6,9 @@
 #include "rec.h"
 #include "db.h"
 
+using namespace std;
+using namespace boost::filesystem;
+
 namespace mongo {
 
 RecCache theRecCache(BucketSize);

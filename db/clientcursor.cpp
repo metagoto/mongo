@@ -29,6 +29,8 @@
 #include "db.h"
 #include "commands.h"
 
+using namespace std;
+
 namespace mongo {
 
     CCById ClientCursor::clientCursorsById;

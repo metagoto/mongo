@@ -162,7 +162,7 @@ namespace mongo {
         int ntoreturn;
         int queryOptions;
         BSONObj query;
-        auto_ptr< FieldMatcher > fields;
+        std::auto_ptr< FieldMatcher > fields;
         
         /* parses the message into the above fields */
         QueryMessage(DbMessage& d) {
@@ -171,7 +171,7 @@ namespace mongo {
             ntoreturn = d.pullInt();
             query = d.nextJsObj();
             if ( d.moreJSObjs() ) {
-                fields = auto_ptr< FieldMatcher >(new FieldMatcher() );
+                fields = std::auto_ptr< FieldMatcher >(new FieldMatcher() );
                 fields->add( d.nextJsObj() );
                 if ( fields->size() == 0 )
                     fields.reset();

@@ -48,7 +48,7 @@ namespace mongo {
         static void updateLength( const char *filename, long &length );
         
         static long long totalMappedLength();
-        static void closeAllFiles( stringstream &message );
+        static void closeAllFiles( std::stringstream &message );
         
     private:
         void created();

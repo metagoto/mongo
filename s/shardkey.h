@@ -102,7 +102,7 @@ namespace mongo {
 
         BSONObj key() { return pattern; }
 
-        string toString() const;
+        std::string toString() const;
 
         ShardKeyPattern(const ShardKeyPattern& p) { 
             pattern = p.pattern;
@@ -114,7 +114,7 @@ namespace mongo {
     private:
         /* question: better to have patternfields precomputed or not?  depends on if we use copy contructor often. */
         BSONObj pattern;
-        set<string> patternfields;
+        std::set<std::string> patternfields;
         bool relevant(const BSONObj& query, BSONObj& L, BSONObj& R);
     };
 

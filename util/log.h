@@ -24,7 +24,7 @@ namespace mongo {
     class LazyString {
     public:
         virtual ~LazyString() {}
-        virtual string val() const = 0;
+        virtual std::string val() const = 0;
     };
 
     // Utility class for stringifying object only when val() called.
@@ -32,7 +32,7 @@ namespace mongo {
     class LazyStringImpl : public LazyString {
     public:
         LazyStringImpl( const T &t ) : t_( t ) {}
-        virtual string val() const { return (string)t_; }
+        virtual std::string val() const { return (std::string)t_; }
     private:
         const T& t_;
     };
@@ -94,17 +94,17 @@ namespace mongo {
             return operator<<( static_cast<const void*>( t ) );
         }        
         template< class T >
-        Nullstream& operator<<(const shared_ptr<T> p ){
+        Nullstream& operator<<(const boost::shared_ptr<T> p ){
             return *this;
         }
         template< class T >
         Nullstream& operator<<(const T &t) {
             return operator<<( static_cast<const LazyString&>( LazyStringImpl< T >( t ) ) );
         }
-        virtual Nullstream& operator<< (ostream& ( *endl )(ostream&)) {
+        virtual Nullstream& operator<< (std::ostream& ( *endl )(std::ostream&)) {
             return *this;
         }
-        virtual Nullstream& operator<< (ios_base& (*hex)(ios_base&)) {
+        virtual Nullstream& operator<< (std::ios_base& (*hex)(std::ios_base&)) {
             return *this;
         }
         virtual void flush(){}
@@ -115,13 +115,13 @@ namespace mongo {
 
     class Logstream : public Nullstream {
         static boost::mutex &mutex;
-        stringstream ss;
+        std::stringstream ss;
     public:
         void flush() {
             {
                 boostlock lk(mutex);
-                cout << ss.str();
-                cout.flush();
+                std::cout << ss.str();
+                std::cout.flush();
             }
             ss.str("");
         }
@@ -143,18 +143,18 @@ namespace mongo {
             ss << x.val();
             return *this;
         }
-        Logstream& operator<< (ostream& ( *_endl )(ostream&)) {
+        Logstream& operator<< (std::ostream& ( *_endl )(std::ostream&)) {
             ss << '\n';
             flush();
             return *this;
         }
-        Logstream& operator<< (ios_base& (*_hex)(ios_base&)) {
+        Logstream& operator<< (std::ios_base& (*_hex)(std::ios_base&)) {
             ss << _hex;
             return *this;
         }
 
         template< class T >
-        Nullstream& operator<<(const shared_ptr<T> p ){
+        Nullstream& operator<<(const boost::shared_ptr<T> p ){
             T * t = p.get();
             if ( ! t )
                 *this << "null";
@@ -165,7 +165,7 @@ namespace mongo {
 
         Logstream& prolog() {
             char now[64];
-            time_t_to_String(time(0), now);
+            time_t_to_String(std::time(0), now);
             now[20] = 0;
             ss << now;
             return *this;
@@ -211,8 +211,8 @@ namespace mongo {
     }
 
     /* TODOCONCURRENCY */
-    inline ostream& stdcout() {
-        return cout;
+    inline std::ostream& stdcout() {
+        return std::cout;
     }
 
     /* default impl returns "" -- mongod overrides */
@@ -230,6 +230,6 @@ namespace mongo {
        log to a file rather than stdout
        defined in assert_util.cpp 
      */
-    void initLogging( const string& logpath , bool append );
+    void initLogging( const std::string& logpath , bool append );
 
 } // namespace mongo

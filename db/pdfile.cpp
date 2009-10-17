@@ -40,6 +40,8 @@ _ disallow system* manipulations from the database.
 #include "queryutil.h"
 #include "extsort.h"
 
+using namespace std;
+
 namespace mongo {
 
     string dbpath = "/data/db/";

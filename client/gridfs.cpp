@@ -14,6 +14,8 @@
 #define MIN(a,b) ( (a) < (b) ? (a) : (b) )
 #endif
 
+using namespace std;
+
 namespace mongo {
 
     const unsigned DEFAULT_CHUNK_SIZE = 256 * 1024;

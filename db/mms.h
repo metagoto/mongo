@@ -20,21 +20,21 @@ namespace mongo {
         /**
            e.g. http://mms.10gen.com/ping/
          */
-        void setBaseUrl( const string& host );
+        void setBaseUrl( const std::string& host );
         
-        void setToken( const string& s ){ token = s; }
-        void setName( const string& s ){ name = s; }
+        void setToken( const std::string& s ){ token = s; }
+        void setName( const std::string& s ){ name = s; }
 
         void setPingInterval( int seconds ){ secsToSleep = seconds; }
 
         void run();
 
     private:
-        string baseurl;
+        std::string baseurl;
         int secsToSleep;
         
-        string token;
-        string name;
+        std::string token;
+        std::string name;
 
     };
 

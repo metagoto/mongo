@@ -28,7 +28,7 @@ namespace mongo {
         virtual void externalSetup() = 0;
         
         virtual double getNumber( const char *field ) = 0;
-        virtual string getString( const char *field ) = 0;
+        virtual std::string getString( const char *field ) = 0;
         virtual bool getBoolean( const char *field ) = 0;
         virtual BSONObj getObject( const char *field ) = 0;
 
@@ -52,20 +52,20 @@ namespace mongo {
         void invokeSafe( ScriptingFunction func , const BSONObj& args, int timeoutMs = 0 ){
             assert( invoke( func , args , timeoutMs ) == 0 );
         }
-        virtual string getError() = 0;
+        virtual std::string getError() = 0;
         
         int invoke( const char* code , const BSONObj& args, int timeoutMs = 0 );
         void invokeSafe( const char* code , const BSONObj& args, int timeoutMs = 0 ){
             if ( invoke( code , args , timeoutMs ) == 0 )
                 return;
-            throw UserException( (string)"invoke failed: " + getError() );
+            throw UserException( (std::string)"invoke failed: " + getError() );
         }
 
-        virtual bool exec( const string& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ) = 0;
-        virtual void execSetup( const string& code , const string& name = "setup" ){
+        virtual bool exec( const std::string& code , const std::string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ) = 0;
+        virtual void execSetup( const std::string& code , const std::string& name = "setup" ){
             exec( code , name , false , true , true , 0 );
         }
-        virtual bool execFile( const string& filename , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 );
+        virtual bool execFile( const std::string& filename , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 );
         
         virtual void injectNative( const char *field, NativeFunction func ) = 0;
 
@@ -87,10 +87,10 @@ namespace mongo {
 
         virtual ScriptingFunction _createFunction( const char * code ) = 0;
 
-        string _localDBName;
+        std::string _localDBName;
         long long _loadedVersion;
         static long long _lastVersion;
-        map<string,ScriptingFunction> _cachedFunctions;
+        std::map<std::string,ScriptingFunction> _cachedFunctions;
 
         static int _numScopes;
     };
@@ -108,7 +108,7 @@ namespace mongo {
 
         static void setup();
 
-        auto_ptr<Scope> getPooledScope( const string& pool );
+        std::auto_ptr<Scope> getPooledScope( const std::string& pool );
         void threadDone();
     };
 

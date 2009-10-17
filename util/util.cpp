@@ -23,6 +23,8 @@
 #include "file_allocator.h"
 #include "optime.h"
 
+using namespace std;
+
 namespace mongo {
 
     vector<UnitTest*> *UnitTest::tests = 0;

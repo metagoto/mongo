@@ -27,6 +27,8 @@
 #include "db.h"
 #include "client.h"
 
+using namespace std;
+
 namespace mongo {
     
     //#include "minilex.h"

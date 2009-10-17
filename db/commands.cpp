@@ -21,6 +21,8 @@
 #include "jsobj.h"
 #include "commands.h"
 
+using namespace std;
+
 namespace mongo {
 
     map<string,Command*> *commands;

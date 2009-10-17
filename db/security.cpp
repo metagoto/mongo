@@ -21,6 +21,8 @@
 #include "instance.h"
 #include "client.h"
 
+using namespace std;
+
 namespace mongo {
 
     boost::thread_specific_ptr<Client> currentClient;

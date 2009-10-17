@@ -74,14 +74,14 @@ namespace mongo {
     */
     class DBContext {
         Database *olddb;
-        string oldns;
+        std::string oldns;
     public:
         DBContext(const char *ns) {
             olddb = cc().database();
             oldns = cc().ns();
             setClient(ns);
         }
-        DBContext(string ns) {
+        DBContext(std::string ns) {
             olddb = cc().database();
             oldns = cc().ns();
             setClient(ns.c_str());
@@ -101,16 +101,16 @@ namespace mongo {
     // manage a set using collection backed storage
     class DbSet {
     public:
-        DbSet( const string &name = "", const BSONObj &key = BSONObj() ) :
+        DbSet( const std::string &name = "", const BSONObj &key = BSONObj() ) :
         name_( name ),
         key_( key.getOwned() ) {
         }
         ~DbSet();
-        void reset( const string &name = "", const BSONObj &key = BSONObj() );
+        void reset( const std::string &name = "", const BSONObj &key = BSONObj() );
         bool get( const BSONObj &obj ) const;
         void set( const BSONObj &obj, bool val );
     private:
-        string name_;
+        std::string name_;
         BSONObj key_;
     };
     

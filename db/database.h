@@ -26,7 +26,7 @@ namespace mongo {
 
     class Database {
     public:
-        Database(const char *nm, bool& newDb, const string& _path = dbpath) :
+        Database(const char *nm, bool& newDb, const std::string& _path = dbpath) :
         name(nm),
         path(_path),
         namespaceIndex( path, name )
@@ -60,7 +60,7 @@ namespace mongo {
 
             namespaceIndex.init();
             if ( n < 0 || n >= DiskLoc::MaxFiles ) {
-                out() << "getFile(): n=" << n << endl;
+                out() << "getFile(): n=" << n << std::endl;
 #if !defined(_RECSTORE)
                 if( n >= RecCache::Base && n <= RecCache::Base+1000 )
                     massert("getFile(): bad file number - using recstore db w/nonrecstore db build?", false);
@@ -69,7 +69,7 @@ namespace mongo {
             }
             DEV {
                 if ( n > 100 )
-                    out() << "getFile(): n=" << n << "?" << endl;
+                    out() << "getFile(): n=" << n << "?" << std::endl;
             }
             MongoDataFile* p = 0;
             if ( !preallocateOnly ) {
@@ -78,11 +78,11 @@ namespace mongo {
                 p = files[n];
             }
             if ( p == 0 ) {
-                stringstream ss;
+                std::stringstream ss;
                 ss << name << '.' << n;
                 boost::filesystem::path fullName;
                 fullName = boost::filesystem::path(path) / ss.str();
-                string fullNameString = fullName.string();
+                std::string fullNameString = fullName.string();
                 p = new MongoDataFile(n);
                 int minSize = 0;
                 if ( n != 0 && files[ n - 1 ] )
@@ -138,12 +138,12 @@ namespace mongo {
 
         void finishInit(); // ugly...
 
-        vector<MongoDataFile*> files;
-        string name; // "alleyinsider"
-        string path;
+        std::vector<MongoDataFile*> files;
+        std::string name; // "alleyinsider"
+        std::string path;
         NamespaceIndex namespaceIndex;
         int profile; // 0=off.
-        string profileName; // "alleyinsider.system.profile"
+        std::string profileName; // "alleyinsider.system.profile"
 
     };
 

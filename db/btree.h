@@ -141,19 +141,19 @@ namespace mongo {
     public:
         DiskLoc parent;
 
-        string bucketSummary() const {
-            stringstream ss;
-            ss << "  Bucket info:" << endl;
-            ss << "    n: " << n << endl;
-            ss << "    parent: " << parent.toString() << endl;
-            ss << "    nextChild: " << parent.toString() << endl;
-            ss << "    Size: " << _Size << " flags:" << flags << endl;
-            ss << "    emptySize: " << emptySize << " topSize: " << topSize << endl;
+        std::string bucketSummary() const {
+            std::stringstream ss;
+            ss << "  Bucket info:" << std::endl;
+            ss << "    n: " << n << std::endl;
+            ss << "    parent: " << parent.toString() << std::endl;
+            ss << "    nextChild: " << parent.toString() << std::endl;
+            ss << "    Size: " << _Size << " flags:" << flags << std::endl;
+            ss << "    emptySize: " << emptySize << " topSize: " << topSize << std::endl;
             return ss.str();
         }
 
     protected:
-        void _shape(int level, stringstream&);
+        void _shape(int level, std::stringstream&);
         DiskLoc nextChild; // child bucket off and to the right of the highest key.
         int _Size; // total size of this btree node in bytes. constant.
         int Size() const;
@@ -205,7 +205,7 @@ namespace mongo {
         DiskLoc getHead(const DiskLoc& thisLoc);
 
         /* get tree shape */
-        void shape(stringstream&);
+        void shape(std::stringstream&);
 
         static void a_test(IndexDetails&);
     private:
@@ -226,7 +226,7 @@ namespace mongo {
         static void findLargestKey(const DiskLoc& thisLoc, DiskLoc& largestLoc, int& largestKey);
     public:
         // simply builds and returns a dup key error message string
-        static string dupKeyError( const IndexDetails& idx , const BSONObj& key );
+        static std::string dupKeyError( const IndexDetails& idx , const BSONObj& key );
     };
 
     class BtreeCursor : public Cursor {
@@ -254,10 +254,10 @@ namespace mongo {
                          for backwards datafile compatibility.  'deep' can be eliminated next time we 
                          force a data file conversion. 7Jul09
         */
-        set<DiskLoc> dups;
+        std::set<DiskLoc> dups;
         virtual bool getsetdup(bool deep, DiskLoc loc) {
             if( deep || multikey ) { 
-                pair<set<DiskLoc>::iterator, bool> p = dups.insert(loc);
+                std::pair<std::set<DiskLoc>::iterator, bool> p = dups.insert(loc);
                 return !p.second;
             }
             return false;
@@ -298,8 +298,8 @@ namespace mongo {
         virtual BSONObj current() {
             return BSONObj(_current());
         }
-        virtual string toString() {
-            string s = string("BtreeCursor ") + indexDetails.indexName();
+        virtual std::string toString() {
+            std::string s = std::string("BtreeCursor ") + indexDetails.indexName();
             if ( direction < 0 ) s += " reverse";
             if ( bounds_.size() > 1 ) s += " multi";
             return s;

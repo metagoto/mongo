@@ -42,7 +42,7 @@ namespace mongo {
 
     const char * findEd();
     const char * findEd(const char *);
-    const string findJars();
+    const std::string findJars();
 
     class BSONObj;
 
@@ -58,7 +58,7 @@ namespace mongo {
         void scopeFree( jlong id );
 
         double scopeGetNumber( jlong id , const char * field );
-        string scopeGetString( jlong id , const char * field );
+        std::string scopeGetString( jlong id , const char * field );
         jboolean scopeGetBoolean( jlong id , const char * field );
         BSONObj scopeGetObject( jlong id , const char * field );
         char scopeGetType( jlong id , const char * field );
@@ -172,7 +172,7 @@ namespace mongo {
         double getNumber(const char *field) {
             return JavaJS->scopeGetNumber(s,field);
         }
-        string getString(const char *field) {
+        std::string getString(const char *field) {
             return JavaJS->scopeGetString(s,field);
         }
         bool getBoolean(const char *field) {
@@ -212,7 +212,7 @@ namespace mongo {
             return JavaJS->invoke(s,function);
         }
         
-        string getError(){
+        std::string getError(){
             return getString( "error" );
         }
 

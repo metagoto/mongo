@@ -88,7 +88,7 @@ namespace mongo {
             append((void*) str, strlen(str)+1);
         }
         
-        void append(const string &str) {
+        void append(const std::string &str) {
             append( (void *)str.c_str(), str.length() + 1 );
         }
 

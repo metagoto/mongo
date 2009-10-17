@@ -25,6 +25,8 @@
 #include "client.h"
 #include "dbhelpers.h"
 
+using namespace std;
+
 namespace mongo {
 
 #define VERIFYTHISLOC dassert( thisLoc.btree() == this );

@@ -23,6 +23,8 @@
 #include "../client/connpool.h"
 #include "strategy.h"
 
+using namespace std;
+
 namespace mongo {
 
     // -------  Shard --------

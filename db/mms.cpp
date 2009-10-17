@@ -6,6 +6,8 @@
 #include "instance.h"
 #include "../util/httpclient.h"
 
+using namespace std;
+
 namespace mongo {
     
     MMS::MMS() : 

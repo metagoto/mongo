@@ -22,7 +22,9 @@
 
 #include <fcntl.h>
 
+using namespace std;
 using namespace mongo;
+using namespace boost::filesystem;
 
 namespace po = boost::program_options;
 

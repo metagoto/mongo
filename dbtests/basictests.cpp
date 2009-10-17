@@ -22,6 +22,8 @@
 #include "dbtests.h"
 #include "../util/base64.h"
 
+using namespace std;
+
 namespace BasicTests {
 
     class Rarely {

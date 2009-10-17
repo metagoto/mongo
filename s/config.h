@@ -52,9 +52,9 @@ namespace mongo {
     */
     class DBConfig : public Model {
     public:
-        DBConfig( string name = "" ) : _name( name ) , _primary("") , _shardingEnabled(false){ }
+        DBConfig( std::string name = "" ) : _name( name ) , _primary("") , _shardingEnabled(false){ }
         
-        string getName(){ return _name; };
+        std::string getName(){ return _name; };
 
         /**
          * @return if anything in this db is partitioned or not
@@ -64,34 +64,34 @@ namespace mongo {
         }
         
         void enableSharding();
-        ChunkManager* shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique );
+        ChunkManager* shardCollection( const std::string& ns , ShardKeyPattern fieldsAndOrder , bool unique );
         
         /**
          * @return whether or not this partition is partitioned
          */
-        bool isSharded( const string& ns );
+        bool isSharded( const std::string& ns );
         
-        ChunkManager* getChunkManager( const string& ns , bool reload = false );
+        ChunkManager* getChunkManager( const std::string& ns , bool reload = false );
         
         /**
          * @return the correct for shard for the ns
          * if the namespace is sharded, will return an empty string
          */
-        string getShard( const string& ns );
+        std::string getShard( const std::string& ns );
         
-        string getPrimary(){
+        std::string getPrimary(){
             if ( _primary.size() == 0 )
-                throw UserException( (string)"no primary shard configured for db: " + _name );
+                throw UserException( (std::string)"no primary shard configured for db: " + _name );
             return _primary;
         }
         
-        void setPrimary( string s ){
+        void setPrimary( std::string s ){
             _primary = s;
         }
         
         virtual void save( bool check=true);
 
-        virtual string modelServer();
+        virtual std::string modelServer();
         
         // model stuff
 
@@ -101,12 +101,12 @@ namespace mongo {
         bool loadByName(const char *nm);
         
     protected:
-        string _name; // e.g. "alleyinsider"
-        string _primary; // e.g. localhost , mongo.foo.com:9999
+        std::string _name; // e.g. "alleyinsider"
+        std::string _primary; // e.g. localhost , mongo.foo.com:9999
         bool _shardingEnabled;
         
-        map<string,CollectionInfo> _sharded; // { "alleyinsider.blog.posts" : { ts : 1 }  , ... ] - all ns that are sharded
-        map<string,ChunkManager*> _shards; // this will only have entries for things that have been looked at
+        std::map<std::string,CollectionInfo> _sharded; // { "alleyinsider.blog.posts" : { ts : 1 }  , ... ] - all ns that are sharded
+        std::map<std::string,ChunkManager*> _shards; // this will only have entries for things that have been looked at
 
         friend class Grid;
     };
@@ -117,15 +117,15 @@ namespace mongo {
            gets the config the db.
            will return an empty DBConfig if not in db already
          */
-        DBConfig * getDBConfig( string ns , bool create=true);
+        DBConfig * getDBConfig( std::string ns , bool create=true);
         
-        string pickShardForNewDB();
+        std::string pickShardForNewDB();
         
-        bool knowAboutShard( string name ) const;
+        bool knowAboutShard( std::string name ) const;
 
         unsigned long long getNextOpTime() const;
     private:
-        map<string,DBConfig*> _databases;
+        std::map<std::string,DBConfig*> _databases;
     };
 
     class ConfigServer : public DBConfig {
@@ -141,7 +141,7 @@ namespace mongo {
             return _primary.size() > 0;
         }
         
-        virtual string modelServer(){
+        virtual std::string modelServer(){
             uassert( "ConfigServer not setup" , _primary.size() );
             return _primary;
         }
@@ -149,7 +149,7 @@ namespace mongo {
         /**
            call at startup, this will initiate connection to the grid db 
         */
-        bool init( vector<string> configHosts , bool infer );
+        bool init( std::vector<std::string> configHosts , bool infer );
         
         int dbConfigVersion();
         int dbConfigVersion( DBClientBase& conn );
@@ -162,7 +162,7 @@ namespace mongo {
         static int VERSION;
 
     private:
-        string getHost( string name , bool withPort );
+        std::string getHost( std::string name , bool withPort );
     };
     
 } // namespace mongo

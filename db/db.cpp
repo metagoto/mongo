@@ -40,6 +40,9 @@
 #include "mms.h"
 #include "cmdline.h"
 
+using namespace std;
+using namespace boost::filesystem;
+
 namespace mongo {
 
     bool useJNI = true;

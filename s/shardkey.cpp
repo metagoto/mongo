@@ -21,6 +21,8 @@
 #include "../db/jsobj.h"
 #include "../util/unittest.h"
 
+using namespace std;
+
 /**
    TODO: this only works with numbers right now
          this is very temporary, need to make work with anything

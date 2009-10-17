@@ -25,6 +25,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace mongo {
     bool dbEval(const char *ns, BSONObj& cmd, BSONObjBuilder& result, string& errmsg);
 } // namespace mongo

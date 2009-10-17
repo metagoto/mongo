@@ -65,13 +65,13 @@ public:
     /* these are used to fetch the stats: */
 
     struct Usage { 
-        string ns; 
+        std::string ns; 
         D time; 
         double pct; 
         int reads, writes, calls; 
     };
 
-    static void usage( vector< Usage > &res ) {
+    static void usage( std::vector< Usage > &res ) {
         boostlock L(topMutex);
 
         // Populate parent namespaces
@@ -80,10 +80,10 @@ public:
         fillParentNamespaces( snapshot, snapshot_ );
         fillParentNamespaces( totalUsage, totalUsage_ );
         
-        multimap< D, string, more > sorted;
+        std::multimap< D, std::string, more > sorted;
         for( UsageMap::iterator i = snapshot.begin(); i != snapshot.end(); ++i )
             sorted.insert( make_pair( i->second.get<0>(), i->first ) );
-        for( multimap< D, string, more >::iterator i = sorted.begin(); i != sorted.end(); ++i ) {
+        for( std::multimap< D, std::string, more >::iterator i = sorted.begin(); i != sorted.end(); ++i ) {
             if ( trivialNs( i->second.c_str() ) )
                 continue;
             Usage u;
@@ -130,15 +130,15 @@ private:
         const char *ret = strrchr( ns, '.' );
         return ret && ret[ 1 ] == '\0';
     }
-    typedef map< string, boost::tuple< D, int, int, int > > UsageMap; // duration, # reads, # writes, # total calls
+    typedef std::map< std::string, boost::tuple< D, int, int, int > > UsageMap; // duration, # reads, # writes, # total calls
     static T currentTime() {
         return boost::posix_time::microsec_clock::universal_time();
     }
-    void recordUsage( const string &client, D duration ) {
+    void recordUsage( const std::string &client, D duration ) {
         recordUsageForMap( totalUsage_, client, duration );
         recordUsageForMap( nextSnapshot_, client, duration );
     }
-    void recordUsageForMap( UsageMap &map, const string &client, D duration ) {
+    void recordUsageForMap( UsageMap &map, const std::string &client, D duration ) {
         map[ client ].get< 0 >() += duration;
         if ( read_ && !write_ )
             map[ client ].get< 1 >()++;
@@ -148,12 +148,12 @@ private:
     }
     static void fillParentNamespaces( UsageMap &to, const UsageMap &from ) {
         for( UsageMap::const_iterator i = from.begin(); i != from.end(); ++i ) {
-            string current = i->first;
+            std::string current = i->first;
             size_t dot = current.rfind( "." );
-            if ( dot == string::npos || dot != current.length() - 1 ) {
+            if ( dot == std::string::npos || dot != current.length() - 1 ) {
                 inc( to[ current ], i->second );
             }
-            while( dot != string::npos ) {
+            while( dot != std::string::npos ) {
                 current = current.substr( 0, dot );
                 inc( to[ current ], i->second );
                 dot = current.rfind( "." );
@@ -167,7 +167,7 @@ private:
         to.get<3>() += from.get<3>();
     }
     struct more { bool operator()( const D &a, const D &b ) { return a > b; } };
-    string current_;
+    std::string current_;
     T currentStart_;
     static T snapshotStart_;
     static D snapshotDuration_;

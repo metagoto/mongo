@@ -27,6 +27,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace mongo {
     extern BSONObj id_obj;
 } // namespace mongo

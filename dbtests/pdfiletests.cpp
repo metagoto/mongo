@@ -25,6 +25,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace PdfileTests {
 
     namespace ScanCapped {

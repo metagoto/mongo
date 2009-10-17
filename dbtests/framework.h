@@ -45,13 +45,13 @@ namespace mongo {
 
         class Result;
 
-        string demangleName( const type_info& typeinfo );
+        std::string demangleName( const std::type_info& typeinfo );
 
         class TestCase {
         public:
             virtual ~TestCase(){}
             virtual void run() = 0;
-            virtual string getName() = 0;
+            virtual std::string getName() = 0;
         };
 
         template< class T >
@@ -60,12 +60,12 @@ namespace mongo {
             TestHolderBase(){}
             virtual ~TestHolderBase(){}
             virtual void run(){
-                auto_ptr<T> t;
+                std::auto_ptr<T> t;
                 t.reset( create() );
                 t->run();
             }
             virtual T * create() = 0;
-            virtual string getName(){
+            virtual std::string getName(){
                 return demangleName( typeid(T) );
             }
         };
@@ -90,7 +90,7 @@ namespace mongo {
 
         class Suite {
         public:
-            Suite( string name ) : _name( name ){
+            Suite( std::string name ) : _name( name ){
                 registerSuite( name , this );
                 _ran = 0;
             }
@@ -114,21 +114,21 @@ namespace mongo {
 
             Result * run();
 
-            static int run( vector<string> suites );
-            static int run( int argc , char ** argv , string default_dbpath );
+            static int run( std::vector<std::string> suites );
+            static int run( int argc , char ** argv , std::string default_dbpath );
 
 
         protected:
             virtual void setupTests() = 0;
 
         private:
-            string _name;
-            list<TestCase*> _tests;
+            std::string _name;
+            std::list<TestCase*> _tests;
             bool _ran;
 
-            static map<string,Suite*> * _suites;
+            static std::map<std::string,Suite*> * _suites;
 
-            void registerSuite( string name , Suite * s );
+            void registerSuite( std::string name , Suite * s );
         };
 
         void assert_pass();
@@ -140,7 +140,7 @@ namespace mongo {
             MyAssertionException(){
                 ss << "assertion: ";
             }
-            stringstream ss;
+            std::stringstream ss;
         };
 
 
@@ -161,8 +161,8 @@ namespace mongo {
                 printLocation();
                     
                 MyAssertionException * e = getBase();
-                e->ss << a << " != " << b << endl;
-                log() << e->ss.str() << endl;
+                e->ss << a << " != " << b << std::endl;
+                log() << e->ss.str() << std::endl;
                 throw e;
             }
             
@@ -174,9 +174,9 @@ namespace mongo {
             
             MyAssertionException * getBase();
             
-            string _aexp;
-            string _bexp;
-            string _file;
+            std::string _aexp;
+            std::string _bexp;
+            std::string _file;
             unsigned _line;
         };
 

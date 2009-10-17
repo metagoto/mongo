@@ -27,7 +27,7 @@ namespace mongo {
 // subclass to make a command.
     class Command {
     public:
-        string name;
+        std::string name;
 
         /* run the given command
            implement this...
@@ -37,7 +37,7 @@ namespace mongo {
 
            return value is true if succeeded.  if false, set errmsg text.
         */
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) = 0;
+        virtual bool run(const char *ns, BSONObj& cmdObj, std::string& errmsg, BSONObjBuilder& result, bool fromRepl) = 0;
 
         /* Return true if only the admin ns has privileges to run this command. */
         virtual bool adminOnly() {
@@ -65,7 +65,7 @@ namespace mongo {
             return false;
         }
 
-        virtual void help( stringstream& help ) const;
+        virtual void help( std::stringstream& help ) const;
 
         /* Return true if authentication and security applies to the commands.  Some commands 
            (e.g., getnonce, authenticate) can be done by anyone even unauthorized.
@@ -78,6 +78,6 @@ namespace mongo {
 
     bool runCommandAgainstRegistered(const char *ns, BSONObj& jsobj, BSONObjBuilder& anObjBuilder);
 
-    bool _runCommands(const char *ns, BSONObj& jsobj, stringstream& ss, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions);
+    bool _runCommands(const char *ns, BSONObj& jsobj, std::stringstream& ss, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions);
 
 } // namespace mongo

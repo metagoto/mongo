@@ -38,18 +38,18 @@ namespace mongo {
 
         static bool testsInProgress() { return running; }
     private:
-        static vector<UnitTest*> *tests;
+        static std::vector<UnitTest*> *tests;
         static bool running;
     public:
         static void registerTest(UnitTest *t) {
             if ( tests == 0 )
-                tests = new vector<UnitTest*>();
+                tests = new std::vector<UnitTest*>();
             tests->push_back(t);
         }
 
         static void runTests() {
             running = true;
-            for ( vector<UnitTest*>::iterator i = tests->begin(); i != tests->end(); i++ ) {
+            for ( std::vector<UnitTest*>::iterator i = tests->begin(); i != tests->end(); i++ ) {
                 (*i)->run();
             }
             running = false;

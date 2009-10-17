@@ -21,6 +21,8 @@
 #include "commands.h"
 #include "../scripting/engine.h"
 
+using namespace std;
+
 namespace mongo {
 
     namespace mr {

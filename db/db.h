@@ -42,33 +42,33 @@ namespace mongo {
     const int MaxBSONObjectSize = 4 * 1024 * 1024;
 
     // tempish...move to TLS or pass all the way down as a parm
-    extern map<string,Database*> databases;
+    extern std::map<std::string,Database*> databases;
     extern bool master;
 
     /* sometimes we deal with databases with the same name in different directories - thus this */
-    inline string makeDbKeyStr( const char *ns, const string& path ) {
+    inline std::string makeDbKeyStr( const char *ns, const std::string& path ) {
         char cl[256];
         nsToClient(ns, cl);
-        return string( cl ) + ":" + path;
+        return std::string( cl ) + ":" + path;
     }
 
     /* returns true if the database ("database") did not exist, and it was created on this call 
        path - datafiles directory, if not the default, so we can differentiate between db's of the same
               name in different places (for example temp ones on repair).
     */
-    inline bool setClient(const char *ns, const string& path=dbpath) {
+    inline bool setClient(const char *ns, const std::string& path=dbpath) {
         /* we must be in critical section at this point as these are global
            variables.
         */
         assertInWriteLock();
 
         if( logLevel > 5 )
-            log() << "setClient: " << ns << endl;
+            log() << "setClient: " << ns << std::endl;
 
         cc().top.clientStart( ns );
 
-        string key = makeDbKeyStr( ns, path );
-        map<string,Database*>::iterator it = databases.find(key);
+        std::string key = makeDbKeyStr( ns, path );
+        std::map<std::string,Database*>::iterator it = databases.find(key);
         if ( it != databases.end() ) {
             cc().setns(ns, it->second);
             return false;
@@ -96,11 +96,11 @@ namespace mongo {
 
 // shared functionality for removing references to a database from this program instance
 // does not delete the files on disk
-    void closeClient( const char *cl, const string& path = dbpath );
+    void closeClient( const char *cl, const std::string& path = dbpath );
 
     /* remove database from the databases map */
-    inline void eraseDatabase( const char *ns, const string& path=dbpath ) {
-        string key = makeDbKeyStr( ns, path );
+    inline void eraseDatabase( const char *ns, const std::string& path=dbpath ) {
+        std::string key = makeDbKeyStr( ns, path );
         databases.erase( key );
     }
 
@@ -109,8 +109,8 @@ namespace mongo {
     }
 
     struct dbtemprelease {
-        string clientname;
-        string clientpath;
+        std::string clientname;
+        std::string clientpath;
         dbtemprelease() {
             Client& client = cc();
             Database *database = client.database();

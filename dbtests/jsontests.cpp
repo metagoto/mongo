@@ -25,6 +25,8 @@
 
 #include <limits>
 
+using namespace std;
+
 namespace JsonTests {
     namespace JsonStringTests {
 

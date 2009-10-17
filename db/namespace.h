@@ -46,11 +46,11 @@ namespace mongo {
         }
         *q = 0;
         if (q-database>=MaxClientLen) {
-            log() << "nsToClient: ns too long. terminating, buf overrun condition" << endl;
+            log() << "nsToClient: ns too long. terminating, buf overrun condition" << std::endl;
             dbexit( EXIT_POSSIBLE_CORRUPTION );
         }
     }
-    inline string nsToClient(const char *ns) {
+    inline std::string nsToClient(const char *ns) {
         char buf[MaxClientLen];
         nsToClient(ns, buf);
         return buf;
@@ -62,18 +62,18 @@ namespace mongo {
 	*/
     class NamespaceString {
     public:
-        string db;
-        string coll; // note collection names can have periods in them for organizing purposes (e.g. "system.indexes")
+        std::string db;
+        std::string coll; // note collection names can have periods in them for organizing purposes (e.g. "system.indexes")
     private:
         void init(const char *ns) { 
             const char *p = strchr(ns, '.');
             if( p == 0 ) return;
-            db = string(ns, p - ns);
+            db = std::string(ns, p - ns);
             coll = p + 1;
         }
     public:
         NamespaceString( const char * ns ) { init(ns); }
-        NamespaceString( const string& ns ) { init(ns.c_str()); }
+        NamespaceString( const std::string& ns ) { init(ns.c_str()); }
 
         bool isSystem() { 
             return strncmp(coll.c_str(), "system.", 7) == 0;
@@ -118,10 +118,10 @@ namespace mongo {
            ( foo.bar ).getSisterNS( "blah" ) == foo.blah
 		   perhaps this should move to the NamespaceString helper?
          */
-        string getSisterNS( const char * local ) {
+        std::string getSisterNS( const char * local ) {
             assert( local && local[0] != '.' );
-            string old(buf);
-            if ( old.find( "." ) != string::npos )
+            std::string old(buf);
+            if ( old.find( "." ) != std::string::npos )
                 old = old.substr( 0 , old.find( "." ) );
             return old + "." + local;
         }
@@ -133,7 +133,7 @@ namespace mongo {
        @return true if a client can modify this namespace
        things like *.system.users
      */
-    bool legalClientSystemNS( const string& ns , bool write );
+    bool legalClientSystemNS( const std::string& ns , bool write );
 
 
     /* deleted lists -- linked lists of deleted records -- are placed in 'buckets' of various sizes
@@ -193,9 +193,9 @@ namespace mongo {
 
         // returns name of this index's storage area
         // database.table.$index
-        string indexNamespace() const {
+        std::string indexNamespace() const {
             BSONObj io = info.obj();
-            string s;
+            std::string s;
             s.reserve(Namespace::MaxNsLen);
             s = io.getStringField("ns");
             assert( !s.empty() );
@@ -204,7 +204,7 @@ namespace mongo {
             return s;
         }
 
-        string indexName() const { // e.g. "ts_1"
+        std::string indexName() const { // e.g. "ts_1"
             BSONObj io = info.obj();
             return io.getStringField("name");
         }
@@ -224,7 +224,7 @@ namespace mongo {
         /* gets not our namespace name (indexNamespace for that),
            but the collection we index, its name.
            */
-        string parentNS() const {
+        std::string parentNS() const {
             BSONObj io = info.obj();
             return io.getStringField("ns");
         }
@@ -246,7 +246,7 @@ namespace mongo {
         */
         void kill();
 
-        operator string() const {
+        operator std::string() const {
             return info.obj().toString();
         }
     };
@@ -394,7 +394,7 @@ namespace mongo {
         /* add a given record to the deleted chains for this NS */
         void addDeletedRec(DeletedRecord *d, DiskLoc dloc);
 
-        void dumpDeleted(set<DiskLoc> *extents = 0);
+        void dumpDeleted(std::set<DiskLoc> *extents = 0);
 
         bool capLooped() const {
             return capped && capFirstNewRecord.isValid();
@@ -441,13 +441,13 @@ namespace mongo {
                 as currently used that does not cause anything terrible to happen.
     */
     class NamespaceDetailsTransient : boost::noncopyable {
-        string ns;
+        std::string ns;
         bool haveIndexKeys;
-        set<string> allIndexKeys;
+        std::set<std::string> allIndexKeys;
         void computeIndexKeys();
         int writeCount_;
-        map< QueryPattern, pair< BSONObj, long long > > queryCache_;
-        string logNS_;
+        std::map< QueryPattern, std::pair< BSONObj, long long > > queryCache_;
+        std::string logNS_;
         bool logValid_;
     public:
         NamespaceDetailsTransient(const char *_ns) : ns(_ns), haveIndexKeys(), writeCount_(), logValid_() {
@@ -457,7 +457,7 @@ namespace mongo {
         /* get set of index keys for this namespace.  handy to quickly check if a given
            field is indexed (Note it might be a seconary component of a compound index.)
         */
-        set<string>& indexKeys() {
+        std::set<std::string>& indexKeys() {
             if ( !haveIndexKeys ) {
                 haveIndexKeys=true;
                 computeIndexKeys();
@@ -484,19 +484,19 @@ namespace mongo {
             return queryCache_[ pattern ].second;
         }
         void registerIndexForPattern( const QueryPattern &pattern, const BSONObj &indexKey, long long nScanned ) {
-            queryCache_[ pattern ] = make_pair( indexKey, nScanned );
+            queryCache_[ pattern ] = std::make_pair( indexKey, nScanned );
         }
         
         void startLog( int logSizeMb = 128 );
         void invalidateLog();
         bool validateCompleteLog();
-        string logNS() const { return logNS_; }
+        std::string logNS() const { return logNS_; }
         bool logValid() const { return logValid_; }
         
     private:
         void reset();
         void dropLog();
-        static std::map< string, shared_ptr< NamespaceDetailsTransient > > map_;
+        static std::map< std::string, boost::shared_ptr< NamespaceDetailsTransient > > map_;
     public:
         static NamespaceDetailsTransient& get(const char *ns);
         // Drop cached information on all namespaces beginning with the specified prefix.
@@ -509,7 +509,7 @@ namespace mongo {
     class NamespaceIndex {
         friend class NamespaceCursor;
     public:
-        NamespaceIndex(const string &dir, const string &database) :
+        NamespaceIndex(const std::string &dir, const std::string &database) :
         ht( 0 ),
         dir_( dir ),
         database_( database ) {}
@@ -579,11 +579,11 @@ namespace mongo {
         
         MemoryMappedFile f;
         HashTable<Namespace,NamespaceDetails> *ht;
-        string dir_;
-        string database_;
+        std::string dir_;
+        std::string database_;
     };
 
-    extern string dbpath; // --dbpath parm 
+    extern std::string dbpath; // --dbpath parm 
 
     // Rename a namespace within current 'client' db.
     // (Arguments should include db name)

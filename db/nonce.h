@@ -23,7 +23,7 @@ namespace mongo {
     typedef unsigned long long nonce;
     
     struct Security {
-        ifstream *devrandom;
+        std::ifstream *devrandom;
         Security();
         nonce getNonce();
     };

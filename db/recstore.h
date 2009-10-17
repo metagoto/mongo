@@ -40,7 +40,7 @@ public:
 
     int fileNumber; // this goes in DiskLoc::a
 
-    string filename;
+    std::string filename;
 
 private:
 

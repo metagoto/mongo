@@ -30,6 +30,8 @@
 #include <sys/file.h>
 #endif
 
+using namespace std;
+
 namespace po = boost::program_options;
 
 namespace mongo {

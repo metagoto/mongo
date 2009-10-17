@@ -74,15 +74,15 @@ namespace mongo {
                 i = (i+1) % n;
                 if ( i == start ) {
                     // shouldn't get here / defensive for infinite loops
-                    out() << "error: hashtable " << name << " is full n:" << n << endl;
+                    out() << "error: hashtable " << name << " is full n:" << n << std::endl;
                     return -1;
                 }
                 if( chain >= maxChain ) { 
-                    out() << "error: hashtable " << name << " max chain n:" << n << endl;
+                    out() << "error: hashtable " << name << " max chain n:" << n << std::endl;
                     return -1;
                 }
                 if ( chain == 200 )
-                    out() << "warning: hashtable " << name << " long chain " << endl;
+                    out() << "warning: hashtable " << name << " long chain " << std::endl;
             }
         }
 

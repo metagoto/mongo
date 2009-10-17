@@ -25,6 +25,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 
+using namespace std;
+using namespace boost::filesystem;
+
 namespace mongo {
     
     unsigned long long BSONObjExternalSorter::_compares = 0;

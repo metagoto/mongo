@@ -132,9 +132,9 @@ namespace mongo {
         }
 
         /** The object ID output as 24 hex digits. */
-        string str() const {
-            stringstream s;
-            s << hex;
+        std::string str() const {
+            std::stringstream s;
+            s << std::hex;
             //            s.fill( '0' );
             //            s.width( 2 );
             // fill wasn't working so doing manually...
@@ -165,10 +165,10 @@ namespace mongo {
         void init();
 
         /** Set to the hex string value specified. */
-        void init( string s );
+        void init( std::string s );
         
     };
-    ostream& operator<<( ostream &s, const OID &o );
+    std::ostream& operator<<( std::ostream &s, const OID &o );
 
     /** Formatting mode for generating JSON from BSON.
         See <http://mongodb.onconfluence.com/display/DOCS/Mongo+Extended+JSON>
@@ -206,9 +206,9 @@ namespace mongo {
         friend class BSONObjIterator;
         friend class BSONObj;
     public:
-        string toString( bool includeFieldName = true ) const;
-        operator string() const { return toString(); }
-        string jsonString( JsonStringFormat format, bool includeFieldNames = true ) const;
+        std::string toString( bool includeFieldName = true ) const;
+        operator std::string() const { return toString(); }
+        std::string jsonString( JsonStringFormat format, bool includeFieldNames = true ) const;
 
         /** Returns the type of the element */
         BSONType type() const {
@@ -453,7 +453,7 @@ namespace mongo {
             return type() == String ? valuestr() : "";
         }
         /** Get the string value of the element.  If not a string returns "". */
-        string str() const { return valuestrsafe(); }
+        std::string str() const { return valuestrsafe(); }
 
         /** Get javascript code of a CodeWScope data element. */
         const char * codeWScopeCode() const {
@@ -473,7 +473,7 @@ namespace mongo {
 
         BSONObj codeWScopeObject() const;
 
-        string ascode() const {
+        std::string ascode() const {
             switch( type() ){
             case String:
             case Code:
@@ -481,7 +481,7 @@ namespace mongo {
             case CodeWScope:
                 return codeWScopeCode();
             default:
-                log() << "can't convert type: " << (int)(type()) << " to code" << endl;
+                log() << "can't convert type: " << (int)(type()) << " to code" << std::endl;
             }
             uassert( "not code" , 0 );
             return "";
@@ -512,7 +512,7 @@ namespace mongo {
 			returns "" for complex regular expressions
 			used to optimize queries in some simple regex cases that start with '^'
 		 */
-        string simpleRegex() const;
+        std::string simpleRegex() const;
 
         /** Retrieve the regex flags (options) for a Regex element */
         const char *regexFlags() const {
@@ -645,7 +645,7 @@ namespace mongo {
         }
     };
     
-    typedef set< BSONElement, BSONElementCmpWithoutField > BSONElementSet;
+    typedef std::set< BSONElement, BSONElementCmpWithoutField > BSONElementSet;
     
     /**
 	   C++ representation of a "BSON" object -- that is, an extended JSON-style 
@@ -704,7 +704,7 @@ namespace mongo {
                 _holder.reset( new Holder( data ) );
             _objdata = data;
             if ( ! isValid() ){
-                log() << "invalid object size: " << objsize() << endl;
+                log() << "invalid object size: " << objsize() << std::endl;
                 massert( "Invalid BSONObj spec size" , 0 );
             }
         }
@@ -740,14 +740,14 @@ namespace mongo {
         /** Readable representation of a BSON object in an extended JSON-style notation. 
             This is an abbreviated representation which might be used for logging.
         */
-        string toString() const;
-        operator string() const { return toString(); }
+        std::string toString() const;
+        operator std::string() const { return toString(); }
         
         /** Properly formatted JSON string. */
-        string jsonString( JsonStringFormat format = Strict ) const;
+        std::string jsonString( JsonStringFormat format = Strict ) const;
 
         /** note: addFields always adds _id even if not specified */
-        int addFields(BSONObj& from, set<string>& fields); /* returns n added */
+        int addFields(BSONObj& from, std::set<std::string>& fields); /* returns n added */
 
         /** returns # of top level fields in the object
            note: iterates to count the fields
@@ -755,7 +755,7 @@ namespace mongo {
         int nFields() const;
 
         /** adds the field names to the fields set.  does NOT clear it (appends). */
-        int getFieldNames(set<string>& fields) const;
+        int getFieldNames(std::set<std::string>& fields) const;
 
         /** return has eoo() true if no match
            supports "." notation to reach into embedded objects
@@ -772,7 +772,7 @@ namespace mongo {
         /** Get the field of the specified name. eoo() is true on the returned 
             element if not found. 
         */
-        BSONElement getField(const string name) const {
+        BSONElement getField(const std::string name) const {
             return getField( name.c_str() );
         };
 
@@ -788,14 +788,14 @@ namespace mongo {
             return getField(field);
         }
 
-        BSONElement operator[] (const string& field) const { 
+        BSONElement operator[] (const std::string& field) const { 
             return getField(field);
         }
 
         BSONElement operator[] (int field) const { 
-            stringstream ss;
+            std::stringstream ss;
             ss << field;
-            string s = ss.str();
+            std::string s = ss.str();
             return getField(s.c_str());
         }
 
@@ -864,19 +864,19 @@ namespace mongo {
         }
 
         void dump() const {
-            out() << hex;
+            out() << std::hex;
             const char *p = objdata();
             for ( int i = 0; i < objsize(); i++ ) {
                 out() << i << '\t' << ( 0xff & ( (unsigned) *p ) );
                 if ( *p >= 'A' && *p <= 'z' )
                     out() << '\t' << *p;
-                out() << endl;
+                out() << std::endl;
                 p++;
             }
         }
 
         // Alternative output format
-        string hexDump() const;
+        std::string hexDump() const;
         
         /**wo='well ordered'.  fields must be in same order in each object.
            Ordering is with respect to the signs of the elements in idxKey.
@@ -907,7 +907,7 @@ namespace mongo {
         BSONElement findElement(const char *name) const;
 
 		/** @return element with fieldname "name".  returnvalue.eoo() is true if not found */
-        BSONElement findElement(string name) const {
+        BSONElement findElement(std::string name) const {
             return findElement(name.c_str());
         }
 
@@ -955,7 +955,7 @@ namespace mongo {
         /** true unless corrupt */
         bool valid() const;
         
-        string md5() const;
+        std::string md5() const;
 
         enum MatchType {
             Equality = 0,
@@ -973,8 +973,8 @@ namespace mongo {
             opTYPE = 0x0F
         };        
     };
-    ostream& operator<<( ostream &s, const BSONObj &o );
-    ostream& operator<<( ostream &s, const BSONElement &e );
+    std::ostream& operator<<( std::ostream &s, const BSONObj &o );
+    std::ostream& operator<<( std::ostream &s, const BSONElement &e );
 
     class BSONObjCmp {
     public:
@@ -991,7 +991,7 @@ namespace mongo {
         BSONObjCmpDefaultOrder() : BSONObjCmp( BSONObj() ) {}
     };
 
-    typedef set< BSONObj, BSONObjCmpDefaultOrder > BSONObjSetDefaultOrder;
+    typedef std::set< BSONObj, BSONObjCmpDefaultOrder > BSONObjSetDefaultOrder;
 
 /** Use BSON macro to build a BSONObj from a stream 
 
@@ -1074,7 +1074,7 @@ namespace mongo {
 
         bool haveSubobj() const { return _subobj.get() != 0; }
         BSONObjBuilder *subobj();
-        auto_ptr< BSONObjBuilder > _subobj;
+        std::auto_ptr< BSONObjBuilder > _subobj;
     };
     
     /**
@@ -1115,7 +1115,7 @@ namespace mongo {
             b.append((void *) subObj.objdata(), subObj.objsize());
         }
 
-        void append(const string& fieldName , BSONObj subObj) {
+        void append(const std::string& fieldName , BSONObj subObj) {
             append( fieldName.c_str() , subObj );
         }
 
@@ -1158,7 +1158,7 @@ namespace mongo {
             b.append(n);
         }
         /** Append a 32 bit integer element */
-        void append(const string &fieldName, int n) {
+        void append(const std::string &fieldName, int n) {
             append( fieldName.c_str(), n );
         }
 
@@ -1230,7 +1230,7 @@ namespace mongo {
             @param regex the regular expression pattern
             @param regex options such as "i" or "g"
         */
-        void appendRegex(string fieldName, string regex, string options = "") {
+        void appendRegex(std::string fieldName, std::string regex, std::string options = "") {
             appendRegex(fieldName.c_str(), regex.c_str(), options.c_str());
         }
         void appendCode(const char *fieldName, const char *code) {
@@ -1248,7 +1248,7 @@ namespace mongo {
             return *this;
         }
         /** Append a string element */
-        void append(const char *fieldName, string str) {
+        void append(const char *fieldName, std::string str) {
             append(fieldName, str.c_str());
         }
         void appendSymbol(const char *fieldName, const char *symbol) {
@@ -1353,19 +1353,19 @@ namespace mongo {
         void appendWhere( const char *code, const BSONObj &scope ){
             appendCodeWScope( "$where" , code , scope );
         }
-        void appendWhere( const string &code, const BSONObj &scope ){
+        void appendWhere( const std::string &code, const BSONObj &scope ){
             appendWhere( code.c_str(), scope );
         }
         
         /**
            these are the min/max when comparing, not strict min/max elements for a given type
          */
-        void appendMinForType( const string& field , int type );
-        void appendMaxForType( const string& field , int type );
+        void appendMinForType( const std::string& field , int type );
+        void appendMaxForType( const std::string& field , int type );
 
         /** Append an array of values. */
         template < class T >
-        void append( const char *fieldName, const vector< T >& vals ) {
+        void append( const char *fieldName, const std::vector< T >& vals ) {
             BSONObjBuilder arrBuilder;
             for ( unsigned int i = 0; i < vals.size(); ++i )
                 arrBuilder.append( numStr( i ).c_str(), vals[ i ] );
@@ -1408,8 +1408,8 @@ namespace mongo {
             b.decouple();    // post done() call version.  be sure jsobj frees...
         }
 
-        static string numStr( int i ) {
-            stringstream o;
+        static std::string numStr( int i ) {
+            std::stringstream o;
             o << i;
             return o.str();
         }
@@ -1422,8 +1422,8 @@ namespace mongo {
 
         // prevent implicit string conversions which would allow bad things like BSON( BSON( "foo" << 1 ) << 2 )
         struct ForceExplicitString {
-        ForceExplicitString( const string &str ) : str_( str ) {}
-            string str_;
+        ForceExplicitString( const std::string &str ) : str_( str ) {}
+            std::string str_;
         };
 
         /** Stream oriented way to add field names and values. */
@@ -1524,7 +1524,7 @@ namespace mongo {
     // the specified direction of traversal.  For example, given a simple index {i:1}
     // and direction +1, one valid BoundList is: (1, 2); (4, 6).  The same BoundList
     // would be valid for index {i:-1} with direction -1.
-    typedef vector< pair< BSONObj, BSONObj > > BoundList;	
+    typedef std::vector< std::pair< BSONObj, BSONObj > > BoundList;	
 
     /*- just for testing -- */
 
@@ -1558,7 +1558,7 @@ namespace mongo {
     extern JSObj1 js1;
 
 #ifdef _DEBUG
-#define CHECK_OBJECT( o , msg ) massert( (string)"object not valid" + (msg) , (o).isValid() )
+#define CHECK_OBJECT( o , msg ) massert( (std::string)"object not valid" + (msg) , (o).isValid() )
 #else
 #define CHECK_OBJECT( o , msg )
 #endif

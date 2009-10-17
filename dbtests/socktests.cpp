@@ -22,6 +22,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace SockTests {
 
     class HostByName {

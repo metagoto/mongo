@@ -9,12 +9,12 @@ namespace mongo {
     /**
      * @return true if we have any shard info for the ns
      */
-    bool haveLocalShardingInfo( const string& ns );
+    bool haveLocalShardingInfo( const std::string& ns );
     
     /**
      * @return true if the current threads shard version is ok, or not in sharded version
      */
-    bool shardVersionOk( const string& ns , string& errmsg );
+    bool shardVersionOk( const std::string& ns , std::string& errmsg );
 
     /**
      * @return true if we took care of the message and nothing else should be done

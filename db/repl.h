@@ -55,7 +55,7 @@ namespace mongo {
 
     extern int opIdMem;
     
-    bool cloneFrom(const char *masterHost, string& errmsg, const string& fromdb, bool logForReplication, 
+    bool cloneFrom(const char *masterHost, std::string& errmsg, const std::string& fromdb, bool logForReplication, 
 				   bool slaveOk, bool useReplAuth, bool snapshot);
 
     /* A replication exception */
@@ -75,20 +75,20 @@ namespace mongo {
        not done (always use main for now).
     */
     class ReplSource {
-        bool resync(string db);
+        bool resync(std::string db);
         bool sync_pullOpLog(int& nApplied);
         void sync_pullOpLog_applyOperation(BSONObj& op, OpTime *localLogTail);
         
-        auto_ptr<DBClientConnection> conn;
-        auto_ptr<DBClientCursor> cursor;
+        std::auto_ptr<DBClientConnection> conn;
+        std::auto_ptr<DBClientCursor> cursor;
 
-        set<string> addDbNextPass;
-        set<string> incompleteCloneDbs;
+        std::set<std::string> addDbNextPass;
+        std::set<std::string> incompleteCloneDbs;
 
         ReplSource();
         
         // returns the dummy ns used to do the drop
-        string resyncDrop( const char *db, const char *requester );
+        std::string resyncDrop( const char *db, const char *requester );
         // returns true if connected on return
         bool connect();
         // returns possibly unowned id spec for the operation.
@@ -104,18 +104,18 @@ namespace mongo {
         // call with the db mutex
         // returns false if the slave has been reset
         bool updateSetsWithLocalOps( OpTime &localLogTail, bool mayUnlock );
-        string ns() const { return string( "local.oplog.$" ) + sourceName(); }
+        std::string ns() const { return std::string( "local.oplog.$" ) + sourceName(); }
         
     public:
         static void applyOperation(const BSONObj& op);
         bool replacing; // in "replace mode" -- see CmdReplacePeer
         bool paired; // --pair in use
-        string hostName;    // ip addr or hostname plus optionally, ":<port>"
-        string _sourceName;  // a logical source name.
-        string sourceName() const {
+        std::string hostName;    // ip addr or hostname plus optionally, ":<port>"
+        std::string _sourceName;  // a logical source name.
+        std::string sourceName() const {
             return _sourceName.empty() ? "main" : _sourceName;
         }
-        string only; // only a certain db. note that in the sources collection, this may not be changed once you start replicating.
+        std::string only; // only a certain db. note that in the sources collection, this may not be changed once you start replicating.
 
         /* the last time point we have already synced up to. */
         OpTime syncedTo;
@@ -123,14 +123,14 @@ namespace mongo {
 
         int nClonedThisPass;
 
-        typedef vector< shared_ptr< ReplSource > > SourceVector;
+        typedef std::vector< boost::shared_ptr< ReplSource > > SourceVector;
         static void loadAll(SourceVector&);
         explicit ReplSource(BSONObj);
         bool sync(int& nApplied);
         void save(); // write ourself to local.sources
         void resetConnection() {
-            cursor = auto_ptr<DBClientCursor>(0);
-            conn = auto_ptr<DBClientConnection>(0);
+            cursor = std::auto_ptr<DBClientCursor>(0);
+            conn = std::auto_ptr<DBClientConnection>(0);
         }
 
         // make a jsobj from our member fields of the form
@@ -140,7 +140,7 @@ namespace mongo {
         bool operator==(const ReplSource&r) const {
             return hostName == r.hostName && sourceName() == r.sourceName();
         }
-        operator string() const { return sourceName() + "@" + hostName; }
+        operator std::string() const { return sourceName() + "@" + hostName; }
         
         bool haveMoreDbsToSync() const { return !addDbNextPass.empty(); }        
 
@@ -181,7 +181,7 @@ namespace mongo {
             return size_;
         }
     private:
-        typedef map< string, BSONObjSetDefaultOrder > IdSets;
+        typedef std::map< std::string, BSONObjSetDefaultOrder > IdSets;
         IdSets imp_;
         long long size_;
     };
@@ -190,7 +190,7 @@ namespace mongo {
     // All functions must be called with db mutex held
     class DbIds {
     public:
-        DbIds( const string & name ) : impl_( name, BSON( "ns" << 1 << "id" << 1 ) ) {}
+        DbIds( const std::string & name ) : impl_( name, BSON( "ns" << 1 << "id" << 1 ) ) {}
         void reset() {
             impl_.reset();
         }
@@ -259,7 +259,7 @@ namespace mongo {
         void mayUpgradeStorage() {
             if ( !inMem_ || memIds_.roughSize() + memModIds_.roughSize() <= maxMem_ )
                 return;
-            log() << "saving master modified id information to collection" << endl;
+            log() << "saving master modified id information to collection" << std::endl;
             upgrade( memIds_, dbIds_ );
             upgrade( memModIds_, dbModIds_ );
             memIds_.reset();

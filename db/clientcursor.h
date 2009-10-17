@@ -40,9 +40,9 @@ namespace mongo {
 
     /* todo: make this map be per connection.  this will prevent cursor hijacking security attacks perhaps.
     */
-    typedef map<CursorId, ClientCursor*> CCById;
+    typedef std::map<CursorId, ClientCursor*> CCById;
 
-    typedef multimap<DiskLoc, ClientCursor*> CCByLoc;
+    typedef std::multimap<DiskLoc, ClientCursor*> CCByLoc;
 
     extern BSONObj id_obj;
 
@@ -60,15 +60,15 @@ namespace mongo {
 
     public:
         /*const*/ CursorId cursorid;
-        string ns;
-        auto_ptr<KeyValJSMatcher> matcher;
-        auto_ptr<Cursor> c;
+        std::string ns;
+        std::auto_ptr<KeyValJSMatcher> matcher;
+        std::auto_ptr<Cursor> c;
         int pos;                                 // # objects into the cursor so far 
 
         ClientCursor() : _idleAgeMillis(0), _liveForever(false), pos(0) {
             recursive_boostlock lock(ccmutex);
             cursorid = allocCursorId_inlock();
-            clientCursorsById.insert( make_pair(cursorid, this) );
+            clientCursorsById.insert( std::make_pair(cursorid, this) );
         }
         ~ClientCursor();
 
@@ -79,7 +79,7 @@ namespace mongo {
         void setLastLoc_inlock(DiskLoc);
     public:
 
-        auto_ptr< FieldMatcher > filter; // which fields query wants returned
+        std::auto_ptr< FieldMatcher > filter; // which fields query wants returned
         Message originalMessage; // this is effectively an auto ptr for data the matcher points to
 
         /* Get rid of cursors for namespaces that begin with nsprefix.
@@ -124,7 +124,7 @@ namespace mongo {
         void mayUpgradeStorage() {
             /* if ( !ids_.get() )
                 return;
-            stringstream ss;
+            std::stringstream ss;
             ss << ns << "." << cursorid;
             ids_->mayUpgradeStorage( ss.str() );*/
         }

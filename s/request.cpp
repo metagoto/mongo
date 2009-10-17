@@ -29,6 +29,8 @@
 #include "config.h"
 #include "chunk.h"
 
+using namespace std;
+
 namespace mongo {
 
     Request::Request( Message& m, AbstractMessagingPort* p ) : 

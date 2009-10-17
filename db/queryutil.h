@@ -69,12 +69,12 @@ namespace mongo {
                   maxKey.firstElement().woCompare( max(), false ) != 0 );
         }
         bool empty() const { return intervals_.empty(); }
-		const vector< FieldInterval > &intervals() const { return intervals_; }
+		const std::vector< FieldInterval > &intervals() const { return intervals_; }
     private:
         BSONObj addObj( const BSONObj &o );
-        string simpleRegexEnd( string regex );
-        vector< FieldInterval > intervals_;
-        vector< BSONObj > objData_;
+        std::string simpleRegexEnd( std::string regex );
+        std::vector< FieldInterval > intervals_;
+        std::vector< BSONObj > objData_;
     };
     
     // implements query pattern matching, used to determine if a query is
@@ -99,8 +99,8 @@ namespace mongo {
             return !operator==( other );
         }
         bool operator<( const QueryPattern &other ) const {
-            map< string, Type >::const_iterator i = fieldTypes_.begin();
-            map< string, Type >::const_iterator j = other.fieldTypes_.begin();
+            std::map< std::string, Type >::const_iterator i = fieldTypes_.begin();
+            std::map< std::string, Type >::const_iterator j = other.fieldTypes_.begin();
             while( i != fieldTypes_.end() ) {
                 if ( j == other.fieldTypes_.end() )
                     return false;
@@ -138,7 +138,7 @@ namespace mongo {
             }
             return b.obj();
         }
-        map< string, Type > fieldTypes_;
+        std::map< std::string, Type > fieldTypes_;
         BSONObj sort_;
     };
     
@@ -148,14 +148,14 @@ namespace mongo {
     public:
         FieldRangeSet( const char *ns, const BSONObj &query , bool optimize=true );
         const FieldRange &range( const char *fieldName ) const {
-            map< string, FieldRange >::const_iterator f = ranges_.find( fieldName );
+            std::map< std::string, FieldRange >::const_iterator f = ranges_.find( fieldName );
             if ( f == ranges_.end() )
                 return trivialRange();
             return f->second;
         }
         int nNontrivialRanges() const {
             int count = 0;
-            for( map< string, FieldRange >::const_iterator i = ranges_.begin(); i != ranges_.end(); ++i )
+            for( std::map< std::string, FieldRange >::const_iterator i = ranges_.begin(); i != ranges_.end(); ++i )
                 if ( i->second.nontrivial() )
                     ++count;
             return count;
@@ -165,7 +165,7 @@ namespace mongo {
         // if fields is specified, order fields of returned object to match those of 'fields'
         BSONObj simplifiedQuery( const BSONObj &fields = BSONObj() ) const;
         bool matchPossible() const {
-            for( map< string, FieldRange >::const_iterator i = ranges_.begin(); i != ranges_.end(); ++i )
+            for( std::map< std::string, FieldRange >::const_iterator i = ranges_.begin(); i != ranges_.end(); ++i )
                 if ( i->second.empty() )
                     return false;
             return true;
@@ -175,7 +175,7 @@ namespace mongo {
     private:
         static FieldRange *trivialRange_;
         static FieldRange &trivialRange();
-        mutable map< string, FieldRange > ranges_;
+        mutable std::map< std::string, FieldRange > ranges_;
         const char *ns_;
         BSONObj query_;
     };
@@ -189,16 +189,16 @@ namespace mongo {
         void add( const BSONObj& o );
         int size() const;
 
-        bool matches( const string& s ) const;
+        bool matches( const std::string& s ) const;
         void append( BSONObjBuilder& b , const BSONElement& e ) const;
 
         BSONObj getSpec() const;
 
     private:
 
-        void extractDotted( const string& path , const BSONObj& o , BSONObjBuilder& b ) const ;
+        void extractDotted( const std::string& path , const BSONObj& o , BSONObjBuilder& b ) const ;
         
-        multimap<string,string> fields; // { 'a' : 1 , 'b.c' : 1 } ==>> [ a -> '' , b -> c ]
+        std::multimap<std::string,std::string> fields; // { 'a' : 1 , 'b.c' : 1 } ==>> [ a -> '' , b -> c ]
     };
 
 

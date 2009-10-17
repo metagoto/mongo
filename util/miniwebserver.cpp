@@ -22,6 +22,8 @@
 
 #include <pcrecpp.h>
 
+using namespace std;
+
 namespace mongo {
 
     MiniWebServer::MiniWebServer() {

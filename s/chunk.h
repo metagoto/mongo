@@ -58,15 +58,15 @@ namespace mongo {
             return _max;
         }
 
-        string getShard(){
+        std::string getShard(){
             return _shard;
         }
-        void setShard( string shard );
+        void setShard( std::string shard );
 
         bool contains( const BSONObj& obj );
 
-        string toString() const;
-        operator string() const { return toString(); }
+        std::string toString() const;
+        operator std::string() const { return toString(); }
 
         bool operator==(const Chunk& s);
         
@@ -103,12 +103,12 @@ namespace mongo {
          */
         bool moveIfShould( Chunk * newShard = 0 );
 
-        bool moveAndCommit( const string& to , string& errmsg );
+        bool moveAndCommit( const std::string& to , std::string& errmsg );
 
         virtual const char * getNS(){ return "config.chunks"; }
         virtual void serialize(BSONObjBuilder& to);
         virtual void unserialize(const BSONObj& from);
-        virtual string modelServer();
+        virtual std::string modelServer();
 
         virtual void save( bool check=false );
         
@@ -125,10 +125,10 @@ namespace mongo {
         ChunkManager * _manager;
         ShardKeyPattern skey();
 
-        string _ns;
+        std::string _ns;
         BSONObj _min;
         BSONObj _max;
-        string _shard;
+        std::string _shard;
         ShardChunkVersion _lastmod;
 
         bool _modified;
@@ -154,10 +154,10 @@ namespace mongo {
     class ChunkManager {
     public:
 
-        ChunkManager( DBConfig * config , string ns , ShardKeyPattern pattern , bool unique );
+        ChunkManager( DBConfig * config , std::string ns , ShardKeyPattern pattern , bool unique );
         virtual ~ChunkManager();
 
-        string getns(){
+        std::string getns(){
             return _ns;
         }
         
@@ -166,7 +166,7 @@ namespace mongo {
         bool hasShardKey( const BSONObj& obj );
 
         Chunk& findChunk( const BSONObj& obj );
-        Chunk* findChunkOnServer( const string& server ) const;
+        Chunk* findChunkOnServer( const std::string& server ) const;
         
         ShardKeyPattern& getShardKey(){  return _key; }
         bool isUnique(){ return _unique; }
@@ -179,14 +179,14 @@ namespace mongo {
         /**
          * @return number of Chunk added to the vector
          */
-        int getChunksForQuery( vector<Chunk*>& chunks , const BSONObj& query );
+        int getChunksForQuery( std::vector<Chunk*>& chunks , const BSONObj& query );
 
         void save();
 
-        string toString() const;
-        operator string() const { return toString(); }
+        std::string toString() const;
+        operator std::string() const { return toString(); }
 
-        ShardChunkVersion getVersion( const string& server ) const;
+        ShardChunkVersion getVersion( const std::string& server ) const;
         ShardChunkVersion getVersion() const;
 
         /**
@@ -198,11 +198,11 @@ namespace mongo {
         
     private:
         DBConfig * _config;
-        string _ns;
+        std::string _ns;
         ShardKeyPattern _key;
         bool _unique;
         
-        vector<Chunk*> _chunks;
+        std::vector<Chunk*> _chunks;
         
         unsigned long long _sequenceNumber;
         

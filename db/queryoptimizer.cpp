@@ -24,6 +24,8 @@
 #include "queryoptimizer.h"
 #include "cmdline.h"
 
+using namespace std;
+
 namespace mongo {
 
     void checkTableScanAllowed( const char * ns ){

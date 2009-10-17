@@ -33,12 +33,12 @@ namespace mongo {
     class BSONObjExternalSorter : boost::noncopyable {
     public:
         
-        typedef pair<BSONObj,DiskLoc> Data;
+        typedef std::pair<BSONObj,DiskLoc> Data;
         
     private:
         class FileIterator : boost::noncopyable {
         public:
-            FileIterator( string file );
+            FileIterator( std::string file );
             ~FileIterator();
             bool more();
             Data next();            
@@ -64,7 +64,7 @@ namespace mongo {
         
     public:
 
-        typedef list<Data> InMemory;
+        typedef std::list<Data> InMemory;
 
         class Iterator : boost::noncopyable {
         public:
@@ -76,8 +76,8 @@ namespace mongo {
             
         private:
             MyCmp _cmp;
-            vector<FileIterator*> _files;
-            vector< pair<Data,bool> > _stash;
+            std::vector<FileIterator*> _files;
+            std::vector< std::pair<Data,bool> > _stash;
             
             InMemory * _in;
             InMemory::iterator _it;
@@ -95,9 +95,9 @@ namespace mongo {
         /* call after adding values, and before fetching the iterator */
         void sort();
         
-        auto_ptr<Iterator> iterator(){
+        std::auto_ptr<Iterator> iterator(){
             uassert( "not sorted" , _sorted );
-            return auto_ptr<Iterator>( new Iterator( this ) );
+            return std::auto_ptr<Iterator>( new Iterator( this ) );
         }
         
         int numFiles(){
@@ -106,17 +106,17 @@ namespace mongo {
 
     private:
         
-        void sort( string file );
+        void sort( std::string file );
         void finishMap();
         
         BSONObj _order;
         long _maxFilesize;
-        path _root;
+        boost::filesystem::path _root;
         
         InMemory * _cur;
         long _curSizeSoFar;
         
-        list<string> _files;
+        std::list<std::string> _files;
         bool _sorted;
 
         static unsigned long long _compares;

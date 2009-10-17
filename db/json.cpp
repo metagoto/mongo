@@ -21,6 +21,7 @@
 #include "../util/builder.h"
 #include "../util/base64.h"
 
+using namespace std;
 using namespace boost::spirit;
 
 namespace mongo {

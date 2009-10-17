@@ -26,6 +26,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace JsobjTests {
     class BufBuilderBasic {
     public:

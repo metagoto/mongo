@@ -7,6 +7,8 @@
 #include "../client/connpool.h"
 #include "../db/commands.h"
 
+using namespace std;
+
 namespace mongo {
     
     class ShardStrategy : public Strategy {

@@ -19,7 +19,7 @@ namespace mongo {
 
     class Tool {
     public:
-        Tool( string name , string defaultDB="test" , string defaultCollection="");
+        Tool( std::string name , std::string defaultDB="test" , std::string defaultCollection="");
         virtual ~Tool();
 
         int main( int argc , char ** argv );
@@ -34,18 +34,18 @@ namespace mongo {
             _positonalOptions.add( name , pos );
         }
 
-        string getParam( string name , string def="" ){
+        std::string getParam( std::string name , std::string def="" ){
             if ( _params.count( name ) )
-                return _params[name.c_str()].as<string>();
+                return _params[name.c_str()].as<std::string>();
             return def;
         }
-        bool hasParam( string name ){
+        bool hasParam( std::string name ){
             return _params.count( name );
         }
 
-        string getNS(){
+        std::string getNS(){
             if ( _coll.size() == 0 ){
-                cerr << "no collection specified!" << endl;
+                std::cerr << "no collection specified!" << std::endl;
                 throw -1;
             }
             return _db + "." + _coll;
@@ -53,32 +53,32 @@ namespace mongo {
 
         virtual int run() = 0;
 
-        virtual void printHelp(ostream &out);
+        virtual void printHelp(std::ostream &out);
 
-        virtual void printExtraHelp( ostream & out );
+        virtual void printExtraHelp( std::ostream & out );
 
     protected:
 
         mongo::DBClientBase &conn( bool slaveIfPaired = false );
-        void auth( string db = "" );
+        void auth( std::string db = "" );
         
-        string _name;
+        std::string _name;
 
-        string _db;
-        string _coll;
+        std::string _db;
+        std::string _coll;
 
-        string _username;
-        string _password;
+        std::string _username;
+        std::string _password;
 
         void addFieldOptions();
         void needFields();
         
-        vector<string> _fields;
+        std::vector<std::string> _fields;
         BSONObj _fieldsObj;
 
         
     private:
-        string _host;
+        std::string _host;
         mongo::DBClientBase * _conn;
         bool _paired;
 

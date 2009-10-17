@@ -4,6 +4,8 @@
 #include "v8_utils.h"
 #include "v8_db.h"
 
+using namespace std;
+
 namespace mongo {
 
     // --- engine ---

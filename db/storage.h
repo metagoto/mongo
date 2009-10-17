@@ -77,14 +77,14 @@ namespace mongo {
             return fileNo != -2;
         }
 
-        string toString() const {
+        std::string toString() const {
             if ( isNull() )
                 return "null";
-            stringstream ss;
-            ss << hex << fileNo << ':' << ofs;
+            std::stringstream ss;
+            ss << std::hex << fileNo << ':' << ofs;
             return ss.str();
         }
-        operator string() const { return toString(); }
+        operator std::string() const { return toString(); }
 
         int& GETOFS() {
             return ofs;

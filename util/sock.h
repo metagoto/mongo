@@ -40,7 +40,7 @@ namespace mongo {
     inline void disableNagle(int sock) {
         int x = 1;
         if ( setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char *) &x, sizeof(x)) )
-            out() << "ERROR: disableNagle failed" << endl;
+            out() << "ERROR: disableNagle failed" << std::endl;
     }
     inline void prebindOptions( int sock ) {
     }
@@ -78,14 +78,14 @@ namespace mongo {
 #endif
 
         if ( setsockopt(sock, level, TCP_NODELAY, (char *) &x, sizeof(x)) )
-            log() << "ERROR: disableNagle failed" << endl;
+            log() << "ERROR: disableNagle failed" << std::endl;
 
     }
     inline void prebindOptions( int sock ) {
-        DEV log() << "doing prebind option" << endl;
+        DEV log() << "doing prebind option" << std::endl;
         int x = 1;
         if ( setsockopt( sock , SOL_SOCKET, SO_REUSEADDR, &x, sizeof(x)) < 0 )
-            out() << "Failed to set socket opt, SO_REUSEADDR" << endl;
+            out() << "Failed to set socket opt, SO_REUSEADDR" << std::endl;
     }
 
 
@@ -98,13 +98,13 @@ namespace mongo {
         tv.tv_usec = 1000;
         int rc = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *) &tv, sizeof(tv));
         if ( rc ) {
-            out() << "ERROR: setsockopt RCVTIMEO failed rc:" << rc << " errno:" << getLastError() << " secs:" << secs << " sock:" << sock << endl;
+            out() << "ERROR: setsockopt RCVTIMEO failed rc:" << rc << " errno:" << getLastError() << " secs:" << secs << " sock:" << sock << std::endl;
         }
     }
 
     // If an ip address is passed in, just return that.  If a hostname is passed
     // in, look up its ip and return that.  Returns "" on failure.
-    string hostbyname(const char *hostname);
+    std::string hostbyname(const char *hostname);
 
     struct SockAddr {
         SockAddr() {
@@ -125,8 +125,8 @@ namespace mongo {
 #endif
         }
 
-        string toString() {
-            stringstream out;
+        std::string toString() {
+            std::stringstream out;
             out << inet_ntoa(sa.sin_addr) << ':'
             << sa.sin_port;
             return out.str();
@@ -191,12 +191,12 @@ namespace mongo {
     inline bool UDPConnection::init(const SockAddr& myAddr) {
         sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if ( sock == INVALID_SOCKET ) {
-            out() << "invalid socket? " << errno << endl;
+            out() << "invalid socket? " << errno << std::endl;
             return false;
         }
         //out() << sizeof(sockaddr_in) << ' ' << myAddr.addressSize << endl;
         if ( ::bind(sock, (sockaddr *) &myAddr.sa, myAddr.addressSize) != 0 ) {
-            out() << "udp init failed" << endl;
+            out() << "udp init failed" << std::endl;
             closesocket(sock);
             sock = 0;
             return false;
@@ -208,7 +208,7 @@ namespace mongo {
                        SO_RCVBUF,
                        (char*)&rcvbuf,
                        &optLen) != -1)
-            out() << "SO_RCVBUF:" << rcvbuf << endl;
+            out() << "SO_RCVBUF:" << rcvbuf << std::endl;
         return true;
     }
 
@@ -221,7 +221,7 @@ namespace mongo {
     }
 
     inline SockAddr::SockAddr(const char * iporhost , int port) {
-        string ip = hostbyname( iporhost );
+        std::string ip = hostbyname( iporhost );
         memset(sa.sin_zero, 0, sizeof(sa.sin_zero));
         sa.sin_family = AF_INET;
         sa.sin_port = htons(port);
@@ -229,11 +229,11 @@ namespace mongo {
         addressSize = sizeof(sa);
     }
 
-    inline string getHostName() {
+    inline std::string getHostName() {
         char buf[256];
         int ec = gethostname(buf, 127);
         if ( ec || *buf == 0 ) {
-            log() << "can't get this server's hostname errno:" << ec << endl;
+            log() << "can't get this server's hostname errno:" << ec << std::endl;
             return "";
         }
         return buf;

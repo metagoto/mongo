@@ -24,6 +24,8 @@
 #include "../db/btree.h"
 #include "dbtests.h"
 
+using namespace std;
+
 namespace CursorTests {
     
 //    typedef IdSet_Deprecated IdSet;

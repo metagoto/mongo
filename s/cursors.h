@@ -29,12 +29,12 @@ namespace mongo {
         bool sendNextBatch( Request& r , int ntoreturn );
         
     protected:
-        auto_ptr<DBClientCursor> query( const string& server , int num = 0 , BSONObj extraFilter = BSONObj() );
+        std::auto_ptr<DBClientCursor> query( const std::string& server , int num = 0 , BSONObj extraFilter = BSONObj() );
 
         BSONObj concatQuery( const BSONObj& query , const BSONObj& extraFilter );
         BSONObj _concatFilter( const BSONObj& filter , const BSONObj& extraFilter );
 
-        string _ns;
+        std::string _ns;
         int _options;
         int _skip;
         int _ntoreturn;
@@ -51,7 +51,7 @@ namespace mongo {
 
     class ServerAndQuery {
     public:
-        ServerAndQuery( const string& server , BSONObj extra = BSONObj() , BSONObj orderObject = BSONObj() ) : 
+        ServerAndQuery( const std::string& server , BSONObj extra = BSONObj() , BSONObj orderObject = BSONObj() ) : 
             _server( server ) , _extra( extra.getOwned() ) , _orderObject( orderObject.getOwned() ){
         }
 
@@ -66,26 +66,26 @@ namespace mongo {
             return _extra.woCompare( other._extra ) < 0;
         }
 
-        string _server;
+        std::string _server;
         BSONObj _extra;
         BSONObj _orderObject;
     };
 
     class SerialServerShardedCursor : public ShardedCursor {
     public:
-        SerialServerShardedCursor( set<ServerAndQuery> servers , QueryMessage& q , int sortOrder=0);
+        SerialServerShardedCursor( std::set<ServerAndQuery> servers , QueryMessage& q , int sortOrder=0);
         virtual bool more();
         virtual BSONObj next();
     private:
-        vector<ServerAndQuery> _servers;
+        std::vector<ServerAndQuery> _servers;
         unsigned _serverIndex;
         
-        auto_ptr<DBClientCursor> _current;
+        std::auto_ptr<DBClientCursor> _current;
     };
         
     class ParallelSortShardedCursor : public ShardedCursor {
     public:
-        ParallelSortShardedCursor( set<ServerAndQuery> servers , QueryMessage& q , const BSONObj& sortKey );
+        ParallelSortShardedCursor( std::set<ServerAndQuery> servers , QueryMessage& q , const BSONObj& sortKey );
         virtual ~ParallelSortShardedCursor();
         virtual bool more();
         virtual BSONObj next();
@@ -93,10 +93,10 @@ namespace mongo {
         void advance();
 
         int _numServers;
-        set<ServerAndQuery> _servers;
+        std::set<ServerAndQuery> _servers;
         BSONObj _sortKey;
 
-        auto_ptr<DBClientCursor> * _cursors;
+        std::auto_ptr<DBClientCursor> * _cursors;
         BSONObj * _nexts;
     };
     
@@ -110,7 +110,7 @@ namespace mongo {
         void remove( long long id );
 
     private:
-        map<long long,ShardedCursor*> _cursors;
+        std::map<long long,ShardedCursor*> _cursors;
     };
     
     extern CursorCache cursorCache;

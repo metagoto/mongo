@@ -35,6 +35,8 @@
 #include "chunk.h"
 #include "strategy.h"
 
+using namespace std;
+
 namespace mongo {
 
     extern string ourHostname;

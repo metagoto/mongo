@@ -33,6 +33,8 @@
 
 #include "../scripting/engine.h"
 
+using namespace std;
+
 namespace mongo {
 
     const int edebug=0;

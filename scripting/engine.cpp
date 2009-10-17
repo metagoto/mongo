@@ -5,6 +5,9 @@
 #include "../util/file.h"
 #include "../client/dbclient.h"
 
+using namespace std;
+using namespace boost::filesystem;
+
 namespace mongo {
 
     long long Scope::_lastVersion = 1;

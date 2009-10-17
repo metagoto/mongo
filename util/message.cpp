@@ -26,6 +26,8 @@
 #include <fcntl.h>
 #include <errno.h>
 
+using namespace std;
+
 namespace mongo {
 
     bool objcheck = false;

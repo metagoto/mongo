@@ -33,6 +33,7 @@
 #undef assert
 #define assert xassert
 
+using namespace std;
 
 namespace mongo {
 

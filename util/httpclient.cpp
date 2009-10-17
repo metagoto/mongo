@@ -3,6 +3,8 @@
 #include "stdafx.h"
 #include "httpclient.h"
 
+using namespace std;
+
 namespace mongo {
 
     int HttpClient::get( string url , map<string,string>& headers, stringstream& data ){

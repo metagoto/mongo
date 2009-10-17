@@ -11,6 +11,8 @@
 #define assert xassert
 #endif
 
+using namespace std;
+
 namespace mongo {
 
     string trim( string s ){

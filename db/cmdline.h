@@ -24,8 +24,8 @@ namespace mongo {
     struct CmdLine { 
         int port;              // --port
 
-        string source;         // --source
-        string only;           // --only
+        std::string source;         // --source
+        std::string only;           // --only
 
         bool quiet;            // --quiet
         bool notablescan;      // --notablescan

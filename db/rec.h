@@ -46,7 +46,7 @@ public:
     }
 
     /* close datafiles associated with the db specified. */
-    virtual void closeFiles(string dbname, string path) {
+    virtual void closeFiles(std::string dbname, std::string path) {
         /* as this is only used for indexes so far, and we are in the same 
            PDFiles as the nonindex data, we just rely on them having been closed 
            at the same time.  one day this may need to change.

@@ -36,6 +36,8 @@
 #include <sys/file.h>
 #endif
 
+using namespace std;
+
 namespace mongo {
 
     CmdLine cmdLine;

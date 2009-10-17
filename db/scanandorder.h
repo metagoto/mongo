@@ -87,7 +87,7 @@ namespace mongo {
         return true;
     }
     
-    typedef multimap<BSONObj,BSONObj,BSONObjCmp> BestMap;
+    typedef std::multimap<BSONObj,BSONObj,BSONObjCmp> BestMap;
     class ScanAndOrder {
         BestMap best; // key -> full object
         int startFrom;
@@ -96,7 +96,7 @@ namespace mongo {
         unsigned approxSize;
 
         void _add(BSONObj& k, BSONObj o) {
-            best.insert(make_pair(k,o));
+            best.insert(std::make_pair(k,o));
         }
 
         void _addIfBetter(BSONObj& k, BSONObj o, BestMap::iterator i) {

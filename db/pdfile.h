@@ -40,15 +40,15 @@ namespace mongo {
     class Cursor;
 
     void dropDatabase(const char *ns);
-    bool repairDatabase(const char *ns, string &errmsg, bool preserveClonedFilesOnFailure = false, bool backupOriginalFiles = false);
+    bool repairDatabase(const char *ns, std::string &errmsg, bool preserveClonedFilesOnFailure = false, bool backupOriginalFiles = false);
 
     /* low level - only drops this ns */
-    void dropNS(const string& dropNs);
+    void dropNS(const std::string& dropNs);
     
     /* deletes this ns, indexes and cursors */
-    void dropCollection( const string &name, string &errmsg, BSONObjBuilder &result ); 
-    bool userCreateNS(const char *ns, BSONObj j, string& err, bool logForReplication);
-    auto_ptr<Cursor> findTableScan(const char *ns, const BSONObj& order, const DiskLoc &startLoc=DiskLoc());
+    void dropCollection( const std::string &name, std::string &errmsg, BSONObjBuilder &result ); 
+    bool userCreateNS(const char *ns, BSONObj j, std::string& err, bool logForReplication);
+    std::auto_ptr<Cursor> findTableScan(const char *ns, const BSONObj& order, const DiskLoc &startLoc=DiskLoc());
     void getKeysFromObject( const BSONObj &keyPattern, const BSONObj &obj, BSONObjSetDefaultOrder &keys );
 
 // -1 if library unavailable.
@@ -97,18 +97,18 @@ namespace mongo {
     class DataFileMgr {
         friend class BasicCursor;
     public:
-        void init(const string& path );
+        void init(const std::string& path );
 
         void update(
             const char *ns,
             Record *toupdate, const DiskLoc& dl,
-            const char *buf, int len, stringstream& profiling);
+            const char *buf, int len, std::stringstream& profiling);
         // The object o may be updated if modified on insert.                                
         void insertAndLog( const char *ns, const BSONObj &o, bool god = false );
         DiskLoc insert(const char *ns, BSONObj &o, bool god = false);
         DiskLoc insert(const char *ns, const void *buf, int len, bool god = false, const BSONElement &writeId = BSONElement(), bool mayAddIndex = true);
         void deleteRecord(const char *ns, Record *todelete, const DiskLoc& dl, bool cappedOK = false, bool noWarn = false);
-        static auto_ptr<Cursor> findAll(const char *ns, const DiskLoc &startLoc = DiskLoc());
+        static std::auto_ptr<Cursor> findAll(const char *ns, const DiskLoc &startLoc = DiskLoc());
 
         /* special version of insert for transaction logging -- streamlined a bit.
            assumes ns is capped and no indexes
@@ -123,7 +123,7 @@ namespace mongo {
         void _deleteRecord(NamespaceDetails *d, const char *ns, Record *todelete, const DiskLoc& dl);
 
     private:
-        vector<MongoDataFile *> files;
+        std::vector<MongoDataFile *> files;
     };
 
     extern DataFileMgr theDataFileMgr;
@@ -198,7 +198,7 @@ namespace mongo {
                    length >= 0 && !myLoc.isNull();
         }
 
-        void dump(iostream& s) {
+        void dump(std::iostream& s) {
             s << "    loc:" << myLoc.toString() << " xnext:" << xnext.toString() << " xprev:" << xprev.toString() << '\n';
             s << "    ns:" << ns.buf << '\n';
             s << "    size:" << length << " firstRecord:" << firstRecord.toString() << " lastRecord:" << lastRecord.toString() << '\n';
@@ -381,7 +381,7 @@ namespace mongo {
         virtual const char * op() const = 0;
     };
 
-    void _applyOpToDataFiles( const char *database, FileOp &fo, bool afterAllocator = false, const string& path = dbpath );
+    void _applyOpToDataFiles( const char *database, FileOp &fo, bool afterAllocator = false, const std::string& path = dbpath );
 
     inline void _deleteDataFiles(const char *database) {
         class : public FileOp {
@@ -406,7 +406,7 @@ namespace mongo {
             if ( database->name != buf ) {
                 out() << "ERROR: attempt to write to wrong database database\n";
                 out() << " ns:" << ns << '\n';
-                out() << " database->name:" << database->name << endl;
+                out() << " database->name:" << database->name << std::endl;
                 assert( database->name == buf );
             }
         }
@@ -436,6 +436,6 @@ namespace mongo {
     
     void ensureHaveIdIndex(const char *ns);
     
-    bool deleteIndexes( NamespaceDetails *d, const char *ns, const char *name, string &errmsg, BSONObjBuilder &anObjBuilder, bool maydeleteIdIndex );
+    bool deleteIndexes( NamespaceDetails *d, const char *ns, const char *name, std::string &errmsg, BSONObjBuilder &anObjBuilder, bool maydeleteIdIndex );
         
 } // namespace mongo

@@ -1,5 +1,7 @@
 #include "../stdafx.h"
 
+using namespace std;
+
 namespace mongo {
 
     const char * curNs = "in client mode";

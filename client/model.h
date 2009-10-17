@@ -42,7 +42,7 @@ namespace mongo {
         virtual void serialize(BSONObjBuilder& to) = 0;
         virtual void unserialize(const BSONObj& from) = 0;
 
-        virtual string modelServer() = 0;
+        virtual std::string modelServer() = 0;
         
         /** Load a single object. 
             @return true if successful.

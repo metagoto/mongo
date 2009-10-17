@@ -73,7 +73,7 @@ namespace mongo {
         
         BasicMatcher( BSONElement _e , int _op , const BSONObj& array ) : toMatch( _e ) , compareOp( _op ){
             
-            myset.reset( new set<BSONElement,element_lt>() );
+            myset.reset( new std::set<BSONElement,element_lt>() );
             
             BSONObjIterator i( array );
             while ( i.more() ) {
@@ -84,7 +84,7 @@ namespace mongo {
         
         BSONElement toMatch;
         int compareOp;
-        shared_ptr< set<BSONElement,element_lt> > myset;
+        boost::shared_ptr< std::set<BSONElement,element_lt> > myset;
         
         // these are for specific operators
         int mod;
@@ -152,7 +152,7 @@ namespace mongo {
         BSONObj jsobj;                  // the query pattern.  e.g., { name: "joe" }
         BSONObj constrainIndexKey_;
         
-        vector<BasicMatcher> basics;
+        std::vector<BasicMatcher> basics;
 //        int n;                           // # of basicmatcher items
         bool haveSize;
         bool all;
@@ -162,7 +162,7 @@ namespace mongo {
         int nRegex;
 
         // so we delete the mem when we're done:
-        vector< shared_ptr< BSONObjBuilder > > builders_;
+        std::vector< boost::shared_ptr< BSONObjBuilder > > builders_;
 
         friend class KeyValJSMatcher;
     };

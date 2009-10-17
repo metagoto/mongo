@@ -37,6 +37,8 @@
 #include "queryoptimizer.h"
 #include "../scripting/engine.h"
 
+using namespace std;
+
 namespace mongo {
 
     extern int queryTraceLevel;

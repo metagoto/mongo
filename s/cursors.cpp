@@ -5,6 +5,8 @@
 #include "../client/connpool.h"
 #include "../db/queryutil.h"
 
+using namespace std;
+
 namespace mongo {
     
     // --------  ShardedCursor -----------

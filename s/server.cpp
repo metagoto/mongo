@@ -27,6 +27,8 @@
 #include "config.h"
 #include "chunk.h"
 
+using namespace std;
+
 namespace mongo {
 
     int port = 27017;

@@ -19,6 +19,8 @@
 #include "stdafx.h"
 #include "sock.h"
 
+using namespace std;
+
 namespace mongo {
 
     static boost::mutex sock_mutex;

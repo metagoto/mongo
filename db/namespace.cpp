@@ -29,6 +29,8 @@
 #include "queryutil.h"
 #include "json.h"
 
+using namespace std;
+
 namespace mongo {
 
     BSONObj idKeyPattern = fromjson("{\"_id\":1}");

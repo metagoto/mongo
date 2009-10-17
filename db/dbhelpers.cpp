@@ -23,6 +23,8 @@
 #include "json.h"
 #include "queryoptimizer.h"
 
+using namespace std;
+
 namespace mongo {
 
     void Helpers::ensureIndex(const char *ns, BSONObj keyPattern, bool unique, const char *name) {

@@ -23,6 +23,8 @@
 #include "mockdbclient.h"
 #include "../db/cmdline.h"
 
+using namespace std;
+
 namespace mongo {
     extern PairSync *pairSync;
 } // namespace mongo

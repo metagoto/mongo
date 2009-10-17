@@ -27,6 +27,7 @@
 
 #include <boost/program_options.hpp>
 
+using namespace std;
 using namespace mongo;
 
 namespace po = boost::program_options;

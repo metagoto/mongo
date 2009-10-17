@@ -8,7 +8,7 @@ namespace mongo {
     
     class HttpClient {
     public:
-        int get( string url , map<string,string>& headers, stringstream& data );
+        int get( std::string url , std::map<std::string,std::string>& headers, std::stringstream& data );
     };
 }
 

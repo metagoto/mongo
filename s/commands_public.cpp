@@ -27,6 +27,8 @@
 #include "chunk.h"
 #include "strategy.h"
 
+using namespace std;
+
 namespace mongo {
 
     namespace dbgrid_pub_cmds {

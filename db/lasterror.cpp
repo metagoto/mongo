@@ -9,6 +9,8 @@
 #include "lasterror.h"
 #include "jsobj.h"
 
+using namespace std;
+
 namespace mongo {
 
     LastError LastError::noError;

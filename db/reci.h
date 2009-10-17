@@ -33,7 +33,7 @@ public:
     virtual void rename(const char *fromNs, const char *toNs) = 0;
 
     /* close datafiles associated with the db specified. */
-    virtual void closeFiles(string dbname, string path) = 0;
+    virtual void closeFiles(std::string dbname, std::string path) = 0;
 
     /* todo add: 
        closeFiles(dbname)

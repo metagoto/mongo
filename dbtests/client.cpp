@@ -4,6 +4,8 @@
 #include "../client/dbclient.h"
 #include "dbtests.h"
 
+using namespace std;
+
 namespace ClientTests {
     
     class Base {

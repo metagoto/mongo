@@ -20,6 +20,8 @@
 #include "model.h"
 #include "connpool.h"
 
+using namespace std;
+
 namespace mongo {
 
     bool Model::load(BSONObj& query){

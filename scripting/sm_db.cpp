@@ -2,6 +2,8 @@
 
 // hacked in right now from engine_spidermonkey.cpp
 
+using namespace std;
+
 namespace mongo {
 
     bool haveLocalShardingInfo( const string& ns );

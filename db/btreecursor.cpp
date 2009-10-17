@@ -21,6 +21,8 @@
 #include "pdfile.h"
 #include "jsobj.h"
 
+using namespace std;
+
 namespace mongo {
 
     extern int otherTraceLevel;

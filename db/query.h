@@ -77,14 +77,14 @@ namespace mongo {
     /* returns true if an existing object was updated, false if no existing object was found.
        multi - update multiple objects - mostly useful with things like $set
     */
-    bool updateObjects(const char *ns, BSONObj updateobj, BSONObj pattern, bool upsert, stringstream& ss, bool multi = false);
+    bool updateObjects(const char *ns, BSONObj updateobj, BSONObj pattern, bool upsert, std::stringstream& ss, bool multi = false);
 
     // If justOne is true, deletedId is set to the id of the deleted object.
     int deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop = false, bool god=false);
 
-    long long runCount(const char *ns, const BSONObj& cmd, string& err);
+    long long runCount(const char *ns, const BSONObj& cmd, std::string& err);
     
-    auto_ptr< QueryResult > runQuery(Message& m, stringstream& ss );
+    std::auto_ptr< QueryResult > runQuery(Message& m, std::stringstream& ss );
     
 } // namespace mongo
 

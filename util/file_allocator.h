@@ -47,7 +47,7 @@ namespace mongo {
         }
         // May be called if file exists. If file exists, or its allocation has
         // been requested, size is updated to match existing file size.
-        void requestAllocation( const string &name, long &size ) {
+        void requestAllocation( const std::string &name, long &size ) {
 #if !defined(_WIN32)
             boostlock lk( pendingMutex_ );
             long oldSize = prevSize( name );
@@ -62,7 +62,7 @@ namespace mongo {
         }
         // Returns when file has been allocated.  If file exists, size is
         // updated to match existing file size.
-        void allocateAsap( const string &name, long &size ) {
+        void allocateAsap( const std::string &name, long &size ) {
 #if !defined(_WIN32)
             boostlock lk( pendingMutex_ );
             long oldSize = prevSize( name );
@@ -76,7 +76,7 @@ namespace mongo {
                 pending_.push_back( name );
             else if ( pending_.front() != name ) {
                 pending_.remove( name );
-                list< string >::iterator i = pending_.begin();
+                std::list< std::string >::iterator i = pending_.begin();
                 ++i;
                 pending_.insert( i, name );
             }
@@ -100,7 +100,7 @@ namespace mongo {
 #if !defined(_WIN32)
         // caller must hold pendingMutex_ lock.  Returns size if allocated or 
         // allocation requested, -1 otherwise.
-        long prevSize( const string &name ) const {
+        long prevSize( const std::string &name ) const {
             if ( pendingSize_.count( name ) > 0 )
                 return pendingSize_[ name ];
             if ( boost::filesystem::exists( name ) )
@@ -109,8 +109,8 @@ namespace mongo {
         }
          
         // caller must hold pendingMutex_ lock.
-        bool inProgress( const string &name ) const {
-            for( list< string >::const_iterator i = pending_.begin(); i != pending_.end(); ++i )
+        bool inProgress( const std::string &name ) const {
+            for( std::list< std::string >::const_iterator i = pending_.begin(); i != pending_.end(); ++i )
                 if ( *i == name )
                     return true;
             return false;
@@ -118,8 +118,8 @@ namespace mongo {
 
         mutable boost::mutex pendingMutex_;
         mutable boost::condition pendingUpdated_;
-        list< string > pending_;
-        mutable map< string, long > pendingSize_;
+        std::list< std::string > pending_;
+        mutable std::map< std::string, long > pendingSize_;
         bool failed_;
         
         struct Runner {
@@ -133,7 +133,7 @@ namespace mongo {
                             a_.pendingUpdated_.wait( lk );
                     }
                     while( 1 ) {
-                        string name;
+                        std::string name;
                         long size;
                         {
                             boostlock lk( a_.pendingMutex_ );
@@ -145,14 +145,14 @@ namespace mongo {
                         try {
                             long fd = open(name.c_str(), O_CREAT | O_RDWR | O_NOATIME, S_IRUSR | S_IWUSR);
                             if ( fd <= 0 ) {
-                                stringstream ss;
+                                std::stringstream ss;
                                 ss << "couldn't open " << name << ' ' << errno;
                                 massert( ss.str(), fd <= 0 );
                             }
 
 #if defined(POSIX_FADV_DONTNEED)
                             if( posix_fadvise(fd, 0, size, POSIX_FADV_DONTNEED) ) { 
-                                log() << "warning: posix_fadvise fails " << name << ' ' << errno << endl;
+                                log() << "warning: posix_fadvise fails " << name << ' ' << errno << std::endl;
                             }
 #endif
   
@@ -166,7 +166,7 @@ namespace mongo {
                                 massert( "Unable to allocate file of desired size",
                                         1 == write(fd, "", 1) );
                                 lseek(fd, 0, SEEK_SET);
-                                log() << "allocating new datafile " << name << ", filling with zeroes..." << endl;
+                                log() << "allocating new datafile " << name << ", filling with zeroes..." << std::endl;
                                 Timer t;
                                 long z = 256 * 1024;
                                 char buf[z];
@@ -180,13 +180,13 @@ namespace mongo {
                                     massert( "write failed", z == write(fd, buf, z) );
                                     left -= z;
                                 }
-                                log() << "done allocating datafile " << name << ", size: " << size/1024/1024 << "MB, took " << ((double)t.millis())/1000.0 << " secs" << endl;
+                                log() << "done allocating datafile " << name << ", size: " << size/1024/1024 << "MB, took " << ((double)t.millis())/1000.0 << " secs" << std::endl;
                             }                            
                             close( fd );
                             
                         } catch ( ... ) {
                             problem() << "Failed to allocate new file: " << name
-                                      << ", size: " << size << ", aborting." << endl;
+                                      << ", size: " << size << ", aborting." << std::endl;
                             try {
                                 BOOST_CHECK_EXCEPTION( boost::filesystem::remove( name ) );
                             } catch ( ... ) {

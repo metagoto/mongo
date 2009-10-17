@@ -35,13 +35,13 @@ namespace mongo {
         char context[128];
         const char *file;
         unsigned line;
-        time_t when;
+        std::time_t when;
         void set(const char *m, const char *ctxt, const char *f, unsigned l) {
             strncpy(msg, m, 127);
             strncpy(context, ctxt, 127);
             file = f;
             line = l;
-            when = time(0);
+            when = std::time(0);
         }
         std::string toString();
         bool isSet() {
@@ -62,15 +62,15 @@ namespace mongo {
     class DBException : public std::exception {
     public:
         virtual const char* what() const throw() = 0;
-        virtual string toString() const {
+        virtual std::string toString() const {
             return what();
         }
-        operator string() const { return toString(); }
+        operator std::string() const { return toString(); }
     };
 
     class AssertionException : public DBException {
     public:
-        string msg;
+        std::string msg;
         AssertionException() { }
         virtual ~AssertionException() throw() { }
         virtual bool severe() {
@@ -88,7 +88,7 @@ namespace mongo {
         UserException(const char *_msg) {
             msg = _msg;
         }
-        UserException(string _msg) {
+        UserException(std::string _msg) {
             msg = _msg;
         }
         virtual bool severe() {
@@ -97,7 +97,7 @@ namespace mongo {
         virtual bool isUserAssertion() {
             return true;
         }
-        virtual string toString() const {
+        virtual std::string toString() const {
             return "userassert:" + msg;
         }
     };
@@ -110,7 +110,7 @@ namespace mongo {
         virtual bool severe() {
             return false;
         }
-        virtual string toString() const {
+        virtual std::string toString() const {
             return "massert:" + msg;
         }
     };
@@ -118,10 +118,10 @@ namespace mongo {
     void asserted(const char *msg, const char *file, unsigned line);
     void wasserted(const char *msg, const char *file, unsigned line);
     void uasserted(const char *msg);
-    inline void uasserted(string msg) { uasserted(msg.c_str()); }
+    inline void uasserted(std::string msg) { uasserted(msg.c_str()); }
     void uassert_nothrow(const char *msg); // reported via lasterror, but don't throw exception
     void msgasserted(const char *msg);
-    inline void msgasserted(string msg) { msgasserted(msg.c_str()); }
+    inline void msgasserted(std::string msg) { msgasserted(msg.c_str()); }
 
 #ifdef assert
 #undef assert
@@ -162,7 +162,7 @@ namespace mongo {
 	try { \
 		expression; \
 	} catch ( const std::exception &e ) { \
-		problem() << "caught boost exception: " << e.what() << endl; \
+		problem() << "caught boost exception: " << e.what() << std::endl; \
 		assert( false ); \
 	} catch ( ... ) { \
 		assert( false ); \

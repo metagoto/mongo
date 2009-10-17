@@ -27,6 +27,8 @@
 #include "../db/dbmessage.h"
 #include "../db/cmdline.h"
 
+using namespace std;
+
 namespace mongo {
 
     Query& Query::where(const string &jscode, BSONObj scope) { 

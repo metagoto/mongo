@@ -27,26 +27,26 @@ namespace mongo {
         MiniWebServer();
         virtual ~MiniWebServer() {}
 
-        bool init(const string &ip, int _port);
+        bool init(const std::string &ip, int _port);
         void run();
 
         virtual void doRequest(
             const char *rq, // the full request
-            string url,
+            std::string url,
             // set these and return them:
-            string& responseMsg,
+            std::string& responseMsg,
             int& responseCode,
-            vector<string>& headers, // if completely empty, content-type: text/html will be added
+            std::vector<std::string>& headers, // if completely empty, content-type: text/html will be added
             const SockAddr &from
         ) = 0;
 
         int socket() const { return sock; }
         
     protected:
-        string parseURL( const char * buf );
-        string parseMethod( const char * headers );
-        string getHeader( const char * headers , string name );
-        void parseParams( map<string,string> & params , string query );
+        std::string parseURL( const char * buf );
+        std::string parseMethod( const char * headers );
+        std::string getHeader( const char * headers , std::string name );
+        void parseParams( std::map<std::string,std::string> & params , std::string query );
         static const char *body( const char *buf );
 
     private:

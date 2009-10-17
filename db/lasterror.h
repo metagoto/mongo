@@ -27,7 +27,7 @@ namespace mongo {
     class Message;
 
     struct LastError {
-        string msg;
+        std::string msg;
         enum UpdatedExistingType { NotUpdate, True, False } updatedExisting;
         int nObjects;
         int nPrev;
@@ -92,7 +92,7 @@ namespace mongo {
             LastError *lerr;
         };
         static boost::mutex _idsmutex;
-        map<int,Status> _ids;        
+        std::map<int,Status> _ids;        
     } lastError;
     
     inline void raiseError(const char *msg) {

@@ -53,7 +53,7 @@ namespace mongo {
         // ---- remote location info -----
 
         
-        string singleServerName();
+        std::string singleServerName();
         
         const char * primaryName(){
             return _config->getPrimary().c_str();
@@ -89,8 +89,8 @@ namespace mongo {
     
     class StaleConfigException : public std::exception {
     public:
-        StaleConfigException( const string& ns , const string& msg){
-            stringstream s;
+        StaleConfigException( const std::string& ns , const std::string& msg){
+            std::stringstream s;
             s << "StaleConfigException ns: " << ns << " " << msg;
             _msg = s.str();
         }
@@ -101,18 +101,18 @@ namespace mongo {
             return _msg.c_str();
         }
     private:
-        string _msg;
+        std::string _msg;
     };
 
-    typedef map<int,ClientInfo*> ClientCache;
+    typedef std::map<int,ClientInfo*> ClientCache;
     
     class ClientInfo {
     public:
         ClientInfo( int clientId );
         ~ClientInfo();
         
-        void addShard( const string& shard );
-        set<string> * getPrev() const { return _prev; };
+        void addShard( const std::string& shard );
+        std::set<std::string> * getPrev() const { return _prev; };
         
         void newRequest();
         void disconnect();
@@ -121,10 +121,10 @@ namespace mongo {
         
     private:
         int _id;
-        set<string> _a;
-        set<string> _b;
-        set<string> * _cur;
-        set<string> * _prev;
+        std::set<std::string> _a;
+        std::set<std::string> _b;
+        std::set<std::string> * _cur;
+        std::set<std::string> * _prev;
         int _lastAccess;
         
         static boost::mutex _clientsLock;

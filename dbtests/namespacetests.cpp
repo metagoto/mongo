@@ -26,6 +26,8 @@
 
 #include "dbtests.h"
 
+using namespace std;
+
 namespace NamespaceTests {
     namespace IndexDetailsTests {
         class Base {

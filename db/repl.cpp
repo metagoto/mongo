@@ -46,6 +46,8 @@
 #include "security.h"
 #include "cmdline.h"
 
+using namespace std;
+
 namespace mongo {
 
     extern boost::recursive_mutex &dbMutex;

@@ -19,6 +19,8 @@
 #include "stdafx.h"
 #include "mmap.h"
 
+using namespace std;
+
 namespace mongo {
 
     set<MemoryMappedFile*> mmfiles;

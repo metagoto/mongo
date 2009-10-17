@@ -36,7 +36,7 @@ namespace mongo {
         Database* _database;
         Namespace _ns;
         //NamespaceString _nsstr;
-        list<string> _tempCollections;
+        std::list<std::string> _tempCollections;
     public:
         AuthenticationInfo *ai;
         Top top;
@@ -54,7 +54,7 @@ namespace mongo {
         Client();
         ~Client();
 
-        void addTempCollection( const string& ns ){
+        void addTempCollection( const std::string& ns ){
             _tempCollections.push_back( ns );
         }
 
