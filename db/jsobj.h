@@ -1001,7 +1001,7 @@ namespace mongo {
         RIGHT_SUBFIELD = 2
     };
 
-    FieldCompareResult compareDottedFieldNames( const string& l , const string& r );
+    FieldCompareResult compareDottedFieldNames( const std::string& l , const std::string& r );
 
 /** Use BSON macro to build a BSONObj from a stream 
 

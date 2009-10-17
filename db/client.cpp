@@ -24,6 +24,8 @@
 #include "db.h"
 #include "client.h"
 #include "curop.h"
+
+using namespace std;
  
 namespace mongo {
 

@@ -36,7 +36,7 @@ namespace mongo {
     class Client : boost::noncopyable { 
     public:
         static boost::mutex clientsMutex;
-        static set<Client*> clients; // always be in clientsMutex when manipulating this
+        static std::set<Client*> clients; // always be in clientsMutex when manipulating this
     private:
         CurOp *_op;
         Database *_database;
