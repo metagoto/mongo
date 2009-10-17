@@ -51,7 +51,6 @@ using namespace std;
 namespace mongo {
 
     extern boost::recursive_mutex &dbMutex;
-    extern long long oplogSize;
     int _updateObjects(const char *ns, BSONObj updateobj, BSONObj pattern, bool upsert, stringstream& ss, bool logOp=false);
     void ensureHaveIdIndex(const char *ns);
 
@@ -1591,8 +1590,8 @@ namespace mongo {
         {
             dblock lk;
 
-            Client::initThread();
-			currentClient.get()->ai->authorize("admin");
+            Client::initThread("replslave");
+	    currentClient.get()->ai->authorize("admin");
         
             BSONObj obj;
             if ( Helpers::getSingleton("local.pair.startup", obj) ) {
@@ -1636,8 +1635,8 @@ namespace mongo {
         /* create an oplog collection, if it doesn't yet exist. */
         BSONObjBuilder b;
         double sz;
-        if ( oplogSize != 0 )
-            sz = (double) oplogSize;
+        if ( cmdLine.oplogSize != 0 )
+            sz = (double)cmdLine.oplogSize;
         else {
             sz = 50.0 * 1000 * 1000;
             if ( sizeof(int *) >= 8 ) {

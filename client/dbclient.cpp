@@ -551,7 +551,7 @@ namespace mongo {
         b.append( ns );
 
         int flags = 0;
-        if ( justOne || obj.obj.hasField( "_id" ) )
+        if ( justOne )
             flags |= 1;
         b.append( flags );
 

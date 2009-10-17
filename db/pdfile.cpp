@@ -49,7 +49,7 @@ namespace mongo {
     DataFileMgr theDataFileMgr;
     map<string,Database*> databases;
     int MAGIC = 0x1000;
-    int curOp = -2;
+//    int curOp = -2;
     int callDepth = 0;
 
     extern int otherTraceLevel;
@@ -71,7 +71,7 @@ namespace mongo {
                 ss << cc().ns() << ' ';
             }
         }
-        ss<< "op:" << curOp << ' ' << callDepth;
+        ss << callDepth;
         return ss.str();
     }
 

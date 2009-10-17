@@ -231,5 +231,7 @@ namespace mongo {
        defined in assert_util.cpp 
      */
     void initLogging( const std::string& logpath , bool append );
+    void rotateLogs( int signal = 0 );
+
 
 } // namespace mongo

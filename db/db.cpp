@@ -56,10 +56,9 @@ namespace mongo {
 
     extern string bind_ip;
     extern char *appsrvPath;
-    extern int curOp;
+//    extern int curOp;
     extern bool autoresync;
     extern int opLogging;
-    extern long long oplogSize;
     extern OpLog _oplog;
     extern int lenForNewNsFiles;
 
@@ -176,7 +175,7 @@ namespace mongo {
     */
     void connThread()
     {
-        Client::initThread();
+        Client::initThread("conn");
 
         /* todo: move to Client object */
         LastError *le = new LastError();
@@ -422,7 +421,7 @@ namespace mongo {
 
         BOOST_CHECK_EXCEPTION( clearTmpFiles() );
 
-        Client::initThread();
+        Client::initThread("initandlisten");
 
         clearTmpCollections();
 
@@ -439,7 +438,6 @@ namespace mongo {
             RecCache::tempStore.init(indexpath.str().c_str(), BucketSize);
         }
 #endif
-
 
         if ( useJNI ) {
             ScriptEngine::setup();
@@ -818,8 +816,8 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("oplogSize")) {
             long x = params["oplogSize"].as<long>();
             uassert("bad --oplogSize arg", x > 0);
-            oplogSize = x * 1024 * 1024;
-            assert(oplogSize > 0);
+            cmdLine.oplogSize = x * 1024 * 1024;
+            assert(cmdLine.oplogSize > 0);
         }
         if (params.count("opIdMem")) {
             long x = params["opIdMem"].as<long>();
@@ -939,9 +937,11 @@ namespace mongo {
         ossSig << "Got signal: " << x << " (" << strsignal( x ) << ")." << endl;
         rawOut( ossSig.str() );
 
+        /*
         ostringstream ossOp;
         ossOp << "Last op: " << currentOp.infoNoauth() << endl;
         rawOut( ossOp.str() );
+        */
 
         ostringstream oss;
         oss << "Backtrace:" << endl;
@@ -966,7 +966,8 @@ namespace mongo {
         assert( signal(SIGABRT, abruptQuit) != SIG_ERR );
         assert( signal(SIGBUS, abruptQuit) != SIG_ERR );
         assert( signal(SIGPIPE, pipeSigHandler) != SIG_ERR );
-
+        assert( signal(SIGUSR1 , rotateLogs ) != SIG_ERR );
+        
         sigemptyset( &asyncSignals );
         sigaddset( &asyncSignals, SIGINT );
         sigaddset( &asyncSignals, SIGTERM );

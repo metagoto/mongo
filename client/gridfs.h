@@ -73,7 +73,8 @@ namespace mongo {
          *                    (default is to omit)
          * @return the file object
          */
-        BSONObj storeFile( const char* data , size_t length , const std::string& remoteName , const std::string& contentType);
+        BSONObj storeFile( const char* data , size_t length , const std::string& remoteName , const std::string& contentType="");
+
         /**
          * removes file referenced by fileName from the db
          * @param fileName filename (in GridFS) of the file to remove
