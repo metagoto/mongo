@@ -208,7 +208,9 @@ namespace mongo {
             dbpath = dbpathString.c_str();
             
             cmdLine.prealloc = false;
-            Client::initThread();
+            cmdLine.smallfiles = true;
+            cmdLine.oplogSize = 10 * 1024 * 1024;
+            Client::initThread("testsuite");
             acquirePathLock();
 
             srand( (unsigned) seed );
@@ -256,6 +258,8 @@ namespace mongo {
                 log() << "going to run suite: " << name << endl;
                 results.push_back( s->run() );
             }
+
+            Logstream::get().flush();
 
             cout << "**************************************************" << endl;
             cout << "**************************************************" << endl;
