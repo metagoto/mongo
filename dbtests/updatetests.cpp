@@ -238,6 +238,41 @@ namespace UpdateTests {
         }
     };
 
+    class MultiInc : public SetBase {
+    public:
+        
+        string s(){
+            stringstream ss;
+            auto_ptr<DBClientCursor> cc = client().query( ns() , Query().sort( BSON( "_id" << 1 ) ) );
+            bool first = true;
+            while ( cc->more() ){
+                if ( first ) first = false;
+                else ss << ",";
+
+                BSONObj o = cc->next();
+                ss << o["x"].numberInt();
+            }
+            return ss.str();
+        }
+        
+        void run(){
+            client().insert( ns(), BSON( "_id" << 1 << "x" << 1 ) );
+            client().insert( ns(), BSON( "_id" << 2 << "x" << 5 ) );
+            
+            ASSERT_EQUALS( "1,5" , s() );
+
+            client().update( ns() , BSON( "_id" << 1 ) , BSON( "$inc" << BSON( "x" << 1 ) ) );
+            ASSERT_EQUALS( "2,5" , s() );
+
+            client().update( ns() , BSONObj() , BSON( "$inc" << BSON( "x" << 1 ) ) );
+            ASSERT_EQUALS( "3,5" , s() );
+
+            client().update( ns() , BSONObj() , BSON( "$inc" << BSON( "x" << 1 ) ) , false , true );
+            ASSERT_EQUALS( "4,6" , s() );
+            
+        }
+    };
+
     class UnorderedNewSet : public SetBase {
     public:
         void run() {
@@ -439,19 +474,22 @@ namespace UpdateTests {
             client().ensureIndex( ns(), BSON( "a" << 1 ) );
             client().insert( ns(), fromjson( "{'_id':0}" ) );
             client().update( ns(), Query(), fromjson( "{$set:{'a.b':4}}" ) );
-            ASSERT( client().findOne( ns(), Query() ).woCompare( fromjson( "{'_id':0}" ) ) == 0 );
+            ASSERT_EQUALS( fromjson( "{'_id':0,a:{b:4}}" ) , client().findOne( ns(), Query() ) );
+            ASSERT_EQUALS( fromjson( "{'_id':0,a:{b:4}}" ) , client().findOne( ns(), fromjson( "{'a.b':4}" ) ) ); // make sure the index works
         }
     };
 
-    class ModParentOfIndex : public SetBase {
+    class IndexModSet : public SetBase {
     public:
         void run() {
             client().ensureIndex( ns(), BSON( "a.b" << 1 ) );
-            client().insert( ns(), fromjson( "{'_id':0}" ) );
-            client().update( ns(), Query(), fromjson( "{$set:{'a':4}}" ) );
-            ASSERT( client().findOne( ns(), Query() ).woCompare( fromjson( "{'_id':0}" ) ) == 0 );
+            client().insert( ns(), fromjson( "{'_id':0,a:{b:3}}" ) );
+            client().update( ns(), Query(), fromjson( "{$set:{'a.b':4}}" ) );
+            ASSERT_EQUALS( fromjson( "{'_id':0,a:{b:4}}" ) , client().findOne( ns(), Query() ) );
+            ASSERT_EQUALS( fromjson( "{'_id':0,a:{b:4}}" ) , client().findOne( ns(), fromjson( "{'a.b':4}" ) ) ); // make sure the index works
         }
     };
+
 
     class PreserveIdWithIndex : public SetBase { // Not using $set, but base class is still useful
     public:
@@ -505,6 +543,7 @@ namespace UpdateTests {
             add< SetMissingDotted >();
             add< SetAdjacentDotted >();
             add< IncMissing >();
+            add< MultiInc >();
             add< UnorderedNewSet >();
             add< UnorderedNewSetAdjacent >();
             add< ArrayEmbeddedSet >();
@@ -528,7 +567,7 @@ namespace UpdateTests {
             add< DontDropEmpty >();
             add< InsertInEmpty >();
             add< IndexParentOfMod >();
-            add< ModParentOfIndex >();
+            add< IndexModSet >();
             add< PreserveIdWithIndex >();
             add< CheckNoMods >();
             add< UpdateMissingToNull >();

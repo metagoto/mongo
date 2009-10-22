@@ -61,8 +61,8 @@ namespace mongo {
         if ( d->capped )
             ss << "  capped:" << d->capped << " max:" << d->max << '\n';
 
-        ss << "  firstExtent:" << d->firstExtent.toString() << " ns:" << d->firstExtent.ext()->ns.buf << '\n';
-        ss << "  lastExtent:" << d->lastExtent.toString()    << " ns:" << d->lastExtent.ext()->ns.buf << '\n';
+        ss << "  firstExtent:" << d->firstExtent.toString() << " ns:" << d->firstExtent.ext()->nsDiagnostic.buf << '\n';
+        ss << "  lastExtent:" << d->lastExtent.toString()    << " ns:" << d->lastExtent.ext()->nsDiagnostic.buf << '\n';
         try {
             d->firstExtent.ext()->assertOk();
             d->lastExtent.ext()->assertOk();
@@ -179,9 +179,11 @@ namespace mongo {
             int idxn = 0;
             try  {
                 ss << "  nIndexes:" << d->nIndexes << endl;
-                for ( ; idxn < d->nIndexes; idxn++ ) {
-                    ss << "    " << d->indexes[idxn].indexNamespace() << " keys:" <<
-                    d->indexes[idxn].head.btree()->fullValidate(d->indexes[idxn].head, d->indexes[idxn].keyPattern()) << endl;
+                NamespaceDetails::IndexIterator i = d->ii();
+                while( i.more() ) {
+                    IndexDetails& id = i.next();
+                    ss << "    " << id.indexNamespace() << " keys:" <<
+                        id.head.btree()->fullValidate(id.head, id.keyPattern()) << endl;
                 }
             }
             catch (...) {
@@ -549,10 +551,15 @@ namespace mongo {
         }
     } cmdoplogging;
 
-    unsigned removeBit(unsigned b, int x) {
-        unsigned tmp = b;
+    /* remove bit from a bit array - actually remove its slot, not a clear
+       note: this function does not work with x == 63 -- that is ok
+             but keep in mind in the future if max indexes were extended to 
+             exactly 64 it would be a problem
+    */
+    unsigned long long removeBit(unsigned long long b, int x) {
+        unsigned long long tmp = b;
         return
-            (tmp & ((1 << x)-1)) |
+            (tmp & ((((unsigned long long) 1) << x)-1)) |
             ((tmp >> (x+1)) << x);
     }
 
@@ -563,6 +570,7 @@ namespace mongo {
             assert( removeBit(2, 1) == 0 );
             assert( removeBit(255, 1) == 127 );
             assert( removeBit(21, 2) == 9 );
+            assert( removeBit(0x4000000000000001ULL, 62) == 1 );
         }
     } dbc_unittest;
 
@@ -580,17 +588,17 @@ namespace mongo {
             IndexDetails *idIndex = 0;
             if( d->nIndexes ) {
                 for ( int i = 0; i < d->nIndexes; i++ ) {
-                    if ( !mayDeleteIdIndex && d->indexes[i].isIdIndex() ) {
-                        idIndex = &d->indexes[i];
+                    if ( !mayDeleteIdIndex && d->idx(i).isIdIndex() ) {
+                        idIndex = &d->idx(i);
                     } else {
-                        d->indexes[i].kill();
+                        d->idx(i).kill_idx();
                     }
                 }
                 d->nIndexes = 0;
             }
             if ( idIndex ) {
-                d->indexes[ 0 ] = *idIndex;
-                d->nIndexes = 1;
+                d->addIndex(ns) = *idIndex;
+                wassert( d->nIndexes == 1 );
             }
             /* assuming here that id index is not multikey: */
             d->multiKeyIndexBits = 0;
@@ -607,16 +615,16 @@ namespace mongo {
                  call, otherwise, on recreate, the old one would be reused, and its
                  IndexDetails::info ptr would be bad info.
                  */
-                IndexDetails *id = &d->indexes[x];
+                IndexDetails *id = &d->idx(x);
                 if ( !mayDeleteIdIndex && id->isIdIndex() ) {
                     errmsg = "may not delete _id index";
                     return false;
                 }
-                d->indexes[x].kill();
+                id->kill_idx();
                 d->multiKeyIndexBits = removeBit(d->multiKeyIndexBits, x);
                 d->nIndexes--;
                 for ( int i = x; i < d->nIndexes; i++ )
-                    d->indexes[i] = d->indexes[i+1];
+                    d->idx(i) = d->idx(i+1);
             } else {
                 log() << "deleteIndexes: " << name << " not found" << endl;
                 errmsg = "index not found";
@@ -1251,7 +1259,7 @@ namespace mongo {
                 int res = s->invoke( func , b.obj() );
                 uassert( (string)"invoke failed in $keyf: " + s->getError() , res == 0 );
                 int type = s->type("return");
-                uassert( "return of $key has to be a function" , type == Object );
+                uassert( "return of $key has to be an object" , type == Object );
                 return s->getObject( "return" );
             }
             return obj.extractFields( keyPattern , true );
@@ -1308,7 +1316,7 @@ namespace mongo {
                     n = map.size();
                     s->setObject( "$key" , key , true );
 
-                    uassert( "group() can't handle more than 10000 unique keys" , n < 10000 );
+                    uassert( "group() can't handle more than 10000 unique keys" , n <= 10000 );
                 }
 
                 s->setObject( "obj" , obj , true );

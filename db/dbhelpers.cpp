@@ -30,12 +30,15 @@ namespace mongo {
         if( d == 0 )
             return;
 
-        for( int i = 0; i < d->nIndexes; i++ ) {
-            if( d->indexes[i].keyPattern().woCompare(keyPattern) == 0 )
-                return;
+        {
+            NamespaceDetails::IndexIterator i = d->ii();
+            while( i.more() ) {
+                if( i.next().keyPattern().woCompare(keyPattern) == 0 )
+                    return;
+            }
         }
 
-        if( d->nIndexes >= MaxIndexes ) { 
+        if( d->nIndexes >= NamespaceDetails::NIndexesMax ) { 
             problem() << "Helper::ensureIndex fails, MaxIndexes exceeded " << ns << '\n';
             return;
         }
@@ -119,7 +122,7 @@ namespace mongo {
     void Helpers::putSingleton(const char *ns, BSONObj obj) {
         DBContext context(ns);
         stringstream ss;
-        updateObjects(ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, ss);
+        updateObjects(ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false, ss, /*logop=*/true );
     }
 
     void Helpers::emptyCollection(const char *ns) {

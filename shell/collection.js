@@ -147,11 +147,11 @@ DBCollection.prototype.remove = function( t ){
     this._mongo.remove( this._fullName , this._massageObject( t ) );
 }
 
-DBCollection.prototype.update = function( query , obj , upsert ){
+DBCollection.prototype.update = function( query , obj , upsert , multi ){
     assert( query , "need a query" );
     assert( obj , "need an object" );
     this._validateObject( obj );
-    return this._mongo.update( this._fullName , query , obj , upsert ? true : false );
+    this._mongo.update( this._fullName , query , obj , upsert ? true : false , multi ? true : false );
 }
 
 DBCollection.prototype.save = function( obj ){
@@ -255,14 +255,13 @@ DBCollection.prototype.ensureIndex = function( keys , options ){
     var name = this._indexSpec( keys, options ).name;
     this._indexCache = this._indexCache || {};
     if ( this._indexCache[ name ] ){
-        return false;
+        return;
     }
 
     this.createIndex( keys , options );
     if ( this.getDB().getLastError() == "" ) {
 	this._indexCache[name] = true;
     }
-    return true;
 }
 
 DBCollection.prototype.resetIndexCache = function(){
@@ -298,7 +297,7 @@ DBCollection.prototype.drop = function(){
 }
 
 DBCollection.prototype.renameCollection = function( newName ){
-    return this._db._adminCommand( { renameCollection : this._fullName , to : this._db._name + "." + newName } ).ok;
+    return this._db._adminCommand( { renameCollection : this._fullName , to : this._db._name + "." + newName } )
 }
 
 DBCollection.prototype.validate = function() {
@@ -475,10 +474,50 @@ DBCollection.prototype.groupcmd = function( params ){
     return this._db.groupcmd( params );
 }
 
+MapReduceResult = function( db , o ){
+    Object.extend( this , o );
+    this._o = o;
+    this._keys = o.keySet();
+    this._db = db;
+    this._coll = this._db.getCollection( this.result );
+}
+
+MapReduceResult.prototype._simpleKeys = function(){
+    return this._o;
+}
+
+MapReduceResult.prototype.find = function(){
+    return DBCollection.prototype.find.apply( this._coll , arguments );
+}
+
+MapReduceResult.prototype.drop = function(){
+    this._coll.drop();
+}
+
+
+/**
+* @param optional object of optional fields;
+*/
+DBCollection.prototype.mapReduce = function( map , reduce , optional ){
+    var c = { mapreduce : this._shortName , map : map , reduce : reduce };
+    if ( optional )
+        Object.extend( c , optional );
+    return new MapReduceResult( this._db , this._db.runCommand( c ) );
+
+}
+
 DBCollection.prototype.toString = function(){
     return this.getFullName();
 }
 
+DBCollection.prototype.toString = function(){
+    return this.getFullName();
+}
+
+
+DBCollection.prototype.tojson = DBCollection.prototype.toString;
+
 DBCollection.prototype.shellPrint = DBCollection.prototype.toString;
+
 
 

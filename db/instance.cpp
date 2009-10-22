@@ -349,8 +349,8 @@ namespace mongo {
         uassert("update object too large", toupdate.objsize() <= MaxBSONObjectSize);
         assert( toupdate.objsize() < m.data->dataLen() );
         assert( query.objsize() + toupdate.objsize() < m.data->dataLen() );
-        bool upsert = flags & 1;
-        bool multi = flags & 2;
+        bool upsert = flags & Option_Upsert;
+        bool multi = flags & Option_Multi;
         {
             string s = query.toString();
             /* todo: we shouldn't do all this ss stuff when we don't need it, it will slow us down. */
@@ -358,8 +358,8 @@ namespace mongo {
             CurOp& currentOp = *client.curop();
             strncpy(currentOp.query, s.c_str(), sizeof(currentOp.query)-2);
         }        
-        bool updatedExisting = updateObjects(ns, toupdate, query, upsert, ss, multi);
-        recordUpdate( updatedExisting, ( upsert || updatedExisting ) ? 1 : 0 ); // for getlasterror
+        UpdateResult res = updateObjects(ns, toupdate, query, upsert, multi, ss, true);
+        recordUpdate( res.existing , res.num ); // for getlasterror
     }
 
     void receivedDelete(Message& m, stringstream &ss) {
@@ -469,7 +469,7 @@ namespace mongo {
         try {
             AuthenticationInfo *ai = currentClient.get()->ai;
             uassert("unauthorized", ai->isAuthorized(cc().database()->name.c_str()));
-            msgdata = getMore(ns, ntoreturn, cursorid);
+            msgdata = getMore(ns, ntoreturn, cursorid, ss);
         }
         catch ( AssertionException& e ) {
             ss << " exception " + e.toString();

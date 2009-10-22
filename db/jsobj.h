@@ -956,6 +956,10 @@ namespace mongo {
         bool valid() const;
         
         string md5() const;
+        
+        bool operator==( const BSONObj& other ){
+            return woCompare( other ) == 0;
+        }
 
         enum MatchType {
             Equality = 0,
@@ -970,7 +974,9 @@ namespace mongo {
             NIN = 0x0C,
             opEXISTS = 0x0D,
             opMOD = 0x0E,
-            opTYPE = 0x0F
+            opTYPE = 0x0F,
+            opREGEX = 0x10,
+            opOPTIONS = 0x11
         };        
     };
     ostream& operator<<( ostream &s, const BSONObj &o );

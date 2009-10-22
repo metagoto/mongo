@@ -49,7 +49,6 @@
 namespace mongo {
 
     extern boost::recursive_mutex &dbMutex;
-    int _updateObjects(const char *ns, BSONObj updateobj, BSONObj pattern, bool upsert, stringstream& ss, bool logOp=false);
     void ensureHaveIdIndex(const char *ns);
 
     /* if 1 sync() is running */
@@ -545,8 +544,9 @@ namespace mongo {
 
         stringstream ss;
         setClient("local.sources");
-        int u = _updateObjects("local.sources", o, pattern, true/*upsert for pair feature*/, ss);
-        assert( u == 1 || u == 4 );
+        UpdateResult res = updateObjects("local.sources", o, pattern, true/*upsert for pair feature*/, false,ss,false);
+        assert( ! res.mod );
+        assert( res.num == 1 );
         cc().clearns();
 
         if ( replacing ) {
@@ -780,7 +780,7 @@ namespace mongo {
 					if( !o.getObjectID(_id) ) {
 						/* No _id.  This will be very slow. */
                         Timer t;
-                        _updateObjects(ns, o, o, true, ss);
+                        updateObjects(ns, o, o, true, false, ss, false );
                         if( t.millis() >= 2 ) {
                             RARELY OCCASIONALLY log() << "warning, repl doing slow updates (no _id field) for " << ns << endl;
                         }
@@ -792,13 +792,13 @@ namespace mongo {
                         /* erh 10/16/2009 - this is probably not relevant any more since its auto-created, but not worth removing */
                         RARELY ensureHaveIdIndex(ns); // otherwise updates will be slow 
 
-                        _updateObjects(ns, o, b.done(), true, ss);
+                        updateObjects(ns, o, b.done(), true, false, ss, false );
                     }
                 }
             }
             else if ( *opType == 'u' ) {
                 RARELY ensureHaveIdIndex(ns); // otherwise updates will be super slow
-                _updateObjects(ns, o, op.getObjectField("o2"), op.getBoolField("b"), ss);
+                updateObjects(ns, o, op.getObjectField("o2"), op.getBoolField("b"), false, ss, false );
             }
             else if ( *opType == 'd' ) {
                 if ( opType[1] == 0 )
@@ -1212,7 +1212,20 @@ namespace mongo {
         {
 			time_t saveLast = time(0);
             while ( 1 ) {
-                /* todo this code is ugly and confusing fix */
+                /* from a.s.:
+                   I think the idea here is that we can establish a sync point between the local op log and the remote log with the following steps:
+
+                   1) identify most recent op in local log -- call it O
+                   2) ask "does nextOpTime reflect the tail of the remote op log?" (in other words, is more() false?) - If yes, all subsequent ops after nextOpTime in the remote log must have occurred after O.  If no, we can't establish a sync point.
+
+                   Note that we can't do step (2) followed by step (1) because if we do so ops may be added to both machines between steps (2) and (1) and we can't establish a sync point.  (In particular, between (2) and (1) an op may be added to the remote log before a different op is added to the local log.  In this case, the newest remote op will have occurred after nextOpTime but before O.)
+
+                   Now, for performance reasons we don't want to have to identify the most recent op in the local log every time we call c->more() because in performance sensitive situations more() will be true most of the time.  So we do:
+
+                   0) more()?
+                   1) find most recent op in local log
+                   2) more()?
+                */
                 if ( !c->more() ) {
                     dblock lk;
                     OpTime nextLastSaved = nextLastSavedLocalTs(); // this may make c->more() become true
@@ -1646,8 +1659,8 @@ namespace mongo {
             }
         }
 
-        log() << "******" << endl;
-        log() << "creating oplog  size : " << (int)( sz / ( 1024 * 1024 ) ) << "mb" << endl;
+        log() << "******\n";
+        log() << "creating oplog  size : " << (int)( sz / ( 1024 * 1024 ) ) << "mb\n";
         log() << "******" << endl;
 
         b.append("size", sz);
