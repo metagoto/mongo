@@ -37,6 +37,14 @@ namespace mongo {
     public:
         static boost::mutex clientsMutex;
         static set<Client*> clients; // always be in clientsMutex when manipulating this
+
+        class GodScope {
+            bool _prev;
+        public:
+            GodScope();
+            ~GodScope();
+        };
+
     private:
         CurOp *_op;
         Database *_database;
@@ -45,6 +53,7 @@ namespace mongo {
         bool _shutdown;
         list<string> _tempCollections;
         const char *_desc;
+        bool _god;
     public:
         AuthenticationInfo *ai;
         Top top;
@@ -77,9 +86,11 @@ namespace mongo {
            @return true if anything was done
          */
         bool shutdown();
+
+        bool isGod() const { return _god; }
     };
     
-    /* defined in security.cpp */
+    /* defined in security.cpp - one day add client.cpp? */
     extern boost::thread_specific_ptr<Client> currentClient;
 
     inline Client& cc() { 
@@ -91,4 +102,14 @@ namespace mongo {
         currentClient.reset( new Client(desc) );
     }
 
+    inline Client::GodScope::GodScope(){
+        _prev = cc()._god;
+        cc()._god = true;
+    }
+
+    inline Client::GodScope::~GodScope(){
+        cc()._god = _prev;
+    }
+    
 };
+

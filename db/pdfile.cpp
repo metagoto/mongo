@@ -48,7 +48,6 @@ namespace mongo {
     map<string,Database*> databases;
     int MAGIC = 0x1000;
 //    int curOp = -2;
-    int callDepth = 0;
 
     extern int otherTraceLevel;
     void addNewNamespaceToCatalog(const char *ns, const BSONObj *options = 0);
@@ -69,7 +68,6 @@ namespace mongo {
                 ss << cc().ns() << ' ';
             }
         }
-        ss << callDepth;
         return ss.str();
     }
 
@@ -857,6 +855,7 @@ namespace mongo {
         NamespaceDetails* d = nsdetails(ns);
         if ( d->capped && !cappedOK ) {
             out() << "failing remove on a capped ns " << ns << endl;
+            uassert( "can't remove from a capped collection" , 0 );
             return;
         }
 
@@ -1319,6 +1318,7 @@ namespace mongo {
     DiskLoc DataFileMgr::insert(const char *ns, const void *obuf, int len, bool god, const BSONElement &writeId, bool mayAddIndex) {
         bool wouldAddIndex = false;
         uassert("cannot insert into reserved $ collection", god || strchr(ns, '$') == 0 );
+        uassert("invalid ns", strchr( ns , '.' ) > 0 );
         const char *sys = strstr(ns, "system.");
         if ( sys ) {
             uassert("attempt to insert in reserved database name 'system'", sys != ns);
@@ -1360,7 +1360,7 @@ namespace mongo {
             BSONObj io((const char *) obuf);
             const char *name = io.getStringField("name"); // name of the index
             tabletoidxns = io.getStringField("ns");  // table it indexes
-
+            uassert( "invalid ns to index" , tabletoidxns.size() && tabletoidxns.find( '.' ) != string::npos );
             if ( cc().database()->name != nsToClient(tabletoidxns.c_str()) ) {
                 uassert("bad table to index name on add index attempt", false);
                 return DiskLoc();

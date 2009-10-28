@@ -21,4 +21,8 @@ assert( !c.hasNext() );
 assert( !d.hasNext() );
 assert( t.find().sort( { i : 1 } ).hint( { i : 1 } ).toArray().length > 10 );
 
+assert( t.findOne( { i : 38 } ) );
+t.remove( { i : 38 } );
+assert( db.getLastError().indexOf( "capped" ) >= 0 );
+
 assert( t.validate().valid );

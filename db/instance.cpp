@@ -392,6 +392,9 @@ namespace mongo {
         QueryResult* msgdata;
 
         try {
+            if (q.fields.get() && q.fields->errmsg)
+                uassert(q.fields->errmsg, false);
+
             /* note these are logged BEFORE authentication -- which is sort of ok */
             if ( opLogging && logit ) {
                 if ( strstr(q.ns, ".$cmd") ) {
@@ -500,8 +503,6 @@ namespace mongo {
             logOp("i", ns, js);
         }
     }
-
-    extern int callDepth;
 
     class JniMessagingPort : public AbstractMessagingPort {
     public:

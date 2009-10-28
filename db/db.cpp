@@ -53,15 +53,10 @@ namespace mongo {
 
     extern string bind_ip;
     extern char *appsrvPath;
-//    extern int curOp;
     extern bool autoresync;
     extern int opLogging;
     extern OpLog _oplog;
     extern int lenForNewNsFiles;
-
-    extern int ctr;
-    extern int callDepth;
-
     extern int lockFile;
 
     void setupSignals();
@@ -866,6 +861,11 @@ int main(int argc, char* argv[], char *envp[] )
                 }
 
                 initAndListen(cmdLine.port);
+                return 0;
+            }
+
+            if (command[0].compare("dbpath") == 0) {
+                cout << dbpath << endl;
                 return 0;
             }
 
