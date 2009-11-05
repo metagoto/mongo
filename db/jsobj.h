@@ -277,6 +277,9 @@ namespace mongo {
         /** Wrap this element up as a singleton object. */
         BSONObj wrap() const;
 
+        /** Wrap this element up as a singleton object with a new name. */
+        BSONObj wrap( const char* newName) const;
+
         /** field name of the element.  e.g., for 
            name : "Joe"
            "name" is the fieldname
@@ -1117,6 +1120,7 @@ namespace mongo {
 
         /** append an element but with a new name */
         void appendAs(const BSONElement& e, const char *as) {
+            assert( !e.eoo() ); // do not append eoo, that would corrupt us. the builder auto appends when done() is called.
             b.append((char) e.type());
             b.append(as);
             b.append((void *) e.value(), e.valuesize());
@@ -1601,10 +1605,17 @@ namespace mongo {
 
 // wrap this element up as a singleton object.
     inline BSONObj BSONElement::wrap() const {
-        BSONObjBuilder b;
+        BSONObjBuilder b(size()+6);
         b.append(*this);
         return b.obj();
     }
+
+    inline BSONObj BSONElement::wrap( const char * newName ) const {
+        BSONObjBuilder b(size()+6+strlen(newName));
+        b.appendAs(*this,newName);
+        return b.obj();
+    }
+
 
     inline bool BSONObj::hasElement(const char *name) const {
         if ( !isEmpty() ) {
@@ -1707,5 +1718,38 @@ namespace mongo {
         s_->subobj()->appendAs( e, l_.l_ );
         return *s_->_builder;
     }    
+
+    // {a: {b:1}} -> {a.b:1}
+    void nested2dotted(BSONObjBuilder& b, const BSONObj& obj, const string& base="");
+    inline BSONObj nested2dotted(const BSONObj& obj){
+        BSONObjBuilder b;
+        nested2dotted(b, obj);
+        return b.obj();
+    }
+
+    // {a.b:1} -> {a: {b:1}}
+    void dotted2nested(BSONObjBuilder& b, const BSONObj& obj);
+    inline BSONObj dotted2nested(const BSONObj& obj){
+        BSONObjBuilder b;
+        dotted2nested(b, obj);
+        return b.obj();
+    }
+    
+    /* WARNING: nested/dotted conversions are not 100% reversible
+     * nested2dotted(dotted2nested({a.b: {c:1}})) -> {a.b.c: 1}
+     * also, dotted2nested ignores order
+     */
+
+    typedef map<string, BSONElement> BSONMap;
+    inline BSONMap bson2map(const BSONObj& obj){
+        BSONMap m;
+        BSONObjIterator it(obj);
+        while (it.more()){
+            BSONElement e = it.next();
+            m[e.fieldName()] = e;
+        }
+        return m;
+    }
+
         
 } // namespace mongo

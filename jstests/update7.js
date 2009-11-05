@@ -79,6 +79,10 @@ assert.eq( "3,6" , s() , "C4" );
 t.update( { a : 2 } , { $inc : { x : 1 } } , false , true );
 assert.eq( "4,7" , s() , "C5" );
 
+t.update( { a : { $gt : 0 } } , { $inc : { x : 1 } } , false , true );
+assert.eq( "5,8" , s() , "C6" );
+
+
 t.drop();
 
 t.save( { _id : 1 , x : 1 , a : [ 1 , 2 ] } );
@@ -97,3 +101,38 @@ assert.eq( "3,6" , s() , "D4" );
 
 t.update( { a : 2 } , { $inc : { x : 1 } } , false , true );
 assert.eq( "4,7" , s() , "D5" );
+
+t.update( { a : { $gt : 0 } } , { $inc : { x : 1 } } , false , true );
+assert.eq( "5,8" , s() , "D6" );
+
+t.update( { a : { $lt : 10 } } , { $inc : { x : -1 } } , false , true );
+assert.eq( "4,7" , s() , "D7" );
+
+// --- 
+
+t.save( { _id : 3 } );
+assert.eq( "4,7," , s() , "E1" );
+t.update( {} , { $inc : { x : 1 } } , false , true );
+assert.eq( "5,8,1" , s() , "E2" );
+
+for ( i = 4; i<8; i++ )
+    t.save( { _id : i } );
+t.save( { _id : i , x : 1 } );
+assert.eq( "5,8,1,,,,,1" , s() , "E4" );
+t.update( {} , { $inc : { x : 1 } } , false , true );
+assert.eq( "6,9,2,1,1,1,1,2" , s() , "E5" );
+
+
+// --- $inc indexed field
+
+t.drop();
+
+t.save( { x : 1 } );
+t.save( { x : 2 } );
+t.save( { x : 3 } );
+
+t.ensureIndex( { x : 1 } );
+
+assert.eq( "1,2,3" , s() , "F1" )
+t.update( { x : { $gt : 0 } } , { $inc : { x : 5 } } , false , true );
+assert.eq( "6,7,8" , s() , "F1" )

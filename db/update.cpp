@@ -22,79 +22,10 @@
 #include "jsobjmanipulator.h"
 #include "queryoptimizer.h"
 #include "repl.h"
+#include "../util/embedded_builder.h"
 
 namespace mongo {
 
-    // utility class for assembling hierarchical objects
-    class EmbeddedBuilder {
-    public:
-        EmbeddedBuilder( BSONObjBuilder *b ) {
-            _builders.push_back( make_pair( "", b ) );
-        }
-        // It is assumed that the calls to prepareContext will be made with the 'name'
-        // parameter in lex ascending order.
-        void prepareContext( string &name ) {
-            int i = 1, n = _builders.size();
-            while( i < n && 
-                   name.substr( 0, _builders[ i ].first.length() ) == _builders[ i ].first && 
-                   ( name[ _builders[i].first.length() ] == '.' || name[ _builders[i].first.length() ] == 0 )
-                   ){
-                name = name.substr( _builders[ i ].first.length() + 1 );
-                ++i;
-            }
-            for( int j = n - 1; j >= i; --j ) {
-                popBuilder();
-            }
-            for( string next = splitDot( name ); !next.empty(); next = splitDot( name ) ) {
-                addBuilder( next );
-            }
-        }
-        void appendAs( const BSONElement &e, string name ) {
-            if ( e.type() == Object && e.valuesize() == 5 ) { // empty object -- this way we can add to it later
-                string dummyName = name + ".foo";
-                prepareContext( dummyName );
-                return;
-            }
-            prepareContext( name );
-            back()->appendAs( e, name.c_str() );
-        }
-        BufBuilder &subarrayStartAs( string name ) {
-            prepareContext( name );
-            return back()->subarrayStart( name.c_str() );
-        }
-        void done() {
-            while( ! _builderStorage.empty() )
-                popBuilder();
-        }
-
-        static string splitDot( string & str ) {
-            size_t pos = str.find( '.' );
-            if ( pos == string::npos )
-                return "";
-            string ret = str.substr( 0, pos );
-            str = str.substr( pos + 1 );
-            return ret;
-        }
-
-    private:
-        void addBuilder( const string &name ) {
-            shared_ptr< BSONObjBuilder > newBuilder( new BSONObjBuilder( back()->subobjStart( name.c_str() ) ) );
-            _builders.push_back( make_pair( name, newBuilder.get() ) );
-            _builderStorage.push_back( newBuilder );
-        }
-        void popBuilder() {
-            back()->done();
-            _builders.pop_back();
-            _builderStorage.pop_back();
-        }
-
-        BSONObjBuilder *back() { return _builders.back().second; }
-        
-        vector< pair< string, BSONObjBuilder * > > _builders;
-        vector< shared_ptr< BSONObjBuilder > > _builderStorage;
-
-    };
-    
     /* Used for modifiers such as $inc, $set, ... */
     struct Mod {
         enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP } op;
@@ -670,6 +601,8 @@ namespace mongo {
             /* dm: it's very important that system.indexes is never updated as IndexDetails has pointers into it */
             uassert("cannot update system collection", legalClientSystemNS( ns , true ) );
         }
+
+        set<DiskLoc> seenObjects;
         
         QueryPlanSet qps( ns, patternOrig, BSONObj() );
         UpdateOp original;
@@ -682,8 +615,14 @@ namespace mongo {
                 c->advance();
                 continue;
             }
-
             Record *r = c->_current();
+            DiskLoc loc = c->currLoc();
+
+            if ( c->getsetdup( loc ) ){
+                c->advance();
+                continue;
+            }
+                               
             BSONObj js(r);
             
             BSONObj pattern = patternOrig;
@@ -714,21 +653,39 @@ namespace mongo {
             const char *firstField = updateobj.firstElement().fieldName();
             
             if ( firstField[0] == '$' ) {
-                if ( multi )
-                    updateobj = updateobj.copy();
 
+                if ( multi ){
+                    c->advance(); // go to next record in case this one moves
+                    if ( seenObjects.count( loc ) )
+                        continue;
+                    updateobj = updateobj.copy();
+                }
+                
                 ModSet mods;
                 mods.getMods(updateobj);
                 NamespaceDetailsTransient& ndt = NamespaceDetailsTransient::get(ns);
                 set<string>& idxKeys = ndt.indexKeys();
-                if ( ! mods.isIndexed( idxKeys ) && mods.canApplyInPlaceAndVerify( c->currLoc().obj() ) ) {
-                    mods.applyModsInPlace( c->currLoc().obj() );
+                bool isIndexed = mods.isIndexed( idxKeys );
+                
+                if ( isIndexed && multi ){
+                    c->noteLocation();
+                }
+
+                if ( ! isIndexed && mods.canApplyInPlaceAndVerify( loc.obj() ) ) {
+                    mods.applyModsInPlace( loc.obj() );
+                    //seenObjects.insert( loc );
                     if ( profile )
                         ss << " fastmod ";
                 } else {
-                    BSONObj newObj = mods.createNewFromMods( c->currLoc().obj() );
-                    theDataFileMgr.update(ns, r, c->currLoc(), newObj.objdata(), newObj.objsize(), ss);
+                    BSONObj newObj = mods.createNewFromMods( loc.obj() );
+                    DiskLoc newLoc = theDataFileMgr.update(ns, r, loc , newObj.objdata(), newObj.objsize(), ss);
+                    if ( newLoc != loc || isIndexed ){
+                        // object moved, need to make sure we don' get again
+                        seenObjects.insert( newLoc );
+                    }
+                        
                 }
+
                 if ( logop ) {
                     if ( mods.size() ) {
                         if ( mods.haveArrayDepMod() ) {
@@ -743,7 +700,8 @@ namespace mongo {
                 numModded++;
                 if ( ! multi )
                     break;
-                c->advance();
+                if ( multi && isIndexed )
+                    c->checkLocation();
                 continue;
             } 
             
@@ -751,7 +709,7 @@ namespace mongo {
 
             BSONElementManipulator::lookForTimestamps( updateobj );
             checkNoMods( updateobj );
-            theDataFileMgr.update(ns, r, c->currLoc(), updateobj.objdata(), updateobj.objsize(), ss);
+            theDataFileMgr.update(ns, r, loc , updateobj.objdata(), updateobj.objsize(), ss);
             if ( logop )
                 logOp("u", ns, updateobj, &pattern );
             return UpdateResult( 1 , 0 , 1 );
