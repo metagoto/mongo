@@ -38,6 +38,9 @@
 
 #include "../scripting/engine.h"
 #include "mms.h"
+#ifdef _HAVESNMP
+#include "snmp.h"
+#endif
 #include "cmdline.h"
 
 namespace mongo {
@@ -54,8 +57,7 @@ namespace mongo {
     extern string bind_ip;
     extern char *appsrvPath;
     extern bool autoresync;
-    extern int opLogging;
-    extern OpLog _oplog;
+    extern int diagLogging;
     extern int lenForNewNsFiles;
     extern int lockFile;
 
@@ -122,10 +124,6 @@ namespace mongo {
     void webServerThread();
     void pdfileInit();
 
-    /* versions
-       114 bad memory bug fixed
-       115 replay, opLogging
-    */
     void listen(int port) {
         log() << mongodVersion() << endl;
         printGitVersion();
@@ -420,11 +418,12 @@ namespace mongo {
 
         clearTmpCollections();
 
-        if ( opLogging )
-            log() << "opLogging = " << opLogging << endl;
-        _oplog.init();
+        _diaglog.init();
 
         mms.go();
+#ifdef _HAVESNMP
+        snmpAgent.go();
+#endif
 
 #if 0
         {
@@ -513,6 +512,7 @@ int main(int argc, char* argv[], char *envp[] )
 
     po::options_description general_options("General options");
     po::options_description replication_options("Replication options");
+    po::options_description sharding_options("Sharding options");
     po::options_description visible_options("Allowed options");
     po::options_description hidden_options("Hidden options");
     po::options_description cmdline_options("Command line options");
@@ -523,7 +523,7 @@ int main(int argc, char* argv[], char *envp[] )
         ("help,h", "show this usage information")
         ("version", "show version information")
         ("config,f", po::value<string>(), "configuration file specifying additional options")
-        ("port", po::value<int>(&cmdLine.port)->default_value(CmdLine::DefaultDBPort), "specify port number")
+        ("port", po::value<int>(&cmdLine.port)/*->default_value(CmdLine::DefaultDBPort)*/, "specify port number")
         ("bind_ip", po::value<string>(&bind_ip),
          "local ip address to bind listener - all local ips bound by default")
         ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
@@ -548,7 +548,7 @@ int main(int argc, char* argv[], char *envp[] )
         ("noprealloc", "disable data file preallocation")
         ("smallfiles", "use a smaller default file size")
         ("nssize", po::value<int>()->default_value(16), ".ns file size (in MB) for new databases")
-        ("oplog", po::value<int>(), "0=off 1=W 2=R 3=both 7=W+some reads")
+        ("diaglog", po::value<int>(), "0=off 1=W 2=R 3=both 7=W+some reads")
         ("sysinfo", "print some diagnostic system information")
         ("upgrade", "upgrade db if needed")
         ("repair", "run repair on all dbs")
@@ -561,6 +561,9 @@ int main(int argc, char* argv[], char *envp[] )
         ( "mms-token" , po::value<string>() , "account token for mongo monitoring server" )
         ( "mms-name" , po::value<string>() , "server name mongo monitoring server" )
         ( "mms-interval" , po::value<int>()->default_value(30) , "ping interval for mongo monitoring server" )
+#ifdef _HAVESNMP
+        ( "snmp-subagent" , "run snmp subagent" )
+#endif
         ;
 
     replication_options.add_options()
@@ -575,6 +578,11 @@ int main(int argc, char* argv[], char *envp[] )
         ("opIdMem", po::value<long>(), "size limit (in bytes) for in memory storage of op ids")
         ;
 
+	sharding_options.add_options()
+		("configsvr", "declare this is a config db of a cluster")
+		("shardsvr", "declare this is a shard db of a cluster")
+		;
+
     hidden_options.add_options()
         ("command", po::value< vector<string> >(), "command")
         ("cacheSize", po::value<long>(), "cache size (in MB) for rec store")
@@ -587,7 +595,9 @@ int main(int argc, char* argv[], char *envp[] )
 
     positional_options.add("command", 3);
     visible_options.add(general_options).add(replication_options);
-    cmdline_options.add(general_options).add(replication_options).add(hidden_options);
+    visible_options.add(sharding_options);
+    cmdline_options.add(general_options).add(replication_options);
+	cmdline_options.add(hidden_options).add(visible_options);
 
     setupSignals();
 
@@ -740,13 +750,13 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("smallfiles")) {
             cmdLine.smallfiles = true;
         }
-        if (params.count("oplog")) {
-            int x = params["oplog"].as<int>();
+        if (params.count("diaglog")) {
+            int x = params["diaglog"].as<int>();
             if ( x < 0 || x > 7 ) {
-                out() << "can't interpret --oplog setting" << endl;
+                out() << "can't interpret --diaglog setting" << endl;
                 dbexit( EXIT_BADOPTIONS );
             }
-            opLogging = x;
+            _diaglog.level = x;
         }
         if (params.count("sysinfo")) {
             sysRuntimeInfo();
@@ -821,6 +831,21 @@ int main(int argc, char* argv[], char *envp[] )
             uassert("bad --cacheSize arg", x > 0);
             setRecCacheSize(x);
         }
+		if (params.count("port") == 0 ) { 
+			if( params.count("configsvr") ) {
+				cmdLine.port = CmdLine::ConfigServerPort;
+			}
+			if( params.count("shardsvr") )
+				cmdLine.port = CmdLine::ShardServerPort;
+		}
+        if ( params.count("configsvr" ) && params.count( "diaglog" ) == 0 ){
+            _diaglog.level = 1;
+        }
+#ifdef _HAVESNMP
+        if ( params.count( "snmp-subagent" ) ){
+            snmpAgent.enable();
+        }
+#endif
 
         if ( params.count( "mms-token" ) ){
             mms.setToken( params["mms-token"].as<string>() );

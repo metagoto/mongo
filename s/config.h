@@ -101,6 +101,12 @@ namespace mongo {
         bool loadByName(const char *nm);
         
     protected:
+        
+        /**
+           @return true if there was sharding info to remove
+         */
+        bool removeSharding( const string& ns );
+
         string _name; // e.g. "alleyinsider"
         string _primary; // e.g. localhost , mongo.foo.com:9999
         bool _shardingEnabled;
@@ -109,6 +115,7 @@ namespace mongo {
         map<string,ChunkManager*> _shards; // this will only have entries for things that have been looked at
 
         friend class Grid;
+        friend class ChunkManager;
     };
 
     class Grid {
@@ -131,8 +138,6 @@ namespace mongo {
     class ConfigServer : public DBConfig {
     public:
 
-        enum { Port = 27016 }; /* standard port # for a grid db */
-        
         ConfigServer();
         ~ConfigServer();
 
@@ -145,11 +150,13 @@ namespace mongo {
             uassert( "ConfigServer not setup" , _primary.size() );
             return _primary;
         }
-
+        
         /**
            call at startup, this will initiate connection to the grid db 
         */
-        bool init( vector<string> configHosts , bool infer );
+        bool init( vector<string> configHosts );
+
+        bool allUp();
         
         int dbConfigVersion();
         int dbConfigVersion( DBClientBase& conn );
@@ -160,7 +167,7 @@ namespace mongo {
         int checkConfigVersion();
         
         static int VERSION;
-
+        
     private:
         string getHost( string name , bool withPort );
     };

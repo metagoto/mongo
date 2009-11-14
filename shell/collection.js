@@ -295,7 +295,13 @@ DBCollection.prototype.dropIndexes = function(){
 
 DBCollection.prototype.drop = function(){
     this.resetIndexCache();
-    return this._db.runCommand( { drop: this.getName() } );
+    var ret = this._db.runCommand( { drop: this.getName() } );
+    if ( ! ret.ok ){
+        if ( ret.errmsg == "ns not found" )
+            return false;
+        throw "drop failed: " + tojson( ret );
+    }
+    return true;
 }
 
 DBCollection.prototype.renameCollection = function( newName ){
@@ -496,6 +502,14 @@ MapReduceResult.prototype.drop = function(){
     return this._coll.drop();
 }
 
+/**
+* just for debugging really
+*/
+MapReduceResult.prototype.convertToSingleObject = function(){
+    var z = {};
+    this._coll.find().forEach( function(a){ z[a._id] = a.value; } );
+    return z;
+}
 
 /**
 * @param optional object of optional fields;

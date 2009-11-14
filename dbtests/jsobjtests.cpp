@@ -1101,7 +1101,90 @@ namespace JsobjTests {
             t( BSON("a" << BSON("b" << 1 << "c" << 1 << "e" << BSON("f" << 1)) << "d" << 1), BSON("a.b" << 1 << "a.c" << 1 << "a.e.f" << 1 << "d" << 1) );
         }
     };
+
+    struct BSONArrayBuilderTest{
+        void run(){
+            int i = 0;
+            BSONObjBuilder objb;
+            BSONArrayBuilder arrb;
+
+            objb << objb.numStr(i++) << 100;
+            arrb                     << 100;
+
+            objb << objb.numStr(i++) << 1.0;
+            arrb                     << 1.0;
+
+            objb << objb.numStr(i++) << "Hello";
+            arrb                     << "Hello";
+
+            objb << objb.numStr(i++) << string("World");
+            arrb                     << string("World");
+
+            objb << objb.numStr(i++) << BSON( "a" << 1 << "b" << "foo" );
+            arrb                     << BSON( "a" << 1 << "b" << "foo" );
+
+            objb << objb.numStr(i++) << BSON( "a" << 1)["a"];
+            arrb                     << BSON( "a" << 1)["a"];
+
+            OID oid;
+            oid.init();
+            objb << objb.numStr(i++) << oid;
+            arrb                     << oid;
+
+            BSONObj obj = objb.obj();
+            BSONArray arr = arrb.arr();
+
+            ASSERT_EQUALS(obj, arr);
+
+            BSONObj o = BSON( "obj" << obj << "arr" << arr << "arr2" << BSONArray(obj) );
+            ASSERT_EQUALS(o["obj"].type(), Object);
+            ASSERT_EQUALS(o["arr"].type(), Array);
+            ASSERT_EQUALS(o["arr2"].type(), Array);
+        }
+    };
     
+    struct ArrayMacroTest{
+        void run(){
+            BSONArray arr = BSON_ARRAY( "hello" << 1 << BSON( "foo" << BSON_ARRAY( "bar" << "baz" << "qux" ) ) );
+            BSONObj obj = BSON( "0" << "hello"
+                             << "1" << 1
+                             << "2" << BSON( "foo" << BSON_ARRAY( "bar" << "baz" << "qux" ) ) );
+
+            ASSERT_EQUALS(arr, obj);
+            ASSERT_EQUALS(arr["2"].type(), Object);
+            ASSERT_EQUALS(arr["2"].embeddedObject()["foo"].type(), Array);
+        }
+    };
+
+    class NumberParsing {
+    public:
+        void run(){
+            BSONObjBuilder a;
+            BSONObjBuilder b;
+
+            a.append( "a" , (int)1 );
+            ASSERT( b.appendAsNumber( "a" , "1" ) );
+            
+            a.append( "b" , 1.1 );
+            ASSERT( b.appendAsNumber( "b" , "1.1" ) );
+
+            a.append( "c" , (int)-1 );
+            ASSERT( b.appendAsNumber( "c" , "-1" ) );
+            
+            a.append( "d" , -1.1 );
+            ASSERT( b.appendAsNumber( "d" , "-1.1" ) );
+
+            a.append( "e" , (long long)32131231231232313LL );
+            ASSERT( b.appendAsNumber( "e" , "32131231231232313" ) );
+            
+            ASSERT( ! b.appendAsNumber( "f" , "zz" ) );
+            ASSERT( ! b.appendAsNumber( "f" , "5zz" ) );
+            ASSERT( ! b.appendAsNumber( "f" , "zz5" ) );
+
+            ASSERT_EQUALS( a.obj() , b.obj() );
+        }
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "jsobj" ){
@@ -1183,6 +1266,9 @@ namespace JsobjTests {
             add< CompatBSON >();
             add< CompareDottedFieldNamesTest >();
             add< NestedDottedConversions >();
+            add< BSONArrayBuilderTest >();
+            add< ArrayMacroTest >();
+            add< NumberParsing >();
         }
     } myall;
     

@@ -172,7 +172,6 @@ namespace mongo {
         return nDeleted;
     }
 
-    int queryTraceLevel = 0;
     int otherTraceLevel = 0;
 
     int initialExtentSize(int len);
@@ -339,6 +338,9 @@ namespace mongo {
                 bc_ = dynamic_cast< BtreeCursor* >( c_.get() );
                 bc_->forgetEndKey();
             }
+            
+            skip_ = spec_["skip"].numberLong();
+            limit_ = spec_["limit"].numberLong();
         }
 
         virtual void next() {
@@ -354,19 +356,19 @@ namespace mongo {
                         setComplete();
                         return;
                     }
-                    ++count_;
+                    _gotOne();
                 } else {
                     if ( !firstMatch_.woEqual( bc_->currKeyNode().key ) ) {
                         setComplete();
                         return;
                     }
-                    ++count_;
+                    _gotOne();
                 }
             } else {
                 if ( !matcher_->matches(c_->currKey(), c_->currLoc() ) ) {
                 }
                 else if( !c_->getsetdup(c_->currLoc()) ) {
-                    ++count_;
+                    _gotOne();
                 }                
             }
             c_->advance();
@@ -377,8 +379,25 @@ namespace mongo {
         long long count() const { return count_; }
         virtual bool mayRecordPlan() const { return true; }
     private:
+        
+        void _gotOne(){
+            if ( skip_ ){
+                skip_--;
+                return;
+            }
+            
+            if ( limit_ > 0 && count_ >= limit_ ){
+                setComplete();
+                return;
+            }
+
+            count_++;
+        }
+
         BSONObj spec_;
         long long count_;
+        long long skip_;
+        long long limit_;
         auto_ptr< Cursor > c_;
         BSONObj query_;
         BtreeCursor *bc_;
@@ -396,10 +415,18 @@ namespace mongo {
             return -1;
         }
         BSONObj query = cmd.getObjectField("query");
-        BSONObj fields = cmd.getObjectField("fields");
+
         // count of all objects
-        if ( query.isEmpty() && fields.isEmpty() ) {
-            return d->nrecords;
+        if ( query.isEmpty() ){
+            long long num = d->nrecords;
+            num = num - cmd["skip"].numberLong();
+            if ( cmd["limit"].isNumber() ){
+                long long limit = cmd["limit"].numberLong();
+                if ( limit < num ){
+                    num = limit;
+                }
+            }
+            return num;
         }
         QueryPlanSet qps( ns, query, BSONObj() );
         CountOp original( cmd );

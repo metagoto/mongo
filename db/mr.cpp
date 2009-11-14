@@ -124,6 +124,13 @@ namespace mongo {
                         finalizeCode = cmdObj["finalize"].ascode();
                     }
                     
+
+                    if ( cmdObj["mapparams"].type() == Array ){
+                        mapparams = cmdObj["mapparams"].embeddedObjectUserCheck();
+                    }
+                    else {
+                        mapparams = BSONObj();
+                    }
                 }
                 
                 { // query options
@@ -147,10 +154,11 @@ namespace mongo {
              */
             long long renameIfNeeded( DBDirectClient& db ){
                 if ( finalLong != tempLong ){
-                    dblock l;
                     db.dropCollection( finalLong );
-                    BSONObj info;
-                    uassert( "rename failed" , db.runCommand( "admin" , BSON( "renameCollection" << tempLong << "to" << finalLong ) , info ) );
+                    if ( db.count( tempLong ) ){
+                        BSONObj info;
+                        uassert( "rename failed" , db.runCommand( "admin" , BSON( "renameCollection" << tempLong << "to" << finalLong ) , info ) );
+                    }
                 }
                 return db.count( finalLong );
             }
@@ -173,6 +181,8 @@ namespace mongo {
             string mapCode;
             string reduceCode;
             string finalizeCode;
+            
+            BSONObj mapparams;
 
             // output tables
             string incLong;
@@ -201,7 +211,7 @@ namespace mongo {
                 db.dropCollection( setup.tempLong );
                 db.dropCollection( setup.incLong );
                 
-                dblock l;
+                writelock l( setup.incLong );
                 string err;
                 assert( userCreateNS( setup.incLong.c_str() , BSON( "autoIndexId" << 0 ) , err , false ) );
 
@@ -214,7 +224,7 @@ namespace mongo {
                 BSONObj key = values.begin()->firstElement().wrap( "_id" );
                 BSONObj res = reduceValues( values , scope.get() , reduce , 1 , finalize );
                 
-                dblock l;
+                writelock l( setup.tempLong );
                 theDataFileMgr.insertAndLog( setup.tempLong.c_str() , res , false );
             }
 
@@ -254,6 +264,7 @@ namespace mongo {
                     
                     if ( all.size() == 1 ){
                         // this key has low cardinality, so just write to db
+                        writelock l(_state.setup.incLong);
                         write( *(all.begin()) );
                     }
                     else if ( all.size() > 1 ){
@@ -266,12 +277,8 @@ namespace mongo {
 
             }
 
-            void write( BSONObj& o ){
-                theDataFileMgr.insert( _state.setup.incLong.c_str() , o , true );
-            }
-            
             void dump(){
-                dblock l;
+                writelock l(_state.setup.incLong);
                     
                 for ( InMemory::iterator i=_temp->begin(); i!=_temp->end(); i++ ){
                     list<BSONObj>& all = i->second;
@@ -306,13 +313,18 @@ namespace mongo {
                 dump();
                 log(1) << "  mr: dumping to db" << endl;
             }
+
+        private:
+            void write( BSONObj& o ){
+                theDataFileMgr.insert( _state.setup.incLong.c_str() , o , true );
+            }
             
-            //private:
             MRState& _state;
         
             InMemory * _temp;
             long _size;
             
+        public:
             long long numEmits;
         };
 
@@ -372,7 +384,7 @@ namespace mongo {
                         if ( mr.verbose ) mt.reset();
                         
                         state.scope->setThis( &o );
-                        if ( state.scope->invoke( state.map , BSONObj() , 0 , true ) )
+                        if ( state.scope->invoke( state.map , state.setup.mapparams , 0 , true ) )
                             throw UserException( (string)"map invoke failed: " + state.scope->getError() );
                         
                         if ( mr.verbose ) mapTime += mt.micros();
@@ -409,8 +421,8 @@ namespace mongo {
                     BSONObj prev;
                     list<BSONObj> all;
                     
+                    ProgressMeter fpm( db.count( mr.incLong ) );
                     cursor = db.query( mr.incLong, Query().sort( sortKey ) );
-                    
                     while ( cursor->more() ){
                         BSONObj o = cursor->next().getOwned();
                         
@@ -424,6 +436,7 @@ namespace mongo {
                         all.clear();
                         prev = o;
                         all.push_back( o );
+                        fpm.hit();
                     }
                     
                     state.finalReduce( all );
@@ -433,9 +446,11 @@ namespace mongo {
                 catch ( ... ){
                     log() << "mr failed, removing collection" << endl;
                     db.dropCollection( mr.tempLong );
+                    db.dropCollection( mr.incLong );
                     throw;
                 }
                 
+                db.dropCollection( mr.incLong );
                 
                 long long finalCount = mr.renameIfNeeded( db );
 

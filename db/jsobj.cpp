@@ -256,7 +256,7 @@ namespace mongo {
             if ( format == TenGen )
                 s << "Dbref( ";
             else
-                s << "{ \"$ns\" : ";
+                s << "{ \"$ref\" : ";
             s << '"' << valuestr() << "\", ";
             if ( format != TenGen )
                 s << "\"$id\" : ";
@@ -656,7 +656,7 @@ namespace mongo {
     int getGtLtOp(const BSONElement& e) {
         if ( e.type() != Object )
             return BSONObj::Equality;
-        
+
         BSONElement fe = e.embeddedObject().firstElement();
         return fe.getGtLtOp();
     }
@@ -675,7 +675,7 @@ namespace mongo {
 
             size_t a = l.find( '.' , lstart );
             size_t b = r.find( '.' , rstart );
-            
+
             size_t lend = a == string::npos ? l.size() : a;
             size_t rend = b == string::npos ? r.size() : b;
 
@@ -1566,5 +1566,63 @@ namespace mongo {
         }
     }
 
+    const string BSONObjBuilder::numStrs[] = {
+         "0",  "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",
+        "10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
+        "20", "21", "22", "23", "24", "25", "26", "27", "28", "29",
+        "30", "31", "32", "33", "34", "35", "36", "37", "38", "39",
+        "40", "41", "42", "43", "44", "45", "46", "47", "48", "49",
+        "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
+        "60", "61", "62", "63", "64", "65", "66", "67", "68", "69",
+        "70", "71", "72", "73", "74", "75", "76", "77", "78", "79",
+        "80", "81", "82", "83", "84", "85", "86", "87", "88", "89",
+        "90", "91", "92", "93", "94", "95", "96", "97", "98", "99",
+    };
+
+    bool BSONObjBuilder::appendAsNumber( const string& fieldName , const string& data ){
+        if ( data.size() == 0 )
+            return false;
+        
+        unsigned int pos=0;
+        if ( data[0] == '-' )
+            pos++;
+        
+        bool hasDec = false;
+        
+        for ( ; pos<data.size(); pos++ ){
+            if ( isdigit(data[pos]) )
+                continue;
+
+            if ( data[pos] == '.' ){
+                if ( hasDec )
+                    return false;
+                hasDec = true;
+                continue;
+            }
+            
+            return false;
+        }
+        
+        if ( hasDec ){
+            double d = atof( data.c_str() );
+            append( fieldName.c_str() , d );
+            return true;
+        }
+        
+        if ( data.size() < 8 ){
+            append( fieldName , atoi( data.c_str() ) );
+            return true;
+        }
+        
+        try {
+            long long num = boost::lexical_cast<long long>( data );
+            append( fieldName , num );
+            return true;
+        }
+        catch(bad_lexical_cast &){
+            return false;
+        }
+
+    }
 
 } // namespace mongo

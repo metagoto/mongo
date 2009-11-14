@@ -204,6 +204,8 @@ namespace mongo {
         unsigned long long getSequenceNumber(){
             return _sequenceNumber;
         }
+
+        void drop();
         
     private:
         DBConfig * _config;
@@ -212,7 +214,8 @@ namespace mongo {
         bool _unique;
         
         vector<Chunk*> _chunks;
-        
+        map<string,unsigned long long> _maxMarkers;
+
         unsigned long long _sequenceNumber;
         
         friend class Chunk;

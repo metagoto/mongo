@@ -321,20 +321,17 @@ namespace mongo {
                 }
 
                 BSONObj find = cmdObj.getObjectField( "find" );
-                bool middle = false;
                 if ( find.isEmpty() ){
                     find = cmdObj.getObjectField( "middle" );
-                    middle = true;
-                }
 
-                if ( find.isEmpty() ){
-                    errmsg = "need to specify find or middle";
-                    return false;
+                    if ( find.isEmpty() ){
+                        errmsg = "need to specify find or middle";
+                        return false;
+                    }
                 }
 
                 ChunkManager * info = config->getChunkManager( ns );
                 Chunk& old = info->findChunk( dotted2nested(find) );
-
 
                 return _split( result , errmsg , ns , info , old , cmdObj.getObjectField( "middle" ) );
             }
@@ -486,6 +483,12 @@ namespace mongo {
                     }
                 }
                 
+                if ( host.find( ":" ) == string::npos ){
+                    stringstream ss;
+                    ss << host << ":" << CmdLine::ShardServerPort;
+                    host = ss.str();
+                }
+
                 BSONObj shard;
                 {
                     BSONObjBuilder b;

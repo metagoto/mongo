@@ -48,7 +48,8 @@ namespace mongo {
         
         static long long totalMappedLength();
         static void closeAllFiles( stringstream &message );
-        
+        static int flushAll( bool sync );
+
     private:
         void created();
         
