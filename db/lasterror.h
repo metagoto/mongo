@@ -28,6 +28,7 @@ namespace mongo {
     struct LastError {
         string msg;
         enum UpdatedExistingType { NotUpdate, True, False } updatedExisting;
+        /* todo: nObjects should be 64 bit */
         int nObjects;
         int nPrev;
         bool valid;
@@ -58,8 +59,6 @@ namespace mongo {
         }
         void appendSelf( BSONObjBuilder &b );
         static LastError noError;
-
-        
     };
 
     extern class LastErrorHolder {
@@ -114,4 +113,5 @@ namespace mongo {
         if ( le )
             le->recordDelete( nDeleted );        
     }
+
 } // namespace mongo

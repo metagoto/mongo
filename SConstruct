@@ -12,6 +12,7 @@
 
 import os
 import sys
+import imp
 import types
 import re
 import shutil
@@ -185,13 +186,6 @@ AddOption( "--pg",
            nargs=0,
            action="store" )
 
-AddOption( "--snmp",
-           dest="snmp",
-           type="string",
-           nargs=0,
-           action="store" )
-
-
 # --- environment setup ---
 
 def removeIfInList( lst , thing ):
@@ -236,8 +230,6 @@ nojni = not GetOption( "nojni" ) is None
 usesm = not GetOption( "usesm" ) is None
 usev8 = not GetOption( "usev8" ) is None
 usejvm = not GetOption( "usejvm" ) is None
-
-enableSNMP = GetOption( "snmp" ) is not None
 
 env = Environment( MSVS_ARCH=msarch , tools = ["default", "gch"], toolpath = '.' )
 if GetOption( "cxx" ) is not None:
@@ -326,6 +318,20 @@ coreShardFiles = []
 shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" ,  "s/cursors.cpp" ,  "s/server.cpp" , "s/chunk.cpp" , "s/shardkey.cpp" , "s/config.cpp"  ]
 shardServerFiles += [ "client/quorum.cpp" ]
 serverOnlyFiles += coreShardFiles + [ "s/d_logic.cpp" ]
+
+serverOnlyFiles += [ "db/module.cpp" ] + Glob( "db/modules/*.cpp" )
+
+modules = []
+
+for x in os.listdir( "db/modules/" ):
+    if x.find( "." ) >= 0:
+        continue
+    print( "adding module: " + x )
+    modRoot = "db/modules/" + x + "/"
+    serverOnlyFiles += Glob( modRoot + "src/*.cpp" )
+    modBuildFile = modRoot + "build.py"
+    if os.path.exists( modBuildFile ):
+        modules += [ imp.load_module( "module_" + x , open( modBuildFile , "r" ) , modBuildFile , ( ".py" , "r" , imp.PY_SOURCE  ) ) ]
 
 allClientFiles = commonFiles + coreDbFiles + [ "client/clientOnly.cpp" , "client/gridfs.cpp" , "s/d_util.cpp" ];
 
@@ -612,7 +618,6 @@ def getGitVersion():
     return open( f , 'r' ).read().strip()
 
 def getSysInfo():
-    import os, sys
     if windows:
         return "windows " + str( sys.getwindowsversion() )
     else:
@@ -738,21 +743,8 @@ def doConfigure( myenv , needJava=True , needPcre=True , shell=False ):
     removeIfInList( myenv["LIBS"] , "pcap" )
     removeIfInList( myenv["LIBS"] , "wpcap" )
 
-    if enableSNMP and conf.CheckCXXHeader( "net-snmp/net-snmp-config.h" ):
-
-        snmplibs = [ "netsnmp" + x for x in [ "mibs" , "agent" , "helpers" , "" ] ]
-
-        gotAll = True
-        for x in snmplibs:
-            if not myCheckLib(x):
-                gotAll = False
-        if gotAll:
-            myenv.Append( CPPDEFINES=[ "_HAVESNMP" ] )
-            global serverOnlyFiles
-            serverOnlyFiles += [ "db/snmp.cpp" ]
-        else:
-            for x in snmplibs:
-                removeIfInList( myenv["LIBS"] , x )
+    for m in modules:
+        m.configure( conf , myenv )
 
     # this is outside of usesm block so don't have to rebuild for java
     if windows:
@@ -892,7 +884,7 @@ testEnv.Prepend( LIBPATH=["."] )
 
 
 # main db target
-mongod = env.Program( "mongod" , commonFiles + coreDbFiles + serverOnlyFiles + [ "db/db.cpp" , "db/mms.cpp" ]  )
+mongod = env.Program( "mongod" , commonFiles + coreDbFiles + serverOnlyFiles + [ "db/db.cpp" ] )
 Default( mongod )
 
 # tools
@@ -1259,6 +1251,7 @@ def installBinary( e , name ):
     global allBinaries
 
     if windows:
+        e.Alias( name , name + ".exe" )
         name += ".exe"
 
     inst = e.Install( installDir + "/bin" , name )
@@ -1317,6 +1310,13 @@ if distBuild or release:
 
 #final alias
 env.Alias( "install" , installDir )
+
+# aliases
+if windows:
+    env.Alias( "mongoclient" , "mongoclient.lib" )
+else:
+    env.Alias( "mongoclient" , "libmongoclient.a" )
+
 
 #  ---- CONVENIENCE ----
 

@@ -1507,6 +1507,10 @@
 					>
 				</File>
 				<File
+					RelativePath="..\s\d_util.cpp"
+					>
+				</File>
+				<File
 					RelativePath=".\db.cpp"
 					>
 				</File>
@@ -1563,7 +1567,11 @@
 					>
 				</File>
 				<File
-					RelativePath=".\mms.cpp"
+					RelativePath=".\modules\mms.cpp"
+					>
+				</File>
+				<File
+					RelativePath=".\module.cpp"
 					>
 				</File>
 				<File
@@ -1576,6 +1584,10 @@
 				</File>
 				<File
 					RelativePath=".\nonce.cpp"
+					>
+				</File>
+				<File
+					RelativePath="..\client\parallel.cpp"
 					>
 				</File>
 				<File
