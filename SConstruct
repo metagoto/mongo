@@ -696,7 +696,7 @@ def doConfigure( myenv , needJava=True , needPcre=True , shell=False ):
             return True
 
         if failIfNotFound:
-            print( "can't find " + str( poss ) + " in " + str( myenv["LIBPATH"] ) )
+            print( "can't find library " + str( poss ) + " in " + str( myenv["LIBPATH"] ) )
             Exit(1)
 
         return False
@@ -843,7 +843,7 @@ def jsToH(target, source, env):
 
     for l in open( str(source[0]) , 'r' ):
         l = l.strip()
-        l = l.partition( "//" )[0]
+        l = l.split( "//" )[0]
         l = l.replace( '\\' , "\\\\" )
         l = l.replace( '"' , "\\\"" )
 
@@ -1200,8 +1200,15 @@ def getSystemInstallName():
         n += "-static"
     if nix and os.uname()[2].startswith( "8." ):
         n += "-tiger"
-    return n
 
+    try:
+        import settings
+        if "distmod" in dir( settings ):
+            n = n + "-" + str( settings.distmod )
+    except:
+        pass
+
+    return n
 
 def getCodeVersion():
     fullSource = open( "stdafx.cpp" , "r" ).read()
