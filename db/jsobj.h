@@ -611,7 +611,6 @@ namespace mongo {
             return compareElementValues(*this,other) < 0;
         }
         
-    protected:
         // If maxLen is specified, don't scan more than maxLen bytes.
         BSONElement(const char *d, int maxLen = -1) : data(d) {
             fieldNameSize_ = -1;
@@ -638,16 +637,6 @@ namespace mongo {
     };
     
     int getGtLtOp(const BSONElement& e);
-
-    /* compare values with type check. 
-       note: as is now, not smart about int/double comingling. TODO 
-    */
-    inline int compareValues(const BSONElement& l, const BSONElement& r)
-    {
-        int x = (int) l.type() - (int) r.type();
-        if( x ) return x;
-        return compareElementValues(l,r);
-    }
 
     struct BSONElementCmpWithoutField {
         bool operator()( const BSONElement &l, const BSONElement &r ) const {
@@ -929,7 +918,7 @@ namespace mongo {
             is assured regardless.
             @return true if found
 		*/
-		bool getObjectID(BSONElement& e);
+		bool getObjectID(BSONElement& e) const;
 
         /** makes a copy of the object. 
         */
@@ -1735,7 +1724,7 @@ namespace mongo {
         return objsize() > 0 && objsize() <= 1024 * 1024 * 8;
     }
 
-    inline bool BSONObj::getObjectID(BSONElement& e) { 
+    inline bool BSONObj::getObjectID(BSONElement& e) const { 
         BSONElement f = findElement("_id");
         if( !f.eoo() ) { 
             e = f;
@@ -1830,5 +1819,47 @@ namespace mongo {
         return m;
     }
 
+    struct BSONElementFieldNameCmp {
+        bool operator()( const BSONElement &l, const BSONElement &r ) const {
+            return strcmp( l.fieldName() , r.fieldName() ) <= 0;
+        }
+    };
+
+
+    typedef set<BSONElement, BSONElementFieldNameCmp> BSONSortedElements;
+    inline BSONSortedElements bson2set( const BSONObj& obj ){
+        BSONSortedElements s;
+        BSONObjIterator it(obj);
+        while ( it.more() )
+            s.insert( it.next() );
+        return s;
+    }
+    
+    class BSONObjIteratorSorted {
+    public:
+        BSONObjIteratorSorted( const BSONObj& o );
         
+        ~BSONObjIteratorSorted(){
+            assert( _fields );
+            delete _fields;
+            _fields = 0;
+        }
+
+        bool more(){
+            return _cur < _nfields;
+        }
+        
+        BSONElement next(){
+            assert( _fields );
+            if ( _cur < _nfields )
+                return BSONElement( _fields[_cur++] );
+            return BSONElement();
+        }
+
+    private:
+        const char ** _fields;
+        int _nfields;
+        int _cur;
+    };
+
 } // namespace mongo

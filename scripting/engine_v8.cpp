@@ -141,8 +141,9 @@ namespace mongo {
     }
 
     void V8Scope::setObject( const char *field , const BSONObj& obj , bool readOnly){
-        // TODO: ignoring readOnly
-        _global->Set( v8::String::New( field ) , mongoToV8( obj ) );
+        // Set() accepts a ReadOnly parameter, but this just prevents the field itself
+        // from being overwritten and doesn't protect the object stored in 'field'.
+        _global->Set( v8::String::New( field ) , mongoToV8( obj, false, readOnly) );
     }
 
     int V8Scope::type( const char *field ){
@@ -157,8 +158,6 @@ namespace mongo {
             return Code;
         if ( v->IsArray() )
             return Array;
-        if ( v->IsObject() )
-            return Object;
         if ( v->IsBoolean() )
             return Bool;
         if ( v->IsInt32() )
@@ -171,6 +170,8 @@ namespace mongo {
         }
         if ( v->IsDate() )
             return Date;
+        if ( v->IsObject() )
+            return Object;
 
         throw UserException( (string)"don't know what this is: " + field );
     }

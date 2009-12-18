@@ -29,7 +29,43 @@ namespace mongo {
 
 #define DDD(x)
 
-    Local<v8::Object> mongoToV8( const BSONObj& m , bool array ){
+    Handle<Value> NamedReadOnlySet( Local<v8::String> property, Local<Value> value, const AccessorInfo& info ) {
+        cout << "cannot write to read-only object" << endl;
+        return value;
+    }
+
+    Handle<Boolean> NamedReadOnlyDelete( Local<v8::String> property, const AccessorInfo& info ) {
+        cout << "cannot delete from read-only object" << endl;
+        return Boolean::New( false );
+    }
+    
+    Handle<Value> IndexedReadOnlySet( uint32_t index, Local<Value> value, const AccessorInfo& info ) {
+        cout << "cannot write to read-only array" << endl;
+        return value;
+    }
+    
+    Handle<Boolean> IndexedReadOnlyDelete( uint32_t index, const AccessorInfo& info ) {
+        cout << "cannot delete from read-only array" << endl;
+        return Boolean::New( false );
+    }
+    
+    Local< v8::Value > newFunction( const char *code ) {
+        stringstream codeSS;
+        codeSS << "____MontoToV8_newFunction_temp = " << code;
+        string codeStr = codeSS.str();
+        Local< Script > compiled = Script::New( v8::String::New( codeStr.c_str() ) );
+        Local< Value > ret = compiled->Run();
+        return ret;
+    }
+    
+    Local< v8::Value > newId( const OID &id ) {
+        v8::Function * idCons = getObjectIdCons();
+        v8::Handle<v8::Value> argv[1];
+        argv[0] = v8::String::New( id.str().c_str() );
+        return idCons->NewInstance( 1 , argv );        
+    }
+    
+    Local<v8::Object> mongoToV8( const BSONObj& m , bool array, bool readOnly ){
 
         // handle DBRef. needs to come first. isn't it? (metagoto)
         static string ref = "$ref";
@@ -44,12 +80,41 @@ namespace mongo {
             }
         }
 
-        Local<v8::Object> o;
-        if ( array )
-            o = v8::Array::New();
-        else 
-            o = v8::Object::New();
+        Local< v8::ObjectTemplate > readOnlyObjects;
+        // Hoping template construction is fast...
+        Local< v8::ObjectTemplate > internalFieldObjects = v8::ObjectTemplate::New();
+        internalFieldObjects->SetInternalFieldCount( 1 );
 
+        Local<v8::Object> o;
+        if ( array ) {
+            // NOTE Looks like it's impossible to add interceptors to non array objects in v8.
+            o = v8::Array::New();
+        } else if ( !readOnly ) {
+            o = v8::Object::New();
+        } else {
+            // NOTE Our readOnly implemention relies on undocumented ObjectTemplate
+            // functionality that may be fragile, but it still seems like the best option
+            // for now -- fwiw, the v8 docs are pretty sparse.  I've determined experimentally
+            // that when property handlers are set for an object template, they will attach
+            // to objects previously created by that template.  To get this to work, though,
+            // it is necessary to initialize the template's property handlers before
+            // creating objects from the template (as I have in the following few lines
+            // of code).
+            // NOTE In my first attempt, I configured the permanent property handlers before
+            // constructiong the object and replaced the Set() calls below with ForceSet().
+            // However, it turns out that ForceSet() only bypasses handlers for named
+            // properties and not for indexed properties.
+            readOnlyObjects = v8::ObjectTemplate::New();
+            // NOTE This internal field will store type info for special db types.  For
+            // regular objects the field is unnecessary - for simplicity I'm creating just
+            // one readOnlyObjects template for objects where the field is & isn't necessary,
+            // assuming that the overhead of an internal field is slight.
+            readOnlyObjects->SetInternalFieldCount( 1 );
+            readOnlyObjects->SetNamedPropertyHandler( 0 );
+            readOnlyObjects->SetIndexedPropertyHandler( 0 );
+            o = readOnlyObjects->NewInstance();
+        }
+        
         mongo::BSONObj sub;
 
         for ( BSONObjIterator i(m); i.more(); ) {
@@ -60,7 +125,15 @@ namespace mongo {
             switch ( f.type() ){
 
             case mongo::Code:
-                cout << "warning, code saved in database just turned into string right now" << endl;
+                o->Set( v8::String::New( f.fieldName() ), newFunction( f.valuestr() ) );
+                break;
+
+            case CodeWScope:
+                if ( f.codeWScopeObject().isEmpty() )
+                    log() << "warning: CodeWScope doesn't transfer to db.eval" << endl;
+                o->Set( v8::String::New( f.fieldName() ), newFunction( f.codeWScopeCode() ) );
+                break;
+            
             case mongo::String: 
                 o->Set( v8::String::New( f.fieldName() ) , v8::String::New( f.valuestr() ) );
                 break;
@@ -70,7 +143,7 @@ namespace mongo {
                 v8::Handle<v8::Value> argv[1];
                 argv[0] = v8::String::New( f.__oid().str().c_str() );
                 o->Set( v8::String::New( f.fieldName() ) , 
-                        idCons->NewInstance( 1 , argv ) );
+                            idCons->NewInstance( 1 , argv ) );
                 break;
             }
             
@@ -82,7 +155,7 @@ namespace mongo {
             case mongo::Array:
             case mongo::Object:
                 sub = f.embeddedObject();
-                o->Set( v8::String::New( f.fieldName() ) , mongoToV8( sub , f.type() == mongo::Array ) );
+                o->Set( v8::String::New( f.fieldName() ) , mongoToV8( sub , f.type() == mongo::Array, readOnly ) );
                 break;
             
             case mongo::Date:
@@ -109,38 +182,56 @@ namespace mongo {
             }
             
             case mongo::BinData: {
-                Local<v8::Object> b = v8::Object::New();
+                Local<v8::Object> b = readOnly ? readOnlyObjects->NewInstance() : internalFieldObjects->NewInstance();
 
                 int len;
-                f.binData( len );
+                const char *data = f.binData( len );
             
                 b->Set( v8::String::New( "subtype" ) , v8::Number::New( f.binDataType() ) );
                 b->Set( v8::String::New( "length" ) , v8::Number::New( len ) );
-            
+                b->Set( v8::String::New( "data" ) , v8::String::New( data, len ) );
+                b->SetInternalField( 0, v8::Uint32::New( f.type() ) );
+                
                 o->Set( v8::String::New( f.fieldName() ) , b );
                 break;
-            };
+            }
             
             case mongo::Timestamp: {
-                Local<v8::Object> sub = v8::Object::New();            
-
+                Local<v8::Object> sub = readOnly ? readOnlyObjects->NewInstance() : internalFieldObjects->NewInstance();
+                
                 sub->Set( v8::String::New( "time" ) , v8::Date::New( f.timestampTime() ) );
                 sub->Set( v8::String::New( "i" ) , v8::Number::New( f.timestampInc() ) );
-            
+                sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
+                
                 o->Set( v8::String::New( f.fieldName() ) , sub );
                 break;
             }
             
-            case mongo::MinKey:
-                // TODO: make a special type
-                o->Set( v8::String::New( f.fieldName() ) , v8::String::New( "MinKey" ) );
+            case mongo::MinKey: {
+                Local<v8::Object> sub = readOnly ? readOnlyObjects->NewInstance() : internalFieldObjects->NewInstance();
+                sub->Set( v8::String::New( "$MinKey" ), v8::Boolean::New( true ) );
+                sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
+                o->Set( v8::String::New( f.fieldName() ) , sub );
                 break;
+            }
+                    
+            case mongo::MaxKey: {
+                Local<v8::Object> sub = readOnly ? readOnlyObjects->NewInstance() : internalFieldObjects->NewInstance();
+                sub->Set( v8::String::New( "$MaxKey" ), v8::Boolean::New( true ) );
+                sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
+                o->Set( v8::String::New( f.fieldName() ) , sub );
+                break;
+            }
 
-            case mongo::MaxKey:
-                // TODO: make a special type
-                o->Set( v8::String::New( f.fieldName() ) , v8::String::New( "MaxKey" ) );
+            case mongo::DBRef: {
+                v8::Function* dbPointer = getNamedCons( "DBPointer" );
+                v8::Handle<v8::Value> argv[2];
+                argv[0] = v8::String::New( f.dbrefNS() );
+                argv[1] = newId( f.dbrefOID() );
+                o->Set( v8::String::New( f.fieldName() ), dbPointer->NewInstance(2, argv) );
                 break;
-            
+            }
+                    
             default:
                 cout << "can't handle type: ";
                 cout  << f.type() << " ";
@@ -151,23 +242,33 @@ namespace mongo {
         
         }
 
+        if ( !array && readOnly ) {
+            readOnlyObjects->SetNamedPropertyHandler( 0, NamedReadOnlySet, 0, NamedReadOnlyDelete );
+            readOnlyObjects->SetIndexedPropertyHandler( 0, IndexedReadOnlySet, 0, IndexedReadOnlyDelete );            
+        }
+        
         return o;
     }
 
     Handle<v8::Value> mongoToV8Element( const BSONElement &f ) {
+        Local< v8::ObjectTemplate > internalFieldObjects = v8::ObjectTemplate::New();
+        internalFieldObjects->SetInternalFieldCount( 1 );
+
         switch ( f.type() ){
 
         case mongo::Code:
-            cout << "warning, code saved in database just turned into string right now" << endl;
+            return newFunction( f.valuestr() );
+                
+        case CodeWScope:
+            if ( f.codeWScopeObject().isEmpty() )
+                log() << "warning: CodeWScope doesn't transfer to db.eval" << endl;
+            return newFunction( f.codeWScopeCode() );
+                
         case mongo::String: 
             return v8::String::New( f.valuestr() );
             
-        case mongo::jstOID: {
-            v8::Function * idCons = getObjectIdCons();
-            v8::Handle<v8::Value> argv[1];
-            argv[0] = v8::String::New( f.__oid().str().c_str() );
-            return idCons->NewInstance( 1 , argv );
-        }
+        case mongo::jstOID:
+            return newId( f.__oid() );
             
         case mongo::NumberDouble:
         case mongo::NumberInt:
@@ -199,37 +300,54 @@ namespace mongo {
         }
             
         case mongo::BinData: {
-            Local<v8::Object> b = v8::Object::New();
+            Local<v8::Object> b = internalFieldObjects->NewInstance();
             
             int len;
-            f.binData( len );
+            const char *data = f.binData( len );
             
             b->Set( v8::String::New( "subtype" ) , v8::Number::New( f.binDataType() ) );
             b->Set( v8::String::New( "length" ) , v8::Number::New( len ) );
+            b->Set( v8::String::New( "data" ) , v8::String::New( data, len ) );
+            b->SetInternalField( 0, v8::Uint32::New( f.type() ) );
             
             return b;
         };
             
         case mongo::Timestamp: {
-            Local<v8::Object> sub = v8::Object::New();            
+            Local<v8::Object> sub = internalFieldObjects->NewInstance();
             
             sub->Set( v8::String::New( "time" ) , v8::Date::New( f.timestampTime() ) );
             sub->Set( v8::String::New( "i" ) , v8::Number::New( f.timestampInc() ) );
-            
+            sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
+
             return sub;
         }
             
-        case mongo::MinKey:
-            // TODO: make a special type
-            return v8::String::New( "MinKey" );
+        case mongo::MinKey: {
+            Local<v8::Object> sub = internalFieldObjects->NewInstance();
+            sub->Set( v8::String::New( "$MinKey" ), v8::Boolean::New( true ) );
+            sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
+            return sub;
+        }
             
-        case mongo::MaxKey:
-            // TODO: make a special type
-            return v8::String::New( "MaxKey" );
-            
+        case mongo::MaxKey: {
+            Local<v8::Object> sub = internalFieldObjects->NewInstance();
+            sub->Set( v8::String::New( "$MaxKey" ), v8::Boolean::New( true ) );
+            sub->SetInternalField( 0, v8::Uint32::New( f.type() ) );
+            return sub;
+        }
+                
         case mongo::Undefined:
             return v8::Undefined();
-            
+
+        case mongo::DBRef: {
+            v8::Function* dbPointer = getNamedCons( "DBPointer" );
+            v8::Handle<v8::Value> argv[2];
+            argv[0] = v8::String::New( f.dbrefNS() );
+            argv[1] = newId( f.dbrefOID() );
+            return dbPointer->NewInstance(2, argv);
+        }
+                       
         default:
             cout << "can't handle type: ";
 			cout  << f.type() << " ";
@@ -257,7 +375,10 @@ namespace mongo {
         }
     
         if ( value->IsNumber() ){
-            b.append( sname.c_str() , value->ToNumber()->Value() );
+            if ( value->IsInt32() )
+                b.append( sname.c_str(), int( value->ToInt32()->Value() ) );
+            else
+                b.append( sname.c_str() , value->ToNumber()->Value() );
             return;
         }
     
@@ -271,8 +392,43 @@ namespace mongo {
             b.appendDate( sname.c_str() , Date_t(v8::Date::Cast( *value )->NumberValue()) );
             return;
         }
-    
+
+        if ( value->IsExternal() )
+            return;
+        
         if ( value->IsObject() ){
+            // The user could potentially modify the fields of these special objects,
+            // wreaking havoc when we attempt to reinterpret them.  Not doing any validation
+            // for now...
+            Local< v8::Object > obj = value->ToObject();
+            if ( obj->InternalFieldCount() && obj->GetInternalField( 0 )->IsNumber() ) {
+                switch( obj->GetInternalField( 0 )->ToInt32()->Value() ) { // NOTE Uint32's Value() gave me a linking error, so going with this instead
+                    case Timestamp:
+                        b.appendTimestamp( sname.c_str(),
+                                          Date_t( v8::Date::Cast( *obj->Get( v8::String::New( "time" ) ) )->NumberValue() ),
+                                          obj->Get( v8::String::New( "i" ) )->ToInt32()->Value() );
+                        return;
+                    case MinKey:
+                        b.appendMinKey( sname.c_str() );
+                        return;
+                    case MaxKey:
+                        b.appendMaxKey( sname.c_str() );
+                        return;
+                    case BinData: {
+                        int len = obj->Get( v8::String::New( "length" ) )->ToInt32()->Value();
+                        v8::String::Utf8Value data( obj->Get( v8::String::New( "data" ) ) );
+                        const char *dataArray = *data;
+                        assert( data.length() == len );
+                        b.appendBinData( sname.c_str(),
+                                        len,
+                                        mongo::BinDataType( obj->Get( v8::String::New( "subtype" ) )->ToInt32()->Value() ),
+                                        dataArray );
+                        return;
+                    }
+                    default:
+                        assert( "invalid internal field" == 0 );
+                }
+            }
             string s = toSTLString( value );
             if ( s.size() && s[0] == '/' ){
                 s = s.substr( 1 );
@@ -286,7 +442,15 @@ namespace mongo {
                 oid.init( toSTLString( value ) );
                 b.appendOID( sname.c_str() , &oid );
             }
-            else {
+            else if ( !value->ToObject()->GetHiddenValue( v8::String::New( "__DBPointer" ) ).IsEmpty() ) {
+                // TODO might be nice to potentially speed this up with an indexed internal
+                // field, but I don't yet know how to use an ObjectTemplate with a
+                // constructor.
+                OID oid;
+                oid.init( toSTLString( value->ToObject()->Get( v8::String::New( "id" ) ) ) );
+                string ns = toSTLString( value->ToObject()->Get( v8::String::New( "ns" ) ) );
+                b.appendDBRef( sname.c_str(), ns.c_str(), oid );                
+            } else {
                 BSONObj sub = v8ToMongo( value->ToObject() );
                 b.append( sname.c_str() , sub );
             }

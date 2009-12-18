@@ -198,7 +198,7 @@ namespace mongo {
         }
         static Mod::Op opFromStr( const char *fn ) {
             const char *valid[] = { "$inc", "$set", "$push", "$pushAll", "$pull", "$pullAll" , "$pop", "$unset" };
-            for( int i = 0; i < (sizeof(valid) / sizeof(*valid)); ++i )
+            for( unsigned i = 0; i < (sizeof(valid) / sizeof(*valid)); ++i )
                 if ( strcmp( fn, valid[ i ] ) == 0 )
                     return Mod::Op( i );
             uassert( "Invalid modifier specified " + string( fn ), false );
@@ -219,6 +219,8 @@ namespace mongo {
         void createNewFromMods( const string& root , BSONObjBuilder& b , const BSONObj &obj );
 
         BSONObj createNewFromMods( const BSONObj &obj );
+
+        BSONObj createNewFromQuery( const BSONObj& query );
 
         /**
          *

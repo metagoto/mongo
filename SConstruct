@@ -116,6 +116,13 @@ AddOption('--usejvm',
           action="store",
           help="use java for javascript" )
 
+AddOption('--asio',
+          dest='asio',
+          type="string",
+          nargs=0,
+          action="store",
+          help="Use Asynchronous IO (NOT READY YET)" )
+
 AddOption( "--d",
            dest="debugBuild",
            type="string",
@@ -242,6 +249,8 @@ usesm = not GetOption( "usesm" ) is None
 usev8 = not GetOption( "usev8" ) is None
 usejvm = not GetOption( "usejvm" ) is None
 
+asio = not GetOption( "asio" ) is None
+
 env = Environment( MSVS_ARCH=msarch , tools = ["default", "gch"], toolpath = '.' )
 if GetOption( "cxx" ) is not None:
     env["CC"] = GetOption( "cxx" )
@@ -299,7 +308,7 @@ commonFiles = Split( "stdafx.cpp buildinfo.cpp db/jsobj.cpp db/json.cpp db/comma
 commonFiles += [ "util/background.cpp" , "util/mmap.cpp" ,  "util/sock.cpp" ,  "util/util.cpp" , "util/message.cpp" , 
                  "util/assert_util.cpp" , "util/httpclient.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/debug_util.cpp"  ]
 commonFiles += Glob( "util/*.c" )
-commonFiles += Split( "client/connpool.cpp client/dbclient.cpp client/model.cpp client/parallel.cpp" )
+commonFiles += Split( "client/connpool.cpp client/dbclient.cpp client/model.cpp client/parallel.cpp client/quorum.cpp" )
 commonFiles += [ "scripting/engine.cpp" ]
 
 #mmap stuff
@@ -336,7 +345,6 @@ else:
 
 coreShardFiles = []
 shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" ,  "s/cursors.cpp" ,  "s/server.cpp" , "s/chunk.cpp" , "s/shardkey.cpp" , "s/config.cpp" , "s/s_only.cpp"  ]
-shardServerFiles += [ "client/quorum.cpp" ]
 serverOnlyFiles += coreShardFiles + [ "s/d_logic.cpp" ]
 
 serverOnlyFiles += [ "db/module.cpp" ] + Glob( "db/modules/*.cpp" )
@@ -763,21 +771,20 @@ def doConfigure( myenv , needJava=True , needPcre=True , shell=False ):
         else:
             Exit(1)
 
-    if conf.CheckCXXHeader( "boost/asio.hpp" ):
-        # TODO: turn this back on when ASIO working
-        myenv.Append( CPPDEFINES=[ "USE_ASIO_OFF" ] )
+    if asio and conf.CheckCXXHeader( "boost/asio.hpp" ):
+        myenv.Append( CPPDEFINES=[ "USE_ASIO" ] )
     else:
         print( "WARNING: old version of boost - you should consider upgrading" )
+
+    # this will add it iff it exists and works
+    myCheckLib( [ "boost_system" + boostCompiler + "-mt" + boostVersion ,
+                  "boost_system" + boostCompiler + boostVersion ] )
 
     for b in boostLibs:
         l = "boost_" + b
         myCheckLib( [ l + boostCompiler + "-mt" + boostVersion ,
                       l + boostCompiler + boostVersion ] ,
                     release or not shell)
-
-    # this will add it iff it exists and works
-    myCheckLib( [ "boost_system" + boostCompiler + "-mt" + boostVersion ,
-                  "boost_system" + boostCompiler + boostVersion ] )
 
     if not conf.CheckCXXHeader( "execinfo.h" ):
         myenv.Append( CPPDEFINES=[ "NOEXECINFO" ] )

@@ -317,7 +317,7 @@ namespace mongo {
     }
 
     void ModSet::createNewFromMods( const string& root , BSONObjBuilder& b , const BSONObj &obj ){
-        BSONObjIterator es( obj );
+        BSONObjIteratorSorted es( obj );
         BSONElement e = es.next();
 
         ModHolder::iterator m = _mods.lower_bound( root );
@@ -379,6 +379,36 @@ namespace mongo {
         BSONObjBuilder b( (int)(obj.objsize() * 1.1) );
         createNewFromMods( "" , b , obj );
         return b.obj();
+    }
+
+    BSONObj ModSet::createNewFromQuery( const BSONObj& query ){
+        BSONObj newObj;
+
+        {
+            BSONObjBuilder bb;
+            BSONObjIterator i( query );
+            while ( i.more() ){
+                BSONElement e = i.next();
+
+                if ( e.type() == Object && e.embeddedObject().firstElement().fieldName()[0] == '$' ){
+                    // this means this is a $gt type filter, so don't make part of the new object
+                    continue;
+                }
+
+                uassert( "upsert with foo.bar type queries not supported yet" , strchr( e.fieldName() , '.' ) == 0 );
+
+
+                bb.append( e );
+            }
+            newObj = bb.obj();
+        }
+        
+        if ( canApplyInPlaceAndVerify( newObj ) )
+            applyModsInPlace( newObj );
+        else
+            newObj = createNewFromMods( newObj );
+        
+        return newObj;
     }
     
     /* get special operations like $inc
@@ -442,7 +472,7 @@ namespace mongo {
             BSONElement e = i.next();
             if ( e.eoo() )
                 break;
-            massert( "Modifiers and non-modifiers cannot be mixed", e.fieldName()[ 0 ] != '$' );
+            uassert( "Modifiers and non-modifiers cannot be mixed", e.fieldName()[ 0 ] != '$' );
         }
     }
     
@@ -625,11 +655,7 @@ namespace mongo {
                 ModSet mods;
                 mods.getMods(updateobjOrig);
                  
-                BSONObj newObj = patternOrig.copy();
-                if ( mods.canApplyInPlaceAndVerify( newObj ) )
-                    mods.applyModsInPlace( newObj );
-                else
-                    newObj = mods.createNewFromMods( newObj );
+                BSONObj newObj = mods.createNewFromQuery( patternOrig );
 
                 if ( profile )
                     ss << " fastmodinsert ";
