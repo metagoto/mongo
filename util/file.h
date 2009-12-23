@@ -67,10 +67,10 @@ public:
         if( is_open() ) CloseHandle(fd);
         fd = INVALID_HANDLE_VALUE; 
     }
-    void open(const char *filename) {
+    void open(const char *filename, bool readOnly=false ) {
         std::wstring filenamew = toWideString(filename);
         fd = CreateFile(
-                 filenamew.c_str(), GENERIC_WRITE | GENERIC_READ, FILE_SHARE_READ,
+                 filenamew.c_str(), ( readOnly ? 0 : GENERIC_WRITE ) | GENERIC_READ, FILE_SHARE_READ,
                  NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if( !is_open() ) {
             out() << "CreateFile failed " << filename << endl;
@@ -118,7 +118,7 @@ class File : public FileInterface {
     void err(bool ok) {
         if( !ok && !_bad ) { 
             _bad = true;
-            log() << "File I/O error " << errno << '\n';
+            log() << "File I/O " << OUTPUT_ERRNO << '\n';
         }
     }
 public:
@@ -136,10 +136,10 @@ public:
 #define lseek64 lseek
 #endif
 
-    void open(const char *filename) {
-        fd = ::open(filename, O_CREAT | O_RDWR | O_NOATIME, S_IRUSR | S_IWUSR);
+    void open(const char *filename, bool readOnly=false ) {
+        fd = ::open(filename, O_CREAT | ( readOnly ? 0 : O_RDWR ) | O_NOATIME, S_IRUSR | S_IWUSR);
         if ( fd <= 0 ) {
-            out() << "couldn't open " << filename << ' ' << errno << endl;
+            out() << "couldn't open " << filename << ' ' << OUTPUT_ERRNO << endl;
             return;
         }
         _bad = false;

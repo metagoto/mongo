@@ -30,6 +30,7 @@
 namespace QueryTests {
 
     class Base {
+        dblock lk;
     public:
         Base() {
             dblock lk;
@@ -846,12 +847,27 @@ namespace QueryTests {
             BSONObj res;            
             for ( int i=0; i<1000; i++ ){
                 bool found = Helpers::findById( ns() , BSON( "_id" << i ) , res );
-                ASSERT_EQUALS( i % 2 , found );
+                ASSERT_EQUALS( i % 2 , int(found) );
             }
 
         }
     };
 
+    class ClientCursorTest : public CollectionBase{
+        ClientCursorTest() : CollectionBase( "clientcursortest" ){
+        }
+
+        void run(){
+            writelock lk("");
+            setClient( "unittests" );
+            
+            for ( int i=0; i<1000; i++ ){
+                insert( ns() , BSON( "_id" << i << "x" << i * 2 ) );
+            }
+
+            
+        }
+    };
 
     class All : public Suite {
     public:

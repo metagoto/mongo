@@ -272,6 +272,16 @@ Array.stdDev = function( arr ){
     return Math.sqrt( sum / arr.length );
 }
 
+Object.keySet = function( o ) {
+    var ret = new Array();
+    for( i in o ) {
+        if ( !( i in o.__proto__ && o[ i ] === o.__proto__[ i ] ) ) {
+            ret.push( i );
+        }
+    }
+    return ret;
+}
+
 if ( ! ObjectId.prototype )
     ObjectId.prototype = {}
 
@@ -340,6 +350,22 @@ if ( typeof( BinData ) != "undefined" ){
 }
 else {
     print( "warning: no BinData" );
+}
+
+if ( typeof _threadInject != "undefined" ){
+    print( "fork() available!" );
+    
+    Thread = function(){
+        this.init.apply( this, arguments );
+    }
+    
+    _threadInject( Thread.prototype );
+    
+    fork = function() {
+        var t = new Thread( function() {} );
+        Thread.apply( t, arguments );
+        return t;
+    }    
 }
 
 tojson = function( x, indent , nolint ){

@@ -103,6 +103,8 @@ namespace mongo {
             return _numScopes;
         }
         
+        static void validateObjectIdString( const string &str );
+        
     protected:
 
         virtual ScriptingFunction _createFunction( const char * code ) = 0;
@@ -130,6 +132,10 @@ namespace mongo {
 
         auto_ptr<Scope> getPooledScope( const string& pool );
         void threadDone();
+        
+        struct Unlocker { virtual ~Unlocker() {} };
+        
+        virtual auto_ptr<Unlocker> newThreadUnlocker() { return auto_ptr< Unlocker >( new Unlocker ); }
     };
 
     extern ScriptEngine * globalScriptEngine;

@@ -24,6 +24,7 @@
 #include "db.h"
 #include "client.h"
 #include "curop.h"
+#include "json.h"
  
 namespace mongo {
 
@@ -87,4 +88,6 @@ namespace mongo {
         return didAnything;
     }
 
+    BSONObj CurOp::_tooBig = fromjson("{\"$msg\":\"query not recording (too large)\"}");
+    WrappingInt CurOp::_nextOpNum;
 }

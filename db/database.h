@@ -135,7 +135,7 @@ namespace mongo {
             return ret;
         }
         
-        // ok to call multiple times
+        // safe to call this multiple times - the implementation will only preallocate one file
         void preallocateAFile() {
             int n = (int) files.size();
             getFile( n, 0, true );            
@@ -151,6 +151,12 @@ namespace mongo {
                     break;
             }
             return f;
+        }
+
+        Extent* allocExtent( const char *ns, int size, bool capped ) { 
+            Extent *e = DataFileMgr::allocFromFreeList( ns, size, capped );
+            if( e ) return e;
+            return suitableFile( size )->createExtent( ns, size, capped );
         }
 
         MongoDataFile* newestFile() {

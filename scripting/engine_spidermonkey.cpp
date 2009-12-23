@@ -716,17 +716,6 @@ namespace mongo {
         JSCLASS_NO_OPTIONAL_MEMBERS
     };
 
-    JSBool bson_get_size(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
-        BSONHolder * o = GETHOLDER( cx , obj );
-        double size = 0;
-        if ( o ){
-            size = o->_obj.objsize();
-        }
-        Convertor c(cx);
-        *rval = c.toval( size );
-        return JS_TRUE;
-    }
-    
     JSBool bson_cons( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
         cerr << "bson_cons : shouldn't be here!" << endl;
         JS_ReportError( cx , "can't construct bson object" );
@@ -734,7 +723,6 @@ namespace mongo {
     }
 
     JSFunctionSpec bson_functions[] = {
-        { "bsonsize" , bson_get_size , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } , 
         { 0 }
     };
     
@@ -842,12 +830,35 @@ namespace mongo {
         { "nativeHelper" , &native_helper , 1 , 0 , 0 } ,
         { "load" , &native_load , 1 , 0 , 0 } ,
         { "gc" , &native_gc , 1 , 0 , 0 } ,
-
         { 0 , 0 , 0 , 0 , 0 }
     };
 
     // ----END global helpers ----
 
+    // Object helpers
+    
+    JSBool bson_get_size(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
+        if ( argc != 1 || !JSVAL_IS_OBJECT( argv[ 0 ] ) ) {
+            JS_ReportError( cx , "bsonsize requires one valid object" );
+            return JS_FALSE;
+        }
+        
+        BSONHolder * o = GETHOLDER( cx , JSVAL_TO_OBJECT( argv[ 0 ] ) );
+        double size = 0;
+        if ( o ){
+            size = o->_obj.objsize();
+        }
+        Convertor c(cx);
+        *rval = c.toval( size );
+        return JS_TRUE;
+    }
+    
+    JSFunctionSpec objectHelpers[] = {
+    { "bsonsize" , &bson_get_size , 1 , 0 , 0 } ,
+    { 0 , 0 , 0 , 0 , 0 }
+    };
+    
+    // end Object helpers
 
     JSBool resolveBSONField( JSContext *cx, JSObject *obj, jsval id, uintN flags, JSObject **objp ){
         assert( JS_EnterLocalRootScope( cx ) );
@@ -947,29 +958,6 @@ namespace mongo {
     }
 
 
-    // ------ special helpers -------
-
-    JSBool object_keyset(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
-
-        JSIdArray * properties = JS_Enumerate( cx , obj );
-        assert( properties );
-
-        JSObject * array = JS_NewArrayObject( cx , properties->length , 0 );
-        assert( array );
-
-        for ( jsint i=0; i<properties->length; i++ ){
-            jsid id = properties->vector[i];
-            jsval idval;
-            assert( JS_IdToValue( cx , id , &idval ) );
-            assert( JS_SetElement( cx , array , i ,  &idval ) );
-        }
-
-        JS_DestroyIdArray( cx , properties );
-
-        *rval = OBJECT_TO_JSVAL( array );
-        return JS_TRUE;
-    }
-
     // ------ scope ------
 
 
@@ -1001,11 +989,8 @@ namespace mongo {
             JS_SetOptions( _context , JS_GetOptions( _context ) | JSOPTION_VAROBJFIX );
 
             JS_DefineFunctions( _context , _global , globalHelpers );
-
-            // install my special helpers
-
-            assert( JS_DefineFunction( _context , _convertor->getGlobalPrototype( "Object" ) ,
-                                       "keySet" , object_keyset , 0 , JSPROP_READONLY ) );
+            
+            JS_DefineFunctions( _context , _convertor->getGlobalObject( "Object" ), objectHelpers );
 
             //JS_SetGCCallback( _context , no_gc ); // this is useful for seeing if something is a gc problem
 
@@ -1297,12 +1282,11 @@ namespace mongo {
             assert( JS_EnterLocalRootScope( _context ) );
                 
             int nargs = args.nFields();
-            auto_ptr<jsval> smargsPtr( new jsval[nargs] );
-            jsval* smargs = smargsPtr.get();
+            scoped_array<jsval> smargsPtr( new jsval[nargs] );
             if ( nargs ){
                 BSONObjIterator it( args );
                 for ( int i=0; i<nargs; i++ ){
-                    smargs[i] = _convertor->toval( it.next() );
+                    smargsPtr[i] = _convertor->toval( it.next() );
                 }
             }
 
@@ -1317,7 +1301,7 @@ namespace mongo {
 
             installCheckTimeout( timeoutMs );
             jsval rval;
-            JSBool ret = JS_CallFunction( _context , _this ? _this : _global , func , nargs , smargs , &rval );
+            JSBool ret = JS_CallFunction( _context , _this ? _this : _global , func , nargs , smargsPtr.get() , &rval );
             uninstallCheckTimeout( timeoutMs );
 
             if ( !ret ) {

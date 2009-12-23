@@ -59,7 +59,7 @@ namespace mongo {
         }
         virtual void init() {
             c_ = qp().newCursor();
-            matcher_.reset( new KeyValJSMatcher( qp().query(), qp().indexKey() ) );
+            matcher_.reset( new CoveredIndexMatcher( qp().query(), qp().indexKey() ) );
         }
         virtual void next() {
             if ( !c_->ok() ) {
@@ -97,7 +97,7 @@ namespace mongo {
         int &bestCount_;
         long long nScanned_;
         auto_ptr< Cursor > c_;
-        auto_ptr< KeyValJSMatcher > matcher_;
+        auto_ptr< CoveredIndexMatcher > matcher_;
     };
     
     /* ns:      namespace, e.g. <database>.<collection>
@@ -137,7 +137,7 @@ namespace mongo {
         if( !creal->ok() )
             return nDeleted;
 
-        KeyValJSMatcher matcher(pattern, creal->indexKeyPattern());
+        CoveredIndexMatcher matcher(pattern, creal->indexKeyPattern());
 
         auto_ptr<ClientCursor> cc;
         cc.reset( new ClientCursor() );
@@ -150,18 +150,15 @@ namespace mongo {
         
         unsigned long long nScanned = 0;
         do {
-            
-            if ( ++nScanned % 128 == 0 ){
-                cc->updateLocation();
-                cc->setDoingDeletes( false );
-                {
-                    dbtempreleasecond unlock;
-                }
-                if ( ClientCursor::find( id , false ) == 0 ){
-                    cc.reset( 0 );
+            if ( ++nScanned % 128 == 0 && !matcher.docMatcher().atomic() ) {
+                if ( ! cc->yield() ){
+                    cc.release(); // has already been deleted elsewhere
                     break;
                 }
             }
+            
+            // this way we can avoid calling updateLocation() every time (expensive)
+            // as well as some other nuances handled
             cc->setDoingDeletes( true );
             
             DiskLoc rloc = cc->c->currLoc();
@@ -201,8 +198,8 @@ namespace mongo {
             
         } while ( cc->c->ok() );
 
-        if ( ClientCursor::find( id , false ) == 0 ){
-            cc.reset( 0 );
+        if ( cc.get() && ClientCursor::find( id , false ) == 0 ){
+            cc.release();
         }
 
         return nDeleted;
@@ -368,7 +365,7 @@ namespace mongo {
         virtual void init() {
             query_ = spec_.getObjectField( "query" );
             c_ = qp().newCursor();
-            matcher_.reset( new KeyValJSMatcher( query_, c_->indexKeyPattern() ) );
+            matcher_.reset( new CoveredIndexMatcher( query_, c_->indexKeyPattern() ) );
             if ( qp().exactKeyMatch() && ! matcher_->needRecord() ) {
                 query_ = qp().simplifiedQuery( qp().indexKey() );
                 bc_ = dynamic_cast< BtreeCursor* >( c_.get() );
@@ -437,7 +434,7 @@ namespace mongo {
         auto_ptr< Cursor > c_;
         BSONObj query_;
         BtreeCursor *bc_;
-        auto_ptr< KeyValJSMatcher > matcher_;
+        auto_ptr< CoveredIndexMatcher > matcher_;
         BSONObj firstMatch_;
     };
     
@@ -478,10 +475,11 @@ namespace mongo {
         }
         return res->count();
     }
-        
-    class DoQueryOp : public QueryOp {
+
+    // Implements database 'query' requests using the query optimizer's QueryOp interface
+    class UserQueryOp : public QueryOp {
     public:
-        DoQueryOp( int ntoskip, int ntoreturn, const BSONObj &order, bool wantMore,
+        UserQueryOp( int ntoskip, int ntoreturn, const BSONObj &order, bool wantMore,
                    bool explain, FieldMatcher *filter, int queryOptions ) :
             b_( 32768 ),
             ntoskip_( ntoskip ),
@@ -505,6 +503,14 @@ namespace mongo {
         virtual void init() {
             b_.skip( sizeof( QueryResult ) );
             
+            // findingStart mode is used to find the first operation of interest when
+            // we are scanning through a repl log.  For efficiency in the common case,
+            // where the first operation of interest is closer to the tail than the head,
+            // we start from the tail of the log and work backwards until we find the
+            // first operation of interest.  Then we scan forward from that first operation,
+            // actually returning results to the client.  During the findingStart phase,
+            // we release the db mutex occasionally to avoid blocking the db process for
+            // an extended period of time.
             if ( findingStart_ ) {
                 // Use a ClientCursor here so we can release db mutex while scanning
                 // oplog (can take quite a while with large oplogs).
@@ -515,7 +521,7 @@ namespace mongo {
                 c_ = qp().newCursor();
             }
             
-            matcher_.reset(new KeyValJSMatcher(qp().query(), qp().indexKey()));
+            matcher_.reset(new CoveredIndexMatcher(qp().query(), qp().indexKey()));
             
             if ( qp().scanAndOrderRequired() ) {
                 ordering_ = true;
@@ -633,12 +639,12 @@ namespace mongo {
         }
         virtual bool mayRecordPlan() const { return ntoreturn_ != 1; }
         virtual QueryOp *clone() const {
-            return new DoQueryOp( ntoskip_, ntoreturn_, order_, wantMore_, explain_, filter_, queryOptions_ );
+            return new UserQueryOp( ntoskip_, ntoreturn_, order_, wantMore_, explain_, filter_, queryOptions_ );
         }
         BufBuilder &builder() { return b_; }
         bool scanAndOrderRequired() const { return ordering_; }
         auto_ptr< Cursor > cursor() { return c_; }
-        auto_ptr< KeyValJSMatcher > matcher() { return matcher_; }
+        auto_ptr< CoveredIndexMatcher > matcher() { return matcher_; }
         int n() const { return n_; }
         long long nscanned() const { return nscanned_; }
         bool saveClientCursor() const { return saveClientCursor_; }
@@ -655,7 +661,7 @@ namespace mongo {
         auto_ptr< Cursor > c_;
         long long nscanned_;
         int queryOptions_;
-        auto_ptr< KeyValJSMatcher > matcher_;
+        auto_ptr< CoveredIndexMatcher > matcher_;
         int n_;
         int soSize_;
         bool saveClientCursor_;
@@ -664,9 +670,7 @@ namespace mongo {
         ClientCursor * findingStartCursor_;
     };
     
-    auto_ptr< QueryResult > runQuery(Message& m, stringstream& ss ) {
-        DbMessage d( m );
-        QueryMessage q( d );
+    auto_ptr< QueryResult > runQuery(Message& m, QueryMessage& q, stringstream& ss ) {
         const char *ns = q.ns;
         int ntoskip = q.ntoskip;
         int _ntoreturn = q.ntoreturn;
@@ -676,7 +680,8 @@ namespace mongo {
         BSONObj snapshotHint;
         
         Timer t;
-        log(2) << "runQuery: " << ns << jsobj << endl;
+        if( logLevel >= 2 )
+            log() << "runQuery: " << ns << jsobj << endl;
         
         long long nscanned = 0;
         bool wantMore = true;
@@ -690,10 +695,7 @@ namespace mongo {
             wantMore = false;
         }
         ss << "query " << ns << " ntoreturn:" << ntoreturn;
-        {
-            string s = jsobj.toString();
-            strncpy(cc().curop()->query, s.c_str(), sizeof(cc().curop()->query)-2);
-        }
+        cc().curop()->setQuery(jsobj);
         
         BufBuilder bb;
         BSONObjBuilder cmdResBuf;
@@ -828,9 +830,9 @@ namespace mongo {
                         oldPlan = qps.explain();
                 }
                 QueryPlanSet qps( ns, query, order, &hint, !explain, min, max );
-                DoQueryOp original( ntoskip, ntoreturn, order, wantMore, explain, filter.get(), queryOptions );
-                shared_ptr< DoQueryOp > o = qps.runOp( original );
-                DoQueryOp &dqo = *o;
+                UserQueryOp original( ntoskip, ntoreturn, order, wantMore, explain, filter.get(), queryOptions );
+                shared_ptr< UserQueryOp > o = qps.runOp( original );
+                UserQueryOp &dqo = *o;
                 massert( dqo.exceptionMessage(), dqo.complete() );
                 n = dqo.n();
                 nscanned = dqo.nscanned();

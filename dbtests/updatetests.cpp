@@ -297,7 +297,7 @@ namespace UpdateTests {
         void run() {
             client().insert( ns(), fromjson( "{'_id':0,z:[4,'b']}" ) );
             client().update( ns(), Query(), BSON( "$set" << BSON( "z.0" << "a" ) ) );
-            ASSERT( client().findOne( ns(), Query() ).woCompare( fromjson( "{'_id':0,z:[4,'b']}" ) ) == 0 );
+            ASSERT_EQUALS( client().findOne( ns(), Query() ) , fromjson( "{'_id':0,z:['a','b']}" ) );
         }
     };
 
@@ -601,6 +601,93 @@ namespace UpdateTests {
         };
 
     };
+
+    namespace basic {
+        class Base : public ClientBase {
+            virtual const char * ns() = 0;
+            virtual void dotest() = 0;
+            
+        protected:
+
+            void test( const char* initial , const char* mod , const char* after ){
+                test( fromjson( initial ) , fromjson( mod ) , fromjson( after ) );
+            }
+
+
+            void test( const BSONObj& initial , const BSONObj& mod , const BSONObj& after ){
+                client().dropCollection( ns() );
+                client().insert( ns() , initial );
+                client().update( ns() , BSONObj() , mod );
+                ASSERT_EQUALS( after , client().findOne( ns(), BSONObj() ));
+                client().dropCollection( ns() );
+            }
+
+        public:
+            
+            Base(){}
+            virtual ~Base(){
+            }
+
+            void run(){
+                client().dropCollection( ns() );
+                
+                dotest();
+
+                client().dropCollection( ns() );
+            }
+        };
+
+        class SingleTest : public Base {
+            virtual BSONObj initial() = 0;
+            virtual BSONObj mod() = 0;
+            virtual BSONObj after() = 0;
+
+            void dotest(){
+                test( initial() , mod() , after() );
+            }
+            
+        };
+        
+        class inc1 : public SingleTest {
+            virtual BSONObj initial(){
+                return BSON( "_id" << 1 << "x" << 1 );
+            }
+            virtual BSONObj mod(){
+                return BSON( "$inc" << BSON( "x" << 2 ) );
+            }
+            virtual BSONObj after(){
+                return BSON( "_id" << 1 << "x" << 3 );
+            }
+            virtual const char * ns(){
+                return "unittests.inc1";
+            }
+
+        };
+            
+        class bit1 : public Base {
+            const char * ns(){
+                return "unittests.bit1";
+            }
+            void dotest(){
+                test( BSON( "_id" << 1 << "x" << 3 ) , BSON( "$bit" << BSON( "x" << BSON( "and" << 2 ) ) ) , BSON( "_id" << 1 << "x" << ( 3 & 2 ) ) );
+                test( BSON( "_id" << 1 << "x" << 1 ) , BSON( "$bit" << BSON( "x" << BSON( "or" << 4 ) ) ) , BSON( "_id" << 1 << "x" << ( 1 | 4 ) ) );
+                test( BSON( "_id" << 1 << "x" << 3 ) , BSON( "$bit" << BSON( "x" << BSON( "and" << 2 << "or" << 8 ) ) ) , BSON( "_id" << 1 << "x" << ( ( 3 & 2 ) | 8 ) ) );
+                test( BSON( "_id" << 1 << "x" << 3 ) , BSON( "$bit" << BSON( "x" << BSON( "or" << 2 << "and" << 8 ) ) ) , BSON( "_id" << 1 << "x" << ( ( 3 | 2 ) & 8 ) ) );
+
+            }
+        };
+        
+        class unset : public Base {
+            const char * ns(){
+                return "unittests.unset";
+            }
+            void dotest(){
+                test( "{_id:1,x:1}" , "{$unset:{x:1}}" , "{_id:1}" );
+            }
+        };
+
+
+    };
     
     class All : public Suite {
     public:
@@ -655,12 +742,16 @@ namespace UpdateTests {
             add< PreserveIdWithIndex >();
             add< CheckNoMods >();
             add< UpdateMissingToNull >();
-
+            
             add< ModSetTests::internal1 >();
             add< ModSetTests::inc1 >();
             add< ModSetTests::inc2 >();
             add< ModSetTests::set1 >();
             add< ModSetTests::push1 >();
+            
+            add< basic::inc1 >();
+            add< basic::bit1 >();
+            add< basic::unset >();
         }
     } myall;
 

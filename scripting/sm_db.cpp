@@ -104,8 +104,8 @@ namespace mongo {
     
 
     JSFunctionSpec internal_cursor_functions[] = {
-        { "hasNext" , internal_cursor_hasNext , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } ,
-        { "next" , internal_cursor_next , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } ,
+        { "hasNext" , internal_cursor_hasNext , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "next" , internal_cursor_next , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
 
@@ -338,10 +338,10 @@ namespace mongo {
     }
 
     JSFunctionSpec mongo_functions[] = {
-        { "find" , mongo_find , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } ,
-        { "update" , mongo_update , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } ,
-        { "insert" , mongo_insert , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } ,
-        { "remove" , mongo_remove , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } ,
+        { "find" , mongo_find , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "update" , mongo_update , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "insert" , mongo_insert , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
+        { "remove" , mongo_remove , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
 
@@ -487,19 +487,11 @@ namespace mongo {
             uassert( "object_id_constructor can't take more than 1 param" , argc == 1 );
             string s = c.toString( argv[0] );
 
-            if ( s.size() != 24 ){
-                JS_ReportError( cx , "invalid object id: length" );
-                return JS_FALSE;
-            }
-
-            for ( string::size_type i=0; i<s.size(); i++ ){
-                char c = s[i];
-                if ( ( c >= '0' && c <= '9' ) ||
-                     ( c >= 'a' && c <= 'f' ) ||
-                     ( c >= 'A' && c <= 'F' ) ){
-                    continue;
-                }
-                JS_ReportError( cx , "invalid object id: not hex" );
+            try {
+                Scope::validateObjectIdString( s );
+            } catch ( const MsgAssertionException &m ) {
+                static string error = m.toString();
+                JS_ReportError( cx, error.c_str() );
                 return JS_FALSE;
             }
             oid.init( s );
@@ -530,7 +522,7 @@ namespace mongo {
     }
 
     JSFunctionSpec object_id_functions[] = {
-        { "toString" , object_id_tostring , 0 , 0 , JSPROP_READONLY | JSPROP_PERMANENT } ,
+        { "toString" , object_id_tostring , 0 , JSPROP_READONLY | JSPROP_PERMANENT, 0 } ,
         { 0 }
     };
 

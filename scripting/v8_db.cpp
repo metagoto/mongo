@@ -18,6 +18,7 @@
 #include "v8_wrapper.h"
 #include "v8_utils.h"
 #include "v8_db.h"
+#include "engine.h"
 
 #include <iostream>
 
@@ -67,6 +68,9 @@ namespace mongo {
         global->Set( v8::String::New("DBRef") , FunctionTemplate::New( dbRefInit ) );
 
         global->Set( v8::String::New("DBPointer") , FunctionTemplate::New( dbPointerInit ) );
+
+        global->Set( v8::String::New("BinData") , FunctionTemplate::New( binDataInit ) );
+
     }
 
     void installDBTypes( Handle<v8::Object>& global ){
@@ -88,6 +92,18 @@ namespace mongo {
         global->Set( v8::String::New("DBRef") , FunctionTemplate::New( dbRefInit )->GetFunction() );
         
         global->Set( v8::String::New("DBPointer") , FunctionTemplate::New( dbPointerInit )->GetFunction() );
+
+        global->Set( v8::String::New("BinData") , FunctionTemplate::New( binDataInit )->GetFunction() );
+
+        BSONObjBuilder b;
+        b.appendMaxKey( "" );
+        b.appendMinKey( "" );
+        BSONObj o = b.obj();
+        BSONObjIterator i( o );
+        global->Set( v8::String::New("MaxKey"), mongoToV8Element( i.next() ) );
+        global->Set( v8::String::New("MinKey"), mongoToV8Element( i.next() ) );
+        
+        global->Get( v8::String::New( "Object" ) )->ToObject()->Set( v8::String::New("bsonsize") , FunctionTemplate::New( bsonsize )->GetFunction() );
     }
 
     void destroyConnection( Persistent<Value> object, void* parameter){
@@ -119,6 +135,7 @@ namespace mongo {
         // NOTE I don't believe the conn object will ever be freed.
         args.This()->Set( CONN_STRING , External::New( conn ) );
         args.This()->Set( v8::String::New( "slaveOk" ) , Boolean::New( false ) );
+        args.This()->Set( v8::String::New( "host" ) , v8::String::New( host ) );
     
         return v8::Undefined();
     }
@@ -136,6 +153,7 @@ namespace mongo {
         // NOTE I don't believe the conn object will ever be freed.
         args.This()->Set( CONN_STRING , External::New( conn ) );
         args.This()->Set( v8::String::New( "slaveOk" ) , Boolean::New( false ) );
+        args.This()->Set( v8::String::New( "host" ) , v8::String::New( "EMBEDDED" ) );
         
         return v8::Undefined();
     }
@@ -188,7 +206,10 @@ namespace mongo {
             auto_ptr<mongo::DBClientCursor> cursor;
             int nToReturn = (int)(args[3]->ToNumber()->Value());
             int nToSkip = (int)(args[4]->ToNumber()->Value());
-            cursor = conn->query( ns, q ,  nToReturn , nToSkip , haveFields ? &fields : 0, slaveOk ? Option_SlaveOk : 0 );
+            {
+                v8::Unlocker u;
+                cursor = conn->query( ns, q ,  nToReturn , nToSkip , haveFields ? &fields : 0, slaveOk ? Option_SlaveOk : 0 );
+            }
             v8::Function * cons = (v8::Function*)( *( mongo->Get( v8::String::New( "internalCursor" ) ) ) );
             assert( cons );
             Local<v8::Object> c = cons->NewInstance();
@@ -220,6 +241,7 @@ namespace mongo {
 
         DDD( "want to save : " << o.jsonString() );
         try {
+            v8::Unlocker u;
             conn->insert( ns , o );
         }
         catch ( ... ){
@@ -241,6 +263,7 @@ namespace mongo {
     
         DDD( "want to remove : " << o.jsonString() );
         try {
+            v8::Unlocker u;
             conn->remove( ns , o );
         }
         catch ( ... ){
@@ -262,9 +285,13 @@ namespace mongo {
         v8::Handle<v8::Object> o = args[2]->ToObject();
     
         bool upsert = args.Length() > 3 && args[3]->IsBoolean() && args[3]->ToBoolean()->Value();
-
+        bool multi = args.Length() > 4 && args[4]->IsBoolean() && args[4]->ToBoolean()->Value();        
+        
         try {
-            conn->update( ns , v8ToMongo( q ) , v8ToMongo( o ) , upsert );
+            BSONObj q1 = v8ToMongo( q );
+            BSONObj o1 = v8ToMongo( o );
+            v8::Unlocker u;
+            conn->update( ns , q1 , o1 , upsert, multi );
         }
         catch ( ... ){
             return v8::ThrowException( v8::String::New( "socket error on remove" ) );
@@ -292,7 +319,11 @@ namespace mongo {
         mongo::DBClientCursor * cursor = getCursor( args );
         if ( ! cursor )
             return v8::Undefined();
-        BSONObj o = cursor->next();
+        BSONObj o;
+        {
+            v8::Unlocker u;
+            o = cursor->next();
+        }
         return mongoToV8( o );
     }
 
@@ -300,7 +331,12 @@ namespace mongo {
         mongo::DBClientCursor * cursor = getCursor( args );
         if ( ! cursor )
             return Boolean::New( false );
-        return Boolean::New( cursor->more() );
+        bool ret;
+        {
+            v8::Unlocker u;
+            ret = cursor->more();
+        }
+        return Boolean::New( ret );
     }
 
 
@@ -421,6 +457,12 @@ namespace mongo {
         }
         else {
             string s = toSTLString( args[0] );
+            try {
+                Scope::validateObjectIdString( s );
+            } catch ( const MsgAssertionException &m ) {
+                string error = m.toString();
+                return v8::ThrowException( v8::String::New( error.c_str() ) );
+            }            
             oid.init( s );
         } 
 
@@ -467,5 +509,34 @@ namespace mongo {
         
         return it;
     }
+
+    v8::Handle<v8::Value> binDataInit( const v8::Arguments& args ) {
+        
+        if (args.Length() != 3) {
+            return v8::ThrowException( v8::String::New( "BinData needs 3 arguments" ) );
+        }
+        
+        v8::Handle<v8::Object> it = args.This();
+        
+        if ( it->IsUndefined() || it == v8::Context::GetCurrent()->Global() ){
+            v8::Function* f = getNamedCons( "BinData" );
+            it = f->NewInstance();
+        }
+        
+        it->Set( v8::String::New( "len" ) , args[0] );
+        it->Set( v8::String::New( "type" ) , args[1] );
+        it->Set( v8::String::New( "data" ), args[2] );
+        it->SetHiddenValue( v8::String::New( "__BinData" ), v8::Number::New( 1 ) );
+        
+        return it;
+    }
     
+    v8::Handle<v8::Value> bsonsize( const v8::Arguments& args ) {
+        
+        if (args.Length() != 1 || !args[ 0 ]->IsObject()) {
+            return v8::ThrowException( v8::String::New( "bonsisze needs 1 object" ) );
+        }
+
+        return v8::Number::New( v8ToMongo( args[ 0 ]->ToObject() ).objsize() );
+    }
 }

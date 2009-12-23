@@ -69,6 +69,7 @@ namespace mongo {
         _wrapper = getObjectWrapperTemplate()->GetFunction();
         
         installDBTypes( _global );
+        installFork( _global, _context );
     }
 
     V8Scope::~V8Scope(){
@@ -212,6 +213,7 @@ namespace mongo {
 
     ScriptingFunction V8Scope::_createFunction( const char * raw ){
         
+        for(; isspace( *raw ); ++raw ); // skip whitespace
         string code = raw;
         if ( code.find( "function" ) == string::npos ){
             if ( code.find( "\n" ) == string::npos && 
@@ -272,14 +274,17 @@ namespace mongo {
         
         TryCatch try_catch;        
         int nargs = argsObject.nFields();
-        auto_ptr< Handle<Value> > args;
+        scoped_array< Handle<Value> > args;
         if ( nargs ){
             args.reset( new Handle<Value>[nargs] );
             BSONObjIterator it( argsObject );
             for ( int i=0; i<nargs; i++ ){
                 BSONElement next = it.next();
-                args.get()[i] = mongoToV8Element( next );
+                args[i] = mongoToV8Element( next );
             }
+            setObject( "args", argsObject, true ); // for backwards compatibility
+        } else {
+            _global->Set( v8::String::New( "args" ), v8::Undefined() );
         }
         Local<Value> result = ((v8::Function*)(*funcValue))->Call( _this , nargs , args.get() );
                 
@@ -342,6 +347,10 @@ namespace mongo {
         
         return true;
     }
+    
+    void V8Scope::gc() {
+        while( V8::IdleNotification() );
+    }
 
     // ----- db access -----
 
@@ -361,6 +370,7 @@ namespace mongo {
         exec( (string)"db = _mongo.getDB(\"" + dbName + "\");" , "local connect 3" , false , true , true , 0 );
         _connectState = LOCAL;
         _localDBName = dbName;
+        loadStored();
     }
     
     void V8Scope::externalSetup(){

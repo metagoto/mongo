@@ -108,7 +108,7 @@ namespace mongo {
         }
         
         File f;
-        f.open( filename.c_str() );
+        f.open( filename.c_str() , true );
 
         fileofs L = f.len();
         assert( L <= 0x7ffffffe );
@@ -121,6 +121,20 @@ namespace mongo {
 
     void Scope::storedFuncMod(){
         _lastVersion++;
+    }
+    
+    void Scope::validateObjectIdString( const string &str ) {
+        massert ( "invalid object id: length", str.size() == 24 );
+
+        for ( string::size_type i=0; i<str.size(); i++ ){
+            char c = str[i];
+            if ( ( c >= '0' && c <= '9' ) ||
+                ( c >= 'a' && c <= 'f' ) ||
+                ( c >= 'A' && c <= 'F' ) ){
+                continue;
+            }
+            massert( "invalid object id: not hex", false );
+        }        
     }
 
     void Scope::loadStored( bool ignoreNotConnected ){

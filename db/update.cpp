@@ -172,7 +172,48 @@ namespace mongo {
             bb.done();
             break;
         }
+
+        case BIT: {
+            uassert( "$bit needs an array" , elt.type() == Object );
+            uassert( "$bit can only be applied to numbers" , in.isNumber() );
+            uassert( "$bit can't use a double" , in.type() != NumberDouble );
             
+            int x = in.numberInt();
+            long long y = in.numberLong();
+
+            BSONObjIterator it( elt.embeddedObject() );
+            while ( it.more() ){
+                BSONElement e = it.next();
+                uassert( "$bit field must be number" , e.isNumber() );
+                if ( strcmp( e.fieldName() , "and" ) == 0 ){
+                    switch( in.type() ){
+                    case NumberInt: x = x&e.numberInt(); break;
+                    case NumberLong: y = y&e.numberLong(); break;
+                    default: assert( 0 );
+                    }
+                }
+                else if ( strcmp( e.fieldName() , "or" ) == 0 ){
+                    switch( in.type() ){
+                    case NumberInt: x = x|e.numberInt(); break;
+                    case NumberLong: y = y|e.numberLong(); break;
+                    default: assert( 0 );
+                    }
+                }
+
+                else {
+                    throw UserException( (string)"unknown bit mod:" + e.fieldName() );
+                }
+            }
+            
+            switch( in.type() ){
+            case NumberInt: b.append( shortFieldName , x ); break;
+            case NumberLong: b.append( shortFieldName , y ); break;
+            default: assert( 0 );
+            }
+
+            break;
+        }
+
         default:
             stringstream ss;
             ss << "Mod::apply can't handle type: " << op;
@@ -332,8 +373,8 @@ namespace mongo {
             switch ( cmp ){
                 
             case LEFT_SUBFIELD: { // Mod is embeddeed under this element
-                uassert( "LEFT_SUBFIELD only supports Object" , e.type() == Object );
-                BSONObjBuilder bb ( b.subobjStart( e.fieldName() ) );
+                uassert( "LEFT_SUBFIELD only supports Object" , e.type() == Object || e.type() == Array );
+                BSONObjBuilder bb ( e.type() == Object ? b.subobjStart( e.fieldName() ) : b.subarrayStart( e.fieldName() ) );
                 stringstream nr; nr << root << e.fieldName() << ".";
                 createNewFromMods( nr.str() , bb , e.embeddedObject() );
                 bb.done();
@@ -432,7 +473,7 @@ namespace mongo {
             if ( op == Mod::INC )
                 strcpy((char *) fn, "$set"); // rewrite for op log
             while ( jt.more() ) {
-                BSONElement f = jt.next();
+                BSONElement f = jt.next(); // x:44
 
                 const char * fieldName = f.fieldName();
 
@@ -485,7 +526,7 @@ namespace mongo {
             if ( !c_->ok() )
                 setComplete();
             else
-                matcher_.reset( new KeyValJSMatcher( pattern, qp().indexKey() ) );
+                matcher_.reset( new CoveredIndexMatcher( pattern, qp().indexKey() ) );
         }
         virtual void next() {
             if ( !c_->ok() ) {
@@ -511,7 +552,7 @@ namespace mongo {
     private:
         shared_ptr< Cursor > c_;
         long long nscanned_;
-        auto_ptr< KeyValJSMatcher > matcher_;
+        auto_ptr< CoveredIndexMatcher > matcher_;
     };
 
     
@@ -614,13 +655,12 @@ namespace mongo {
                 }
 
                 if ( logop ) {
-                    if ( mods.size() ) {
-                        if ( mods.haveArrayDepMod() ) {
-                            BSONObjBuilder patternBuilder;
-                            patternBuilder.appendElements( pattern );
-                            mods.appendSizeSpecForArrayDepMods( patternBuilder );
-                            pattern = patternBuilder.obj();                        
-                        }
+                    assert( mods.size() );
+                    if ( mods.haveArrayDepMod() ) {
+                        BSONObjBuilder patternBuilder;
+                        patternBuilder.appendElements( pattern );
+                        mods.appendSizeSpecForArrayDepMods( patternBuilder );
+                        pattern = patternBuilder.obj();                        
                     }
                     logOp("u", ns, updateobj, &pattern );
                 }
