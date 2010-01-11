@@ -70,7 +70,7 @@ namespace mongo {
             int res = invoke( func , args , timeoutMs );
             if ( res == 0 )
                 return;
-            throw UserException( (string)"invoke failed: " + getError() );
+            throw UserException( 9004 , (string)"invoke failed: " + getError() );
         }
         virtual string getError() = 0;
         
@@ -78,7 +78,7 @@ namespace mongo {
         void invokeSafe( const char* code , const BSONObj& args, int timeoutMs = 0 ){
             if ( invoke( code , args , timeoutMs ) == 0 )
                 return;
-            throw UserException( (string)"invoke failed: " + getError() );
+            throw UserException( 9005 , (string)"invoke failed: " + getError() );
         }
 
         virtual bool exec( const string& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ) = 0;
@@ -122,7 +122,12 @@ namespace mongo {
         ScriptEngine();
         virtual ~ScriptEngine();
         
-        virtual Scope * createScope() = 0;
+        virtual Scope * newScope() {
+            Scope *s = createScope();
+            if ( s && _scopeInitCallback )
+                _scopeInitCallback( *s );
+            return s;
+        }
         
         virtual void runTest() = 0;
         
@@ -134,8 +139,15 @@ namespace mongo {
         void threadDone();
         
         struct Unlocker { virtual ~Unlocker() {} };
-        
         virtual auto_ptr<Unlocker> newThreadUnlocker() { return auto_ptr< Unlocker >( new Unlocker ); }
+        
+        void setScopeInitCallback( void ( *func )( Scope & ) ) { _scopeInitCallback = func; }
+        
+    protected:
+        virtual Scope * createScope() = 0;
+        
+    private:
+        void ( *_scopeInitCallback )( Scope & );
     };
 
     extern ScriptEngine * globalScriptEngine;

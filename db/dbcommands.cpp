@@ -39,6 +39,8 @@
 
 namespace mongo {
 
+    TicketHolder connTicketHolder( 20000 );
+
     extern int otherTraceLevel;
     void flushOpLog( stringstream &ss );
 
@@ -46,6 +48,7 @@ namespace mongo {
     public:
         virtual bool requiresAuth() { return true; }
         virtual bool adminOnly() { return true; }
+        virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) { return true; }
         virtual bool logTheOp() {
             return false;
         }
@@ -57,15 +60,6 @@ namespace mongo {
         }
         CmdShutdown() : Command("shutdown") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if( noauth ) {
-                // if running without auth, you must be on localhost
-                AuthenticationInfo *ai = currentClient.get()->ai;
-                if( !ai->isLocalHost ) {
-                    log() << "ignoring shutdown cmd from client, not from localhost and running without auth" << endl;
-                    errmsg = "unauthorized [2]";
-                    return false;
-                }
-            }
             log() << "terminating, shutdown command received" << endl;
             dbexit( EXIT_CLEAN );
             return true;
@@ -164,7 +158,7 @@ namespace mongo {
         }
         CmdForceError() : Command("forceerror") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            uassert("forced error", false);
+            uassert( 10038 , "forced error", false);
             return true;
         }
     } cmdForceError;
@@ -294,18 +288,13 @@ namespace mongo {
             if ( p == -1 )
                 ok = true;
             else if ( p >= 0 && p <= 2 ) {
-                if( p && nsdetails(cc().database()->profileName.c_str()) == 0 ) {
-                    BSONObjBuilder spec;
-                    spec.appendBool( "capped", true );
-                    spec.append( "size", 131072.0 );
-
-                    if ( !userCreateNS( cc().database()->profileName.c_str(), spec.done(), errmsg, true ) ) {
-                        return false;
-                    }
-                }
-                ok = true;
-                cc().database()->profile = p;
+                ok = cc().database()->setProfilingLevel( p , errmsg );
             }
+
+            BSONElement slow = cmdObj["slowms"];
+            if ( slow.isNumber() )
+                cmdLine.slowMS = slow.numberInt();
+            
             return ok;
         }
     } cmdProfile;
@@ -351,6 +340,14 @@ namespace mongo {
                 }
                     
             }
+            
+            {
+                BSONObjBuilder bb( result.subobjStart( "connections" ) );
+                bb.append( "current" , connTicketHolder.used() );
+                bb.append( "available" , connTicketHolder.available() );
+                bb.done();
+            }
+
 
             return true;
         }
@@ -527,7 +524,7 @@ namespace mongo {
                 errmsg = "ns not found";
                 return false;
             }
-            uassert( "can't drop collection with reserved $ character in name", strchr(nsToDrop.c_str(), '$') == 0 );
+            uassert( 10039 ,  "can't drop collection with reserved $ character in name", strchr(nsToDrop.c_str(), '$') == 0 );
             dropCollection( nsToDrop, errmsg, result );
             return true;
         }
@@ -723,10 +720,12 @@ namespace mongo {
 
                 seen.insert( i->c_str() );
             }
-
-            for ( map<string,Database*>::iterator i = databases.begin(); i != databases.end(); i++ ){
-                string name = i->first;
-                name = name.substr( 0 , name.find( ":" ) );
+            
+            // TODO: erh 1/1/2010 I think this is broken where path != dbpath ??
+            set<string> allShortNames;
+            dbHolder.getAllShortNames( allShortNames );
+            for ( set<string>::iterator i = allShortNames.begin(); i != allShortNames.end(); i++ ){
+                string name = *i;
 
                 if ( seen.count( name ) )
                     continue;
@@ -751,18 +750,7 @@ namespace mongo {
         virtual bool slaveOk() { return false; }
         CmdCloseAllDatabases() : Command( "closeAllDatabases" ) {}
         bool run(const char *ns, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
-            set< string > dbs;
-            for ( map<string,Database*>::iterator i = databases.begin(); i != databases.end(); i++ ) {
-                string name = i->first;
-                name = name.substr( 0 , name.find( ":" ) );
-                dbs.insert( name );
-            }
-            for( set< string >::iterator i = dbs.begin(); i != dbs.end(); ++i ) {
-                setClient( i->c_str() );
-                closeDatabase( i->c_str() );
-            }
-
-            return true;
+            return dbHolder.closeAll( dbpath , result );
         }
     } cmdCloseAllDatabases;
 
@@ -778,7 +766,7 @@ namespace mongo {
         bool run(const char *dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             static DBDirectClient db;
 
-            string ns = nsToClient( dbname );
+            string ns = nsToDatabase( dbname );
             ns += ".";
             {
                 string root = jsobj.getStringField( "root" );
@@ -806,7 +794,7 @@ namespace mongo {
                 int myn = c.getIntField( "n" );
                 if ( n != myn ){
                     log() << "should have chunk: " << n << " have:" << myn << endl;
-                    uassert( "chunks out of order" , n == myn );
+                    uassert( 10040 ,  "chunks out of order" , n == myn );
                 }
 
                 int len;
@@ -857,7 +845,7 @@ namespace mongo {
             BtreeCursor c( d, idxNo, *id, min, max, false, 1 );
             for( ; num; c.advance(), --num );
             int ms = t.millis();
-            if ( ms > 100 ) {
+            if ( ms > cmdLine.slowMS ) {
                 out() << "Finding median for index: " << keyPattern << " between " << min << " and " << max << " took " << ms << "ms." << endl;
             }
 
@@ -912,7 +900,7 @@ namespace mongo {
                 numObjects++;
             }
             int ms = t.millis();
-            if ( ms > 100 ) {
+            if ( ms > cmdLine.slowMS ) {
                 if ( min.isEmpty() ) {
                     out() << "Finding size for ns: " << ns << " took " << ms << "ms." << endl;
                 } else {
@@ -995,13 +983,13 @@ namespace mongo {
             }
 
             char realDbName[256];
-            nsToClient( dbname, realDbName );
+            nsToDatabase( dbname, realDbName );
 
             string fromNs = string( realDbName ) + "." + from;
             string toNs = string( realDbName ) + "." + to;
-            massert( "source collection " + fromNs + " does not exist", !setClient( fromNs.c_str() ) );
+            massert( 10300 ,  "source collection " + fromNs + " does not exist", !setClient( fromNs.c_str() ) );
             NamespaceDetails *nsd = nsdetails( fromNs.c_str() );
-            massert( "source collection " + fromNs + " does not exist", nsd );
+            massert( 10301 ,  "source collection " + fromNs + " does not exist", nsd );
             long long excessSize = nsd->datasize - size * 2;
             DiskLoc extent = nsd->firstExtent;
             for( ; excessSize > 0 && extent != nsd->lastExtent; extent = extent.ext()->xnext ) {
@@ -1057,7 +1045,7 @@ namespace mongo {
             }
 
             char realDbName[256];
-            nsToClient( dbname, realDbName );
+            nsToDatabase( dbname, realDbName );
 
             DBDirectClient client;
             client.dropCollection( string( realDbName ) + "." + from + ".$temp_convertToCapped" );
@@ -1099,9 +1087,9 @@ namespace mongo {
                 BSONObjBuilder b( obj.objsize() + 32 );
                 b.append( "0" , obj );
                 int res = s->invoke( func , b.obj() );
-                uassert( (string)"invoke failed in $keyf: " + s->getError() , res == 0 );
+                uassert( 10041 ,  (string)"invoke failed in $keyf: " + s->getError() , res == 0 );
                 int type = s->type("return");
-                uassert( "return of $key has to be an object" , type == Object );
+                uassert( 10042 ,  "return of $key has to be an object" , type == Object );
                 return s->getObject( "return" );
             }
             return obj.extractFields( keyPattern , true );
@@ -1158,13 +1146,13 @@ namespace mongo {
                     n = map.size();
                     s->setObject( "$key" , key , true );
 
-                    uassert( "group() can't handle more than 10000 unique keys" , n <= 10000 );
+                    uassert( 10043 ,  "group() can't handle more than 10000 unique keys" , n <= 10000 );
                 }
 
                 s->setObject( "obj" , obj , true );
                 s->setNumber( "n" , n - 1 );
                 if ( s->invoke( f , BSONObj() , 0 , true ) ){
-                    throw UserException( (string)"reduce invoke failed: " + s->getError() );
+                    throw UserException( 9010 , (string)"reduce invoke failed: " + s->getError() );
                 }
             }
 
@@ -1288,7 +1276,7 @@ namespace mongo {
                     continue;
                 if ( map.insert( value ).second ){
                     size += o.objsize() + 20;
-                    uassert( "distinct too big, 4mb cap" , size < 4 * 1024 * 1024 );
+                    uassert( 10044 ,  "distinct too big, 4mb cap" , size < 4 * 1024 * 1024 );
                 }
             }
 
@@ -1306,6 +1294,57 @@ namespace mongo {
 
     } distinctCmd;
 
+    /* Find and Modify an object returning either the old (default) or new value*/
+    class CmdFindAndModify : public Command {
+    public:
+        /* {findandmodify: "collection", query: {processed:false}, update: {$set: {processed:true}}, new: true}
+         * {findandmodify: "collection", query: {processed:false}, remove: true, sort: {priority:-1}}
+         * 
+         * either update or remove is required, all other fields have default values
+         * output is in the "value" field
+         */
+        CmdFindAndModify() : Command("findandmodify") { }
+        virtual bool logTheOp() {
+            return false; // the modification will be logged directly
+        }
+        virtual bool slaveOk() {
+            return false;
+        }
+        virtual bool run(const char *dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+            static DBDirectClient db;
+
+            string ns = nsToDatabase(dbname) + '.' + cmdObj.firstElement().valuestr();
+
+            Query q (cmdObj.getObjectField("query")); // defaults to {}
+            BSONElement sort = cmdObj["sort"];
+            if (!sort.eoo())
+                q.sort(sort.embeddedObjectUserCheck());
+
+            BSONObj out = db.findOne(ns, q);
+            if (out.firstElement().eoo()){
+                errmsg = "No matching object found";
+                return false;
+            }
+
+            q = QUERY( "_id" << out["_id"]);
+
+            if (cmdObj["remove"].trueValue()){
+                uassert(12515, "can't remove and update", cmdObj["update"].eoo());
+                db.remove(ns, q, 1);
+            } else {
+                BSONElement update = cmdObj["update"];
+                uassert(12516, "must specify remove or update", !update.eoo());
+                db.update(ns, q, update.embeddedObjectUserCheck());
+
+                if (cmdObj["new"].trueValue())
+                    out = db.findOne(ns, q);
+            }
+
+            result.append("value", out);
+
+            return true;
+        }
+    } cmdFindAndModify;
 
     extern map<string,Command*> *commands;
 
@@ -1336,7 +1375,7 @@ namespace mongo {
 
        returns true if ran a cmd
     */
-    bool _runCommands(const char *ns, BSONObj& _cmdobj, stringstream& ss, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions) {
+    bool _runCommands(const char *ns, BSONObj& _cmdobj, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions) {
         if( logLevel >= 1 ) 
             log() << "run command " << ns << ' ' << _cmdobj << endl;
 
@@ -1365,17 +1404,23 @@ namespace mongo {
             string errmsg;
             Command *c = i->second;
             AuthenticationInfo *ai = currentClient.get()->ai;
-            uassert("unauthorized", ai->isAuthorized(cc().database()->name.c_str()) || !c->requiresAuth());
+            uassert( 10045 , "unauthorized", ai->isAuthorized(cc().database()->name.c_str()) || !c->requiresAuth());
 
             bool admin = c->adminOnly();
-            if ( admin && !fromRepl && strncmp(ns, "admin", 5) != 0 ) {
+
+            if( admin && c->localHostOnlyIfNoAuth(jsobj) && noauth && !ai->isLocalHost ) { 
+                ok = false;
+                errmsg = "unauthorized: this command must run from localhost when running db without auth";
+                log() << "command denied: " << jsobj.toString() << endl;
+            }
+            else if ( admin && !fromRepl && strncmp(ns, "admin", 5) != 0 ) {
                 ok = false;
                 errmsg = "access denied";
-                cout << "command denied: " << jsobj.toString() << endl;
+                log() << "command denied: " << jsobj.toString() << endl;
             }
             else if ( isMaster() ||
                       c->slaveOk() ||
-                      ( c->slaveOverrideOk() && ( queryOptions & Option_SlaveOk ) ) ||
+                      ( c->slaveOverrideOk() && ( queryOptions & QueryOption_SlaveOk ) ) ||
                       fromRepl ){
                 if ( jsobj.getBoolField( "help" ) ) {
                     stringstream help;

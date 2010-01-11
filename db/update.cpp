@@ -26,6 +26,10 @@
 
 namespace mongo {
 
+    const char* Mod::modNames[] = { "$inc", "$set", "$push", "$pushAll", "$pull", "$pullAll" , "$pop", "$unset" ,
+                                     "$bitand" , "$bitor" , "$bit" };
+    unsigned Mod::modNamesNum = sizeof(Mod::modNames)/sizeof(char*);
+
     bool Mod::_pullElementMatch( BSONElement& toMatch ) const {
         
         if ( elt.type() != Object ){
@@ -63,7 +67,7 @@ namespace mongo {
         }
 
         case PUSH: {
-            uassert( "$push can only be applied to an array" , in.type() == Array );
+            uassert( 10131 ,  "$push can only be applied to an array" , in.type() == Array );
             BSONObjBuilder bb( b.subarrayStart( shortFieldName ) );
             BSONObjIterator i( in.embeddedObject() );
             int n=0;
@@ -80,8 +84,8 @@ namespace mongo {
         }
             
         case PUSH_ALL: {
-            uassert( "$pushAll can only be applied to an array" , in.type() == Array );
-            uassert( "$pushAll has to be passed an array" , elt.type() );
+            uassert( 10132 ,  "$pushAll can only be applied to an array" , in.type() == Array );
+            uassert( 10133 ,  "$pushAll has to be passed an array" , elt.type() );
 
             BSONObjBuilder bb( b.subarrayStart( shortFieldName ) );
             
@@ -105,7 +109,7 @@ namespace mongo {
             
         case PULL:
         case PULL_ALL: {
-            uassert( "$pull/$pullAll can only be applied to an array" , in.type() == Array );
+            uassert( 10134 ,  "$pull/$pullAll can only be applied to an array" , in.type() == Array );
             BSONObjBuilder bb( b.subarrayStart( shortFieldName ) );
                         
             int n = 0;
@@ -138,7 +142,7 @@ namespace mongo {
         }
 
         case POP: {
-            uassert( "$pop can only be applied to an array" , in.type() == Array );
+            uassert( 10135 ,  "$pop can only be applied to an array" , in.type() == Array );
             BSONObjBuilder bb( b.subarrayStart( shortFieldName ) );
                         
             int n = 0;
@@ -174,9 +178,9 @@ namespace mongo {
         }
 
         case BIT: {
-            uassert( "$bit needs an array" , elt.type() == Object );
-            uassert( "$bit can only be applied to numbers" , in.isNumber() );
-            uassert( "$bit can't use a double" , in.type() != NumberDouble );
+            uassert( 10136 ,  "$bit needs an array" , elt.type() == Object );
+            uassert( 10137 ,  "$bit can only be applied to numbers" , in.isNumber() );
+            uassert( 10138 ,  "$bit can't use a double" , in.type() != NumberDouble );
             
             int x = in.numberInt();
             long long y = in.numberLong();
@@ -184,7 +188,7 @@ namespace mongo {
             BSONObjIterator it( elt.embeddedObject() );
             while ( it.more() ){
                 BSONElement e = it.next();
-                uassert( "$bit field must be number" , e.isNumber() );
+                uassert( 10139 ,  "$bit field must be number" , e.isNumber() );
                 if ( strcmp( e.fieldName() , "and" ) == 0 ){
                     switch( in.type() ){
                     case NumberInt: x = x&e.numberInt(); break;
@@ -201,7 +205,7 @@ namespace mongo {
                 }
 
                 else {
-                    throw UserException( (string)"unknown bit mod:" + e.fieldName() );
+                    throw UserException( 9016, (string)"unknown bit mod:" + e.fieldName() );
                 }
             }
             
@@ -217,7 +221,7 @@ namespace mongo {
         default:
             stringstream ss;
             ss << "Mod::apply can't handle type: " << op;
-            throw UserException( ss.str() );
+            throw UserException( 9017, ss.str() );
         }
     }
 
@@ -235,7 +239,7 @@ namespace mongo {
             else {
                 switch( m.op ) {
                 case Mod::INC:
-                    uassert( "Cannot apply $inc modifier to non-number", e.isNumber() || e.eoo() );
+                    uassert( 10140 ,  "Cannot apply $inc modifier to non-number", e.isNumber() || e.eoo() );
                     if ( !e.isNumber() )
                         inPlacePossible = false;
                     break;
@@ -246,12 +250,12 @@ namespace mongo {
                     break;
                 case Mod::PUSH:
                 case Mod::PUSH_ALL:
-                    uassert( "Cannot apply $push/$pushAll modifier to non-array", e.type() == Array || e.eoo() );
+                    uassert( 10141 ,  "Cannot apply $push/$pushAll modifier to non-array", e.type() == Array || e.eoo() );
                     inPlacePossible = false;
                     break;
                 case Mod::PULL:
                 case Mod::PULL_ALL: {
-                    uassert( "Cannot apply $pull/$pullAll modifier to non-array", e.type() == Array || e.eoo() );
+                    uassert( 10142 ,  "Cannot apply $pull/$pullAll modifier to non-array", e.type() == Array || e.eoo() );
                     BSONObjIterator i( e.embeddedObject() );
                     while( inPlacePossible && i.more() ) {
                         BSONElement arrI = i.next();
@@ -274,7 +278,7 @@ namespace mongo {
                     break;
                 }
                 case Mod::POP: {
-                    uassert( "Cannot apply $pop modifier to non-array", e.type() == Array || e.eoo() );
+                    uassert( 10143 ,  "Cannot apply $pop modifier to non-array", e.type() == Array || e.eoo() );
                     if ( ! e.embeddedObject().isEmpty() )
                         inPlacePossible = false;
                     break;
@@ -314,7 +318,7 @@ namespace mongo {
                 }
                 break;
             default:
-                uassert( "can't apply mod in place - shouldn't have gotten here" , 0 );
+                uassert( 10144 ,  "can't apply mod in place - shouldn't have gotten here" , 0 );
             }
         }
     }
@@ -356,7 +360,7 @@ namespace mongo {
         }
         
     }
-
+    
     void ModSet::createNewFromMods( const string& root , BSONObjBuilder& b , const BSONObj &obj ){
         BSONObjIteratorSorted es( obj );
         BSONElement e = es.next();
@@ -373,14 +377,17 @@ namespace mongo {
             switch ( cmp ){
                 
             case LEFT_SUBFIELD: { // Mod is embeddeed under this element
-                uassert( "LEFT_SUBFIELD only supports Object" , e.type() == Object || e.type() == Array );
-                BSONObjBuilder bb ( e.type() == Object ? b.subobjStart( e.fieldName() ) : b.subarrayStart( e.fieldName() ) );
-                stringstream nr; nr << root << e.fieldName() << ".";
-                createNewFromMods( nr.str() , bb , e.embeddedObject() );
-                bb.done();
-                // inc both as we handled both
-                e = es.next();
-                m++;
+                uassert( 10145 ,  "LEFT_SUBFIELD only supports Object" , e.type() == Object || e.type() == Array );
+                if ( onedownseen.count( e.fieldName() ) == 0 ){
+                    onedownseen.insert( e.fieldName() );
+                    BSONObjBuilder bb ( e.type() == Object ? b.subobjStart( e.fieldName() ) : b.subarrayStart( e.fieldName() ) );
+                    stringstream nr; nr << root << e.fieldName() << ".";
+                    createNewFromMods( nr.str() , bb , e.embeddedObject() );
+                    bb.done();
+                    // inc both as we handled both
+                    e = es.next();
+                    m++;
+                }
                 continue;
             }
             case LEFT_BEFORE: // Mod on a field that doesn't exist
@@ -397,10 +404,10 @@ namespace mongo {
                 e = es.next();
                 continue;
             case RIGHT_SUBFIELD:
-                massert( "ModSet::createNewFromMods - RIGHT_SUBFIELD should be impossible" , 0 ); 
+                massert( 10399 ,  "ModSet::createNewFromMods - RIGHT_SUBFIELD should be impossible" , 0 ); 
                 break;
             default:
-                massert( "unhandled case" , 0 );
+                massert( 10400 ,  "unhandled case" , 0 );
             }
         }
         
@@ -415,7 +422,7 @@ namespace mongo {
             _appendNewFromMods( root , m->second , b , onedownseen );
         }
     }
-            
+
     BSONObj ModSet::createNewFromMods( const BSONObj &obj ) {
         BSONObjBuilder b( (int)(obj.objsize() * 1.1) );
         createNewFromMods( "" , b , obj );
@@ -436,7 +443,7 @@ namespace mongo {
                     continue;
                 }
 
-                uassert( "upsert with foo.bar type queries not supported yet" , strchr( e.fieldName() , '.' ) == 0 );
+                uassert( 10146 ,  "upsert with foo.bar type queries not supported yet" , strchr( e.fieldName() , '.' ) == 0 );
 
 
                 bb.append( e );
@@ -466,7 +473,7 @@ namespace mongo {
         while ( it.more() ) {
             BSONElement e = it.next();
             const char *fn = e.fieldName();
-            uassert( "Invalid modifier specified" + string( fn ), e.type() == Object );
+            uassert( 10147 ,  "Invalid modifier specified" + string( fn ), e.type() == Object );
             BSONObj j = e.embeddedObject();
             BSONObjIterator jt(j);
             Mod::Op op = opFromStr( fn );
@@ -477,12 +484,12 @@ namespace mongo {
 
                 const char * fieldName = f.fieldName();
 
-                uassert( "Mod on _id not allowed", strcmp( fieldName, "_id" ) != 0 );
-                uassert( "Invalid mod field name, may not end in a period", fieldName[ strlen( fieldName ) - 1 ] != '.' );
-                uassert( "Field name duplication not allowed with modifiers", ! haveModForField( fieldName ) );
-                uassert( "have conflict mod" , ! haveConflictingMod( fieldName ) );
-                uassert( "Modifier $inc allowed for numbers only", f.isNumber() || op != Mod::INC );
-                uassert( "Modifier $pushAll/pullAll allowed for arrays only", f.type() == Array || ( op != Mod::PUSH_ALL && op != Mod::PULL_ALL ) );
+                uassert( 10148 ,  "Mod on _id not allowed", strcmp( fieldName, "_id" ) != 0 );
+                uassert( 10149 ,  "Invalid mod field name, may not end in a period", fieldName[ strlen( fieldName ) - 1 ] != '.' );
+                uassert( 10150 ,  "Field name duplication not allowed with modifiers", ! haveModForField( fieldName ) );
+                uassert( 10151 ,  "have conflict mod" , ! haveConflictingMod( fieldName ) );
+                uassert( 10152 ,  "Modifier $inc allowed for numbers only", f.isNumber() || op != Mod::INC );
+                uassert( 10153 ,  "Modifier $pushAll/pullAll allowed for arrays only", f.type() == Array || ( op != Mod::PUSH_ALL && op != Mod::PULL_ALL ) );
 
                 Mod m;
                 m.init( op , f );
@@ -513,7 +520,7 @@ namespace mongo {
             BSONElement e = i.next();
             if ( e.eoo() )
                 break;
-            uassert( "Modifiers and non-modifiers cannot be mixed", e.fieldName()[ 0 ] != '$' );
+            uassert( 10154 ,  "Modifiers and non-modifiers cannot be mixed", e.fieldName()[ 0 ] != '$' );
         }
     }
     
@@ -556,13 +563,14 @@ namespace mongo {
     };
 
     
-    UpdateResult updateObjects(const char *ns, BSONObj updateobjOrig, BSONObj patternOrig, bool upsert, bool multi, stringstream& ss, bool logop ) {
+    UpdateResult updateObjects(const char *ns, BSONObj updateobjOrig, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
         int profile = cc().database()->profile;
+        StringBuilder& ss = debug.str;
         
-        uassert("cannot update reserved $ collection", strchr(ns, '$') == 0 );
+        uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
         if ( strstr(ns, ".system.") ) {
             /* dm: it's very important that system.indexes is never updated as IndexDetails has pointers into it */
-            uassert("cannot update system collection", legalClientSystemNS( ns , true ) );
+            uassert( 10156 , "cannot update system collection", legalClientSystemNS( ns , true ) );
         }
 
         set<DiskLoc> seenObjects;
@@ -570,7 +578,7 @@ namespace mongo {
         QueryPlanSet qps( ns, patternOrig, BSONObj() );
         UpdateOp original;
         shared_ptr< UpdateOp > u = qps.runOp( original );
-        massert( u->exceptionMessage(), u->complete() );
+        massert( 10401 ,  u->exceptionMessage(), u->complete() );
         shared_ptr< Cursor > c = u->c();
         int numModded = 0;
         while ( c->ok() ) {
@@ -603,7 +611,7 @@ namespace mongo {
                     pattern = idPattern.obj();
                 }
                 else {
-                    uassert( "multi-update requires all modified objects to have an _id" , ! multi );
+                    uassert( 10157 ,  "multi-update requires all modified objects to have an _id" , ! multi );
                 }
             }
             
@@ -646,22 +654,28 @@ namespace mongo {
                 } 
                 else {
                     BSONObj newObj = mods.createNewFromMods( loc.obj() );
-                    DiskLoc newLoc = theDataFileMgr.update(ns, r, loc , newObj.objdata(), newObj.objsize(), ss);
+                    DiskLoc newLoc = theDataFileMgr.update(ns, r, loc , newObj.objdata(), newObj.objsize(), debug);
                     if ( newLoc != loc || isIndexed ){
                         // object moved, need to make sure we don' get again
                         seenObjects.insert( newLoc );
                     }
                         
                 }
-
+                
                 if ( logop ) {
+                    
                     assert( mods.size() );
+
                     if ( mods.haveArrayDepMod() ) {
                         BSONObjBuilder patternBuilder;
                         patternBuilder.appendElements( pattern );
                         mods.appendSizeSpecForArrayDepMods( patternBuilder );
                         pattern = patternBuilder.obj();                        
                     }
+                    
+                    if ( mods.needOpLogRewrite() )
+                        updateobj = mods.getOpLogRewrite();
+                    
                     logOp("u", ns, updateobj, &pattern );
                 }
                 numModded++;
@@ -672,11 +686,11 @@ namespace mongo {
                 continue;
             } 
             
-            uassert( "multi update only works with $ operators" , ! multi );
+            uassert( 10158 ,  "multi update only works with $ operators" , ! multi );
 
             BSONElementManipulator::lookForTimestamps( updateobj );
             checkNoMods( updateobj );
-            theDataFileMgr.update(ns, r, loc , updateobj.objdata(), updateobj.objsize(), ss);
+            theDataFileMgr.update(ns, r, loc , updateobj.objdata(), updateobj.objsize(), debug);
             if ( logop )
                 logOp("u", ns, updateobj, &pattern );
             return UpdateResult( 1 , 0 , 1 );
@@ -706,7 +720,7 @@ namespace mongo {
                     logOp( "i", ns, newObj );
                 return UpdateResult( 0 , 1 , 1 );
             }
-            uassert( "multi update only works with $ operators" , ! multi );
+            uassert( 10159 ,  "multi update only works with $ operators" , ! multi );
             checkNoMods( updateobjOrig );
             if ( profile )
                 ss << " upsert ";

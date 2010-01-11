@@ -211,7 +211,7 @@ namespace mongo {
         fieldNameEnd( ObjectBuilder &_b ) : b( _b ) {}
         void operator() ( const char *start, const char *end ) const {
             string name = b.popString();
-            massert( "Invalid use of reserved field name",
+            massert( 10338 ,  "Invalid use of reserved field name",
                      name != "$oid" &&
                      name != "$binary" &&
                      name != "$type" &&
@@ -343,7 +343,7 @@ namespace mongo {
     struct binDataBinary {
         binDataBinary( ObjectBuilder &_b ) : b( _b ) {}
         void operator() ( const char *start, const char *end ) const {
-            massert( "Badly formatted bindata", ( end - start ) % 4 == 0 );
+            massert( 10339 ,  "Badly formatted bindata", ( end - start ) % 4 == 0 );
             string encoded( start, end );
             b.binData = base64::decode( encoded );
         }
@@ -509,7 +509,7 @@ public:
                 // TODO: this will need to use a signed parser at some point
                 date = dateS | dateT;
                 dateS = ch_p( '{' ) >> "\"$date\"" >> ':' >> uint_parser< Date_t >()[ dateValue( self.b ) ] >> '}';
-                dateT = str_p( "Date" ) >> '(' >> uint_parser< Date_t >()[ dateValue( self.b ) ] >> ')';
+                dateT = !str_p("new") >> str_p( "Date" ) >> '(' >> uint_parser< Date_t >()[ dateValue( self.b ) ] >> ')';
 
                 regex = regexS | regexT;
                 regexS = ch_p( '{' ) >> "\"$regex\"" >> ':' >> str[ regexValue( self.b ) ] >> ',' >> "\"$options\"" >> ':' >> lexeme_d[ '"' >> ( *( alpha_p ) )[ regexOptions( self.b ) ] >> '"' ] >> '}';
@@ -550,7 +550,7 @@ public:
                 len = 10;
             stringstream ss;
             ss << "Failure parsing JSON string near: " << string( result.stop, len );
-            massert( ss.str(), false );
+            massert( 10340 ,  ss.str(), false );
         }
         return b.pop();
     }

@@ -132,7 +132,7 @@ namespace mongo {
         BSONObj cmd = BSON( "count" << ns.coll << "query" << query );
         BSONObj res;
         if( !runCommand(ns.db.c_str(), cmd, res, options) )
-            uasserted(string("count fails:") + res.toString());
+            uasserted(11010,string("count fails:") + res.toString());
         return res.getIntField("n");
     }
 
@@ -237,7 +237,7 @@ namespace mongo {
         if ( size ) b.append("size", size);
         if ( capped ) b.append("capped", true);
         if ( max ) b.append("max", max);
-        string db = nsToClient(ns.c_str());
+        string db = nsToDatabase(ns.c_str());
         return runCommand(db.c_str(), b.done(), *info);
     }
 
@@ -314,8 +314,8 @@ namespace mongo {
 
     list<string> DBClientWithCommands::getDatabaseNames(){
         BSONObj info;
-        uassert( "listdatabases failed" , runCommand( "admin" , BSON( "listDatabases" << 1 ) , info ) );
-        uassert( "listDatabases.databases not array" , info["databases"].type() == Array );
+        uassert( 10005 ,  "listdatabases failed" , runCommand( "admin" , BSON( "listDatabases" << 1 ) , info ) );
+        uassert( 10006 ,  "listDatabases.databases not array" , info["databases"].type() == Array );
         
         list<string> names;
         
@@ -426,7 +426,7 @@ namespace mongo {
         auto_ptr<DBClientCursor> c =
             this->query(ns, query, 1, 0, fieldsToReturn, queryOptions);
 
-        massert( "DBClientBase::findOne: transport error", c.get() );
+        massert( 10276 ,  "DBClientBase::findOne: transport error", c.get() );
 
         if ( !c->more() )
             return BSONObj();
@@ -448,7 +448,7 @@ namespace mongo {
             port = CmdLine::DefaultDBPort;
             ip = hostbyname( serverAddress.c_str() );
         }
-        massert( "Unable to parse hostname", !ip.empty() );
+        massert( 10277 ,  "Unable to parse hostname", !ip.empty() );
 
         // we keep around SockAddr for connection life -- maybe MessagingPort
         // requires that?
@@ -566,8 +566,8 @@ namespace mongo {
         b.append( ns );
 
         int flags = 0;
-        if ( upsert ) flags |= Option_Upsert;
-        if ( multi ) flags |= Option_Multi;
+        if ( upsert ) flags |= UpdateOption_Upsert;
+        if ( multi ) flags |= UpdateOption_Multi;
         b.append( flags );
 
         query.obj.appendSelfToBufBuilder( b );
@@ -590,18 +590,18 @@ namespace mongo {
 
     void DBClientWithCommands::dropIndex( const string& ns , const string& indexName ){
         BSONObj info;
-        if ( ! runCommand( nsToClient( ns.c_str() ) , 
+        if ( ! runCommand( nsToDatabase( ns.c_str() ) , 
                            BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << indexName ) , 
                            info ) ){
             log() << "dropIndex failed: " << info << endl;
-            uassert( "dropIndex failed" , 0 );
+            uassert( 10007 ,  "dropIndex failed" , 0 );
         }
         resetIndexCache();
     }
     
     void DBClientWithCommands::dropIndexes( const string& ns ){
         BSONObj info;
-        uassert( "dropIndexes failed" , runCommand( nsToClient( ns.c_str() ) , 
+        uassert( 10008 ,  "dropIndexes failed" , runCommand( nsToDatabase( ns.c_str() ) , 
                                                     BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << "*") , 
                                                     info ) );
         resetIndexCache();
@@ -716,7 +716,7 @@ namespace mongo {
             if ( !port().call(toSend, response) ) {
                 failed = true;
                 if ( assertOk )
-                    massert("dbclient error communicating with server", false);
+                    massert( 10278 , "dbclient error communicating with server", false);
                 return false;
             }
         }
@@ -785,7 +785,7 @@ namespace mongo {
             cursorId = 0; // 0 indicates no longer valid (dead)
             // TODO: should we throw a UserException here???
         }
-        if ( cursorId == 0 || ! ( opts & Option_CursorTailable ) ) {
+        if ( cursorId == 0 || ! ( opts & QueryOption_CursorTailable ) ) {
             // only set initially: we don't want to kill it on end of data
             // if it's a tailable cursor
             cursorId = qr->cursorId;
@@ -800,6 +800,7 @@ namespace mongo {
         */
     }
 
+    /** If true, safe to call next().  Requests more from server if necessary. */
     bool DBClientCursor::more() {
         if ( pos < nReturned )
             return true;
@@ -820,7 +821,7 @@ namespace mongo {
     }
 
     DBClientCursor::~DBClientCursor() {
-        if ( cursorId && ownCursor_ ) {
+        if ( cursorId && _ownCursor ) {
             BufBuilder b;
             b.append( (int)0 ); // reserved
             b.append( (int)1 ); // number
@@ -878,7 +879,7 @@ namespace mongo {
             sleepsecs(1);
         }
 
-        uassert("checkmaster: no master found", false);
+        uassert( 10009 , "checkmaster: no master found", false);
     }
 
     inline DBClientConnection& DBClientPaired::checkMaster() {
@@ -922,7 +923,7 @@ namespace mongo {
 
     bool DBClientPaired::connect(string hostpairstring) { 
         size_t comma = hostpairstring.find( "," );
-        uassert("bad hostpairstring", comma != string::npos);
+        uassert( 10010 , "bad hostpairstring", comma != string::npos);
         return connect( hostpairstring.substr( 0 , comma ) , hostpairstring.substr( comma + 1 ) );
     }
 

@@ -21,10 +21,15 @@
 #include "../util/md5.hpp"
 #include "utils.h"
 
+extern const char * jsconcatcode_server;
+
 namespace mongo {
 
     namespace shellUtils {
         
+        std::string _dbConnect;
+        std::string _dbAuth;
+                
         const char *argv0 = 0;
         void RecordMyLocation( const char *_argv0 ) { argv0 = _argv0; }
         
@@ -69,7 +74,7 @@ namespace mongo {
         }
 
         BSONObj listFiles(const BSONObj& args){
-            uassert( "need to specify 1 argument to listFiles" , args.nFields() == 1 );
+            uassert( 10257 ,  "need to specify 1 argument to listFiles" , args.nFields() == 1 );
             
             BSONObjBuilder lst;
             
@@ -118,7 +123,7 @@ namespace mongo {
 
         BSONObj JSGetMemInfo( const BSONObj& args ){
             ProcessInfo pi;
-            uassert( "processinfo not supported" , pi.supported() );
+            uassert( 10258 ,  "processinfo not supported" , pi.supported() );
             
             BSONObjBuilder e;
             e.append( "virtual" , pi.getVirtualMemorySize() );
@@ -144,8 +149,8 @@ namespace mongo {
 #include <sys/wait.h>
         
         BSONObj AllocatePorts( const BSONObj &args ) {
-            uassert( "allocatePorts takes exactly 1 argument", args.nFields() == 1 );
-            uassert( "allocatePorts needs to be passed an integer", args.firstElement().isNumber() );
+            uassert( 10259 ,  "allocatePorts takes exactly 1 argument", args.nFields() == 1 );
+            uassert( 10260 ,  "allocatePorts needs to be passed an integer", args.firstElement().isNumber() );
             
             int n = int( args.firstElement().number() );
             
@@ -173,7 +178,7 @@ namespace mongo {
             
             sort( ports.begin(), ports.end() );
             for( unsigned i = 1; i < ports.size(); ++i )
-                massert( "duplicate ports allocated", ports[ i - 1 ] != ports[ i ] );
+                massert( 10434 ,  "duplicate ports allocated", ports[ i - 1 ] != ports[ i ] );
             BSONObjBuilder b;
             b.append( "", ports );
             return b.obj();
@@ -220,7 +225,7 @@ namespace mongo {
                 
                 assert( !program.empty() );
                 boost::filesystem::path programPath = ( boost::filesystem::path( argv0 ) ).branch_path() / program;
-                massert( "couldn't find " + programPath.native_file_string(), boost::filesystem::exists( programPath ) );
+                massert( 10435 ,  "couldn't find " + programPath.native_file_string(), boost::filesystem::exists( programPath ) );
                 
                 port_ = -1;
                 argv_ = new char *[ args.nFields() + 1 ];
@@ -276,7 +281,7 @@ namespace mongo {
                     assert( dup2( pipeEnds[ 1 ], STDOUT_FILENO ) != -1 );
                     assert( dup2( pipeEnds[ 1 ], STDERR_FILENO ) != -1 );
                     execvp( argv_[ 0 ], argv_ );
-                    massert( "Unable to start program" , 0 );
+                    massert( 10436 ,  "Unable to start program" , 0 );
                 }
                 
                 cout << "shell: started mongo program";
@@ -466,7 +471,7 @@ namespace mongo {
 #endif
 
         BSONObj jsmd5( const BSONObj &a ){
-            uassert( "js md5 needs a string" , a.firstElement().type() == String );
+            uassert( 10261 ,  "js md5 needs a string" , a.firstElement().type() == String );
             const char * s = a.firstElement().valuestrsafe();
             
             md5digest d;
@@ -478,6 +483,26 @@ namespace mongo {
             return BSON( "" << digestToString( d ) );
         }
         
+        unsigned _randomSeed;
+        
+        BSONObj JSSrand( const BSONObj &a ) {
+            uassert( 12518, "srand requires a single numeric argument",
+                    a.nFields() == 1 && a.firstElement().isNumber() );
+            _randomSeed = a.firstElement().numberLong(); // grab least significant digits
+            return undefined_;
+        }
+        
+        BSONObj JSRand( const BSONObj &a ) {
+            uassert( 12519, "rand accepts no arguments", a.nFields() == 0 );
+            unsigned r;
+#if !defined(_WIN32)
+            r = rand_r( &_randomSeed );
+#else
+            r = rand(); // seed not used in this case
+#endif
+            return BSON( "" << double( r ) / ( double( RAND_MAX ) + 1 ) );
+        }
+        
         void installShellUtils( Scope& scope ){
             scope.injectNative( "listFiles" , listFiles );
             scope.injectNative( "sleep" , JSSleep );
@@ -485,6 +510,8 @@ namespace mongo {
             scope.injectNative( "getMemInfo" , JSGetMemInfo );
             scope.injectNative( "version" , JSVersion );
             scope.injectNative( "hex_md5" , jsmd5 );
+            scope.injectNative( "_srand" , JSSrand );
+            scope.injectNative( "_rand" , JSRand );
 #if !defined(_WIN32)
             scope.injectNative( "allocatePorts", AllocatePorts );
             scope.injectNative( "_startMongoProgram", StartMongoProgram );
@@ -496,6 +523,18 @@ namespace mongo {
             scope.injectNative( "rawMongoProgramOutput", RawMongoProgramOutput );
 #endif
         }
-        
+
+        void initScope( Scope &scope ) {
+            scope.externalSetup();
+            mongo::shellUtils::installShellUtils( scope );
+            scope.execSetup( jsconcatcode_server , "setupServerCode" );
+            
+            if ( !_dbConnect.empty() ) {
+                uassert( 12513, "connect failed", scope.exec( _dbConnect , "(connect)" , false , true , false ) );
+                if ( !_dbAuth.empty() ) {
+                    uassert( 12514, "login failed", scope.exec( _dbAuth , "(auth)" , true , true , false ) );
+                }
+            }
+        }
     }
 }

@@ -64,9 +64,9 @@ namespace mongo {
             if ( e.eoo() )
                 break;
             if ( string("ns") == e.fieldName() ) {
-                uassert("bad ns field for index during dbcopy", e.type() == String);
+                uassert( 10024 , "bad ns field for index during dbcopy", e.type() == String);
                 const char *p = strchr(e.valuestr(), '.');
-                uassert("bad ns field for index during dbcopy [2]", p);
+                uassert( 10025 , "bad ns field for index during dbcopy [2]", p);
                 string newname = cc().database()->name + p;
                 b.append("ns", newname);
             }
@@ -92,7 +92,7 @@ namespace mongo {
         auto_ptr<DBClientCursor> c;
         {
             dbtemprelease r;
-            c = conn->query( from_collection, query, 0, 0, 0, Option_NoCursorTimeout | ( slaveOk ? Option_SlaveOk : 0 ) );
+            c = conn->query( from_collection, query, 0, 0, 0, QueryOption_NoCursorTimeout | ( slaveOk ? QueryOption_SlaveOk : 0 ) );
         }
         
         list<BSONObj> storedForLater;
@@ -166,7 +166,7 @@ namespace mongo {
     
     bool Cloner::go(const char *masterHost, string& errmsg, const string& fromdb, bool logForRepl, bool slaveOk, bool useReplAuth, bool snapshot) {
 
-		massert( "useReplAuth is not written to replication log", !useReplAuth || !logForRepl );
+		massert( 10289 ,  "useReplAuth is not written to replication log", !useReplAuth || !logForRepl );
 
         string todb = cc().database()->name;
         stringstream a,b;
@@ -202,7 +202,7 @@ namespace mongo {
                 } else {
                     conn.reset( new DBDirectClient() );
                 }
-                c = conn->query( ns.c_str(), BSONObj(), 0, 0, 0, slaveOk ? Option_SlaveOk : 0 );
+                c = conn->query( ns.c_str(), BSONObj(), 0, 0, 0, slaveOk ? QueryOption_SlaveOk : 0 );
             }
 
             if ( c.get() == 0 ) {
@@ -218,7 +218,7 @@ namespace mongo {
                 BSONElement e = collection.findElement("name");
                 if ( e.eoo() ) {
                     string s = "bad system.namespaces object " + collection.toString();
-                    massert(s.c_str(), false);
+                    massert( 10290 , s.c_str(), false);
                 }
                 assert( !e.eoo() );
                 assert( e.type() == String );
@@ -281,7 +281,7 @@ namespace mongo {
 
     bool Cloner::startCloneCollection( const char *fromhost, const char *ns, const BSONObj &query, string &errmsg, bool logForRepl, bool copyIndexes, int logSizeMb, long long &cursorId ) {
         char db[256];
-        nsToClient( ns, db );
+        nsToDatabase( ns, db );
 
         NamespaceDetails *nsd = nsdetails( ns );
         if ( nsd ){
@@ -332,14 +332,14 @@ namespace mongo {
         {
             dbtemprelease r;
             string logNS = "local.temp.oplog." + string( ns );
-            c = conn->query( logNS.c_str(), Query(), 0, 0, 0, Option_CursorTailable );
+            c = conn->query( logNS.c_str(), Query(), 0, 0, 0, QueryOption_CursorTailable );
         }
         if ( c->more() ) {
             replayOpLog( c.get(), query );
             cursorId = c->getCursorId();
-            massert( "Expected valid tailing cursor", cursorId != 0 );
+            massert( 10291 ,  "Expected valid tailing cursor", cursorId != 0 );
         } else {
-            massert( "Did not expect valid cursor for empty query result", c->getCursorId() == 0 );
+            massert( 10292 ,  "Did not expect valid cursor for empty query result", c->getCursorId() == 0 );
             cursorId = 0;
         }
         c->decouple();
@@ -365,7 +365,7 @@ namespace mongo {
     
     bool Cloner::finishCloneCollection( const char *fromhost, const char *ns, const BSONObj &query, long long cursorId, string &errmsg ) {
         char db[256];
-        nsToClient( ns, db );
+        nsToDatabase( ns, db );
 
         auto_ptr< DBClientCursor > cur;
         {
@@ -633,7 +633,7 @@ namespace mongo {
             
             setClient( source.c_str() );
             NamespaceDetails *nsd = nsdetails( source.c_str() );
-            uassert( "source namespace does not exist", nsd );
+            uassert( 10026 ,  "source namespace does not exist", nsd );
             bool capped = nsd->capped;
             long long size = 0;
             if ( capped )
@@ -641,13 +641,21 @@ namespace mongo {
                     size += i.ext()->length;
             
             setClient( target.c_str() );
-            uassert( "target namespace exists", !nsdetails( target.c_str() ) );
+            
+            if ( nsdetails( target.c_str() ) ){
+                uassert( 10027 ,  "target namespace exists", cmdObj["dropTarget"].trueValue() );
+                BSONObjBuilder bb( result.subobjStart( "dropTarget" ) );
+                dropCollection( target , errmsg , bb );
+                bb.done();
+                if ( errmsg.size() > 0 )
+                    return false;
+            }
 
             {
                 char from[256];
-                nsToClient( source.c_str(), from );
+                nsToDatabase( source.c_str(), from );
                 char to[256];
-                nsToClient( target.c_str(), to );
+                nsToDatabase( target.c_str(), to );
                 if ( strcmp( from, to ) == 0 ) {
                     renameNamespace( source.c_str(), target.c_str() );
                     return true;
@@ -678,9 +686,9 @@ namespace mongo {
             }
             
             char cl[256];
-            nsToClient( source.c_str(), cl );
+            nsToDatabase( source.c_str(), cl );
             string sourceIndexes = string( cl ) + ".system.indexes";
-            nsToClient( target.c_str(), cl );
+            nsToDatabase( target.c_str(), cl );
             string targetIndexes = string( cl ) + ".system.indexes";
             {
                 c = bridge.query( sourceIndexes, QUERY( "ns" << source ) );

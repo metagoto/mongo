@@ -17,9 +17,6 @@ jmp_buf jbuf;
 using namespace std;
 using namespace boost::filesystem;
 
-extern const char * jsconcatcode;
-extern const char * jsconcatcode_server;
-
 string historyFile;
 bool gotInterrupted = 0;
 bool inMultiLine = 0;
@@ -257,9 +254,6 @@ int _main(int argc, char* argv[]) {
 
     mongo::shellUtils::RecordMyLocation( argv[ 0 ] );
 
-    mongo::ScriptEngine::setup();
-    auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->createScope() );
-
     string url = "test";
     string dbhost;
     string port;
@@ -270,7 +264,7 @@ int _main(int argc, char* argv[]) {
 
     bool runShell = false;
     bool nodb = false;
-
+    
     string script;
 
     po::options_description shell_options("options");
@@ -359,35 +353,27 @@ int _main(int argc, char* argv[]) {
             }
         }
     }
-
-    scope->externalSetup();
-    mongo::shellUtils::installShellUtils( *scope );
-
-    scope->execSetup( jsconcatcode_server , "setupServerCode" );
-
+    
     cout << "MongoDB shell version: " << mongo::versionString << endl;
 
     mongo::UnitTest::runTests();
 
     if ( !nodb ) { // connect to db
         cout << "url: " << url << endl;
-        string setup = (string)"db = connect( \"" + fixHost( url , dbhost , port ) + "\")";
-        if ( ! scope->exec( setup , "(connect)" , false , true , false ) )
-            return -1;
+        mongo::shellUtils::_dbConnect = (string)"db = connect( \"" + fixHost( url , dbhost , port ) + "\")";
 
         if ( username.size() && password.size() ){
             stringstream ss;
             ss << "if ( ! db.auth( \"" << username << "\" , \"" << password << "\" ) ){ throw 'login failed'; }";
-
-            if ( ! scope->exec( ss.str() , "(auth)" , true , true , false ) ){
-                cout << "login failed" << endl;
-                return -1;
-            }
-
+            mongo::shellUtils::_dbAuth = ss.str();
         }
 
     }
 
+    mongo::ScriptEngine::setup();
+    mongo::globalScriptEngine->setScopeInitCallback( mongo::shellUtils::initScope );
+    auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->newScope() );    
+    
     if ( !script.empty() ) {
         mongo::shellUtils::MongoProgramScope s;
         if ( ! scope->exec( script , "(shell eval)" , true , true , false ) )
@@ -498,7 +484,7 @@ int main(int argc, char* argv[]) {
 
 namespace mongo {
     DBClientBase * createDirectClient(){
-        uassert( "no createDirectClient in shell" , 0 );
+        uassert( 10256 ,  "no createDirectClient in shell" , 0 );
         return 0;
     }
 }

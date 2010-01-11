@@ -28,6 +28,10 @@ namespace mongo {
         // See opFromStr below
         //        0    1    2     3         4     5          6    7      8       9       10
         enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP, UNSET, BITAND, BITOR , BIT  } op;
+        
+        static const char* modNames[];
+        static unsigned modNamesNum;
+
         const char *fieldName;
         const char *shortFieldName;
         
@@ -36,7 +40,7 @@ namespace mongo {
         int *nint;
         long long *nlong;
 
-        BSONElement elt;
+        BSONElement elt; // x:5 note: this is the actual element from the updateobj
         int pushStartSize;
         boost::shared_ptr<JSMatcher> matcher;
 
@@ -58,7 +62,7 @@ namespace mongo {
 
         /* [dm] why is this const? (or rather, why was setn const?)  i see why but think maybe clearer if were not.  */
         void inc(BSONElement& n) const { 
-            uassert( "$inc value is not a number", n.isNumber() );
+            uassert( 10160 ,  "$inc value is not a number", n.isNumber() );
             if( ndouble ) 
                 *ndouble += n.numberDouble();
             else if( nint )
@@ -115,13 +119,33 @@ namespace mongo {
                 return true;
             return false;
         }
-
+        
         void apply( BSONObjBuilder& b , BSONElement in );
-
+        
         /**
          * @return true iff toMatch should be removed from the array
          */
         bool _pullElementMatch( BSONElement& toMatch ) const;
+
+        bool needOpLogRewrite() const {
+            switch( op ){
+            case BIT:
+            case BITAND:
+            case BITOR:
+                // TODO: should we convert this to $set?
+                return false;
+            default:
+                return false;
+            }
+        }
+        
+        void appendForOpLog( BSONObjBuilder& b ) const {
+            const char * name = modNames[op];
+            
+            BSONObjBuilder bb( b.subobjStart( name ) );
+            bb.append( elt );
+            bb.done();
+        }
     };
 
     class ModSet {
@@ -180,7 +204,7 @@ namespace mongo {
             default: 
                 stringstream ss;
                 ss << "unknown mod in appendNewFromMod: " << m.op;
-                throw UserException( ss.str() );
+                throw UserException( 9015, ss.str() );
             }
          
         }
@@ -197,13 +221,56 @@ namespace mongo {
             return true;
         }
         static Mod::Op opFromStr( const char *fn ) {
-            const char *valid[] = { "$inc", "$set", "$push", "$pushAll", "$pull", "$pullAll" , "$pop", "$unset" ,
-                                    "$bitand" , "$bitor" , "$bit" };
-            for( unsigned i = 0; i < (sizeof(valid) / sizeof(*valid)); ++i )
-                if ( strcmp( fn, valid[ i ] ) == 0 )
-                    return Mod::Op( i );
-            
-            uassert( "Invalid modifier specified " + string( fn ), false );
+            assert( fn[0] == '$' );
+            switch( fn[1] ){
+            case 'i': {
+                if ( fn[2] == 'n' && fn[3] == 'c' && fn[4] == 0 )
+                    return Mod::INC;
+                break;
+            }
+            case 's': {
+                if ( fn[2] == 'e' && fn[3] == 't' && fn[4] == 0 )
+                    return Mod::SET;
+                break;
+            }
+            case 'p': {
+                if ( fn[2] == 'u' ){
+                    if ( fn[3] == 's' && fn[4] == 'h' ){
+                        if ( fn[5] == 0 )
+                            return Mod::PUSH;
+                        if ( fn[5] == 'A' && fn[6] == 'l' && fn[7] == 'l' && fn[8] == 0 )
+                            return Mod::PUSH_ALL;
+                    }
+                    else if ( fn[3] == 'l' && fn[4] == 'l' ){
+                        if ( fn[5] == 0 )
+                            return Mod::PULL;
+                        if ( fn[5] == 'A' && fn[6] == 'l' && fn[7] == 'l' && fn[8] == 0 )
+                            return Mod::PULL_ALL;
+                    }
+                }
+                else if ( fn[2] == 'o' && fn[3] == 'p' && fn[4] == 0 )
+                    return Mod::POP;
+                break;
+            }
+            case 'u': {
+                if ( fn[2] == 'n' && fn[3] == 's' && fn[4] == 'e' && fn[5] == 't' && fn[6] == 0 )
+                    return Mod::UNSET;
+                break;
+            }
+            case 'b': {
+                if ( fn[2] == 'i' && fn[3] == 't' ){
+                    if ( fn[4] == 0 )
+                        return Mod::BIT;
+                    if ( fn[4] == 'a' && fn[5] == 'n' && fn[6] == 'd' && fn[7] == 0 )
+                        return Mod::BITAND;
+                    if ( fn[4] == 'o' && fn[5] == 'r' && fn[6] == 0 )
+                        return Mod::BITOR;
+                }
+                break;
+            }
+            default: break;
+            }
+            uassert( 10161 ,  "Invalid modifier specified " + string( fn ), false );
             return Mod::INC;
         }
         
@@ -261,6 +328,22 @@ namespace mongo {
             return false;
 
             
+        }
+        
+        // re-writing for oplog
+
+        bool needOpLogRewrite() const {
+            for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
+                if ( i->second.needOpLogRewrite() )
+                    return true;
+            return false;            
+        }
+        
+        BSONObj getOpLogRewrite() const {
+            BSONObjBuilder b;
+            for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
+                i->second.appendForOpLog( b );
+            return b.obj();
         }
 
         bool haveArrayDepMod() const {

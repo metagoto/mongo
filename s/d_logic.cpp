@@ -481,6 +481,11 @@ namespace mongo {
 
 
     bool handlePossibleShardedMessage( Message &m, DbResponse &dbresponse ){
+
+        if ( shardConfigServer.empty() ){
+            return false;
+        }
+
         int op = m.data->operation();
         if ( op < 2000 || op >= 3000 )
             return false;
@@ -503,7 +508,7 @@ namespace mongo {
             }
             
             QueryResult *qr = (QueryResult*)b.buf();
-            qr->resultFlags() = QueryResult::ResultFlag_ErrSet | QueryResult::ResultFlag_ShardConfigStale;
+            qr->_resultFlags() = QueryResult::ResultFlag_ErrSet | QueryResult::ResultFlag_ShardConfigStale;
             qr->len = b.len();
             qr->setOperation( opReply );
             qr->cursorId = 0;
@@ -520,7 +525,7 @@ namespace mongo {
         }
         
         OID * clientID = clientServerIds.get();
-        massert( "write with bad shard config and no server id!" , clientID );
+        massert( 10422 ,  "write with bad shard config and no server id!" , clientID );
         
         log() << "got write with an old config - writing back" << endl;
 

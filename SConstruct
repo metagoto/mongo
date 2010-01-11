@@ -19,6 +19,9 @@ import shutil
 import urllib
 import urllib2
 import buildscripts
+import buildscripts.bb
+
+buildscripts.bb.checkOk()
 
 # --- options ----
 AddOption('--prefix',
@@ -306,7 +309,7 @@ if GetOption( "extralib" ) is not None:
 # ------    SOURCE FILE SETUP -----------
 
 commonFiles = Split( "stdafx.cpp buildinfo.cpp db/jsobj.cpp db/json.cpp db/commands.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp shell/mongo.cpp" )
-commonFiles += [ "util/background.cpp" , "util/mmap.cpp" ,  "util/sock.cpp" ,  "util/util.cpp" , "util/message.cpp" , 
+commonFiles += [ "util/background.cpp" , "util/mmap.cpp" ,  "util/sock.cpp" ,  "util/util.cpp" , "util/top.cpp" , "util/message.cpp" , 
                  "util/assert_util.cpp" , "util/httpclient.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/debug_util.cpp",
                  "util/thread_pool.cpp" ]
 commonFiles += Glob( "util/*.c" )
@@ -330,7 +333,8 @@ else:
 coreDbFiles = []
 coreServerFiles = [ "util/message_server_port.cpp" , "util/message_server_asio.cpp" ]
 
-serverOnlyFiles = Split( "db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/matcher.cpp db/dbeval.cpp db/dbwebserver.cpp db/dbinfo.cpp db/dbhelpers.cpp db/instance.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/client.cpp db/security.cpp util/miniwebserver.cpp db/storage.cpp db/reccache.cpp db/queryoptimizer.cpp db/extsort.cpp db/mr.cpp s/d_util.cpp" )
+serverOnlyFiles = Split( "db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/matcher.cpp db/dbeval.cpp db/dbwebserver.cpp db/dbhelpers.cpp db/instance.cpp db/database.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/client.cpp db/security.cpp util/miniwebserver.cpp db/storage.cpp db/reccache.cpp db/queryoptimizer.cpp db/extsort.cpp db/mr.cpp s/d_util.cpp" )
+
 serverOnlyFiles += Glob( "db/dbcommands*.cpp" )
 
 if usesm:
@@ -481,16 +485,27 @@ elif "win32" == os.sys.platform:
     if force64:
         release = True
 
-    for bv in reversed( range(33,50) ):
-        boostDir = "C:/Program Files/Boost/boost_1_" + str(bv) + "_0"
-        if os.path.exists( boostDir ):
-            break
+    for pathdir in env['ENV']['PATH'].split(os.pathsep):
+	if os.path.exists(os.path.join(pathdir, 'cl.exe')):
+	    break
+    else:
+	#use current environment
+	env['ENV'] = dict(os.environ)
 
-    serverOnlyFiles += [ "util/ntservice.cpp" ]
+    def find_boost():
+	for bv in reversed( range(33,50) ):
+	    for extra in ('', '_0', '_1'):
+		boostDir = "C:/Program Files/Boost/boost_1_" + str(bv) + extra
+		if os.path.exists( boostDir ):
+		    return boostDir
+	return None
 
-    if not os.path.exists( boostDir ):
+    boostDir = find_boost()
+    if boostDir is None:
         print( "can't find boost" )
         Exit(1)
+
+    serverOnlyFiles += [ "util/ntservice.cpp" ]
 
     boostLibs = []
 
@@ -773,10 +788,11 @@ def doConfigure( myenv , needJava=True , needPcre=True , shell=False ):
         else:
             Exit(1)
 
-    if asio and conf.CheckCXXHeader( "boost/asio.hpp" ):
-        myenv.Append( CPPDEFINES=[ "USE_ASIO" ] )
-    else:
-        print( "WARNING: old version of boost - you should consider upgrading" )
+    if asio:
+        if conf.CheckCXXHeader( "boost/asio.hpp" ):
+            myenv.Append( CPPDEFINES=[ "USE_ASIO" ] )
+        else:
+            print( "WARNING: old version of boost - you should consider upgrading" )
 
     # this will add it iff it exists and works
     myCheckLib( [ "boost_system" + boostCompiler + "-mt" + boostVersion ,
@@ -957,6 +973,13 @@ testEnv.Prepend( LIBPATH=["."] )
 
 # ----- TARGETS ------
 
+def checkErrorCodes():
+    import buildscripts.errorcodes as x
+    if x.checkErrorCodes() == False:
+        print( "next id to use:" + str( x.getNextCode() ) )
+        Exit(-1)
+
+checkErrorCodes()
 
 # main db target
 mongod = env.Program( "mongod" , commonFiles + coreDbFiles + serverOnlyFiles + [ "db/db.cpp" ] )
@@ -1128,7 +1151,7 @@ def jsSpec( suffix ):
     return apply( os.path.join, args )
 
 def jsDirTestSpec( dir ):
-    return mongo[0].abspath + " --nodb " + jsSpec( [ dir, "*.js" ] )
+    return mongo[0].abspath + " --nodb " + jsSpec( [ dir ] )
 
 def runShellTest( env, target, source ):
     global mongodForTestsPort
@@ -1137,10 +1160,10 @@ def runShellTest( env, target, source ):
     if target == "smokeJs":
         spec = [ jsSpec( [ "_runner.js" ] ) ]
     elif target == "smokeQuota":
-        g = Glob( jsSpec( [ "quota", "*.js" ] ) )
+        g = Glob( jsSpec( [ "quota" ] ) )
         spec = [ x.abspath for x in g ]
     elif target == "smokeJsPerf":
-        g = Glob( jsSpec( [ "perf", "*.js" ] ) )
+        g = Glob( jsSpec( [ "perf" ] ) )
         spec = [ x.abspath for x in g ]
     else:
         print( "invalid target for runShellTest()" )
@@ -1173,7 +1196,7 @@ def startMongodForTests( env, target, source ):
     dirName = "/data/db/sconsTests/"
     ensureDir( dirName )
     from subprocess import Popen
-    mongodForTests = Popen( [ mongod[0].abspath, "--port", mongodForTestsPort, "--dbpath", dirName ] )
+    mongodForTests = Popen( [ mongod[0].abspath, "--port", mongodForTestsPort, "--dbpath", dirName, "--nohttpinterface" ] )
     # Wait for mongod to start
     import time
     time.sleep( 5 )
@@ -1331,7 +1354,7 @@ def checkGlibc(target,source,env):
     stringProcess = subprocess.Popen( [ "strings" , str( target[0] ) ] , stdout=subprocess.PIPE )
     stringResult = stringProcess.communicate()[0]
     if stringResult.count( "GLIBC_2.4" ) > 0:
-        print( str( target[0] ) + " has GLIBC_2.4 dependencies!" )
+        print( "************* " + str( target[0] ) + " has GLIBC_2.4 dependencies!" )
         Exit(-3)
 
 allBinaries = []

@@ -95,7 +95,7 @@ namespace mongo {
         FindOne( bool requireIndex ) : requireIndex_( requireIndex ) {}
         virtual void init() {
             if ( requireIndex_ && strcmp( qp().indexKey().firstElement().fieldName(), "$natural" ) == 0 )
-                throw MsgAssertionException( "Not an index cursor" );
+                throw MsgAssertionException( 9011 , "Not an index cursor" );
             c_ = qp().newCursor();
             if ( !c_->ok() )
                 setComplete();
@@ -131,7 +131,7 @@ namespace mongo {
         QueryPlanSet s( ns, query, BSONObj(), 0, !requireIndex );
         FindOne original( requireIndex );
         shared_ptr< FindOne > res = s.runOp( original );
-        massert( res->exceptionMessage(), res->complete() );
+        massert( 10302 ,  res->exceptionMessage(), res->complete() );
         if ( res->one().isEmpty() )
             return false;
         result = res->one();
@@ -139,15 +139,17 @@ namespace mongo {
     }
 
     auto_ptr<CursorIterator> Helpers::find( const char *ns , BSONObj query , bool requireIndex ){
-        uassert( "requireIndex not supported in Helpers::find yet" , ! requireIndex );
+        uassert( 10047 ,  "requireIndex not supported in Helpers::find yet" , ! requireIndex );
         auto_ptr<CursorIterator> i;
         i.reset( new CursorIterator( DataFileMgr::findAll( ns ) , query ) );
         return i;
     }
     
 
-    bool Helpers::findById(const char *ns, BSONObj query, BSONObj& result ){
-        NamespaceDetails *d = nsdetails(ns);
+    bool Helpers::findById(Client& c, const char *ns, BSONObj query, BSONObj& result ){
+        Database *database = c.database();
+        assert( database );
+        NamespaceDetails *d = database->namespaceIndex.details(ns);
         if ( ! d )
             return false;
         int idxNo = d->findIdIndex();
@@ -181,9 +183,9 @@ namespace mongo {
     }
 
     void Helpers::putSingleton(const char *ns, BSONObj obj) {
+        OpDebug debug;
         DBContext context(ns);
-        stringstream ss;
-        updateObjects(ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false, ss, /*logop=*/true );
+        updateObjects(ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false , true , debug );
     }
 
     void Helpers::emptyCollection(const char *ns) {
@@ -216,7 +218,7 @@ namespace mongo {
             Helpers::emptyCollection( name_.c_str() );
         } else {
             string err;
-            massert( err, userCreateNS( name_.c_str(), fromjson( "{autoIndexId:false}" ), err, false ) );
+            massert( 10303 ,  err, userCreateNS( name_.c_str(), fromjson( "{autoIndexId:false}" ), err, false ) );
         }
         Helpers::ensureIndex( name_.c_str(), key_, true, "setIdx" );            
     }

@@ -42,12 +42,13 @@ DBCollection.prototype.help = function(){
     print("\tdb.foo.find(...).skip(n)");
     print("\tdb.foo.find(...).sort(...)");
     print("\tdb.foo.findOne([query])");
+    print("\tdb.foo.findAndModify( { update : ... , remove : bool [, query: {}, sort: {}, 'new': false] } )");
     print("\tdb.foo.getDB() get DB object associated with collection");
     print("\tdb.foo.getIndexes()");
     print("\tdb.foo.group( { key : ..., initial: ..., reduce : ...[, cond: ...] } )");
     print("\tdb.foo.mapReduce( mapFunction , reduceFunction , <optional params> )" );
     print("\tdb.foo.remove(query)" );
-    print("\tdb.foo.renameCollection( newName ) renames the collection");
+    print("\tdb.foo.renameCollection( newName , <dropTarget> ) renames the collection.");
     print("\tdb.foo.save(obj)");
     print("\tdb.foo.stats()");
     print("\tdb.foo.storageSize() - includes free space allocated to this collection");
@@ -308,8 +309,26 @@ DBCollection.prototype.drop = function(){
     return true;
 }
 
-DBCollection.prototype.renameCollection = function( newName ){
-    return this._db._adminCommand( { renameCollection : this._fullName , to : this._db._name + "." + newName } )
+DBCollection.prototype.findAndModify = function(args){
+    var cmd = { findandmodify: this.getName() };
+    for (key in args){
+        cmd[key] = args[key];
+    }
+
+    var ret = this._db.runCommand( cmd );
+    if ( ! ret.ok ){
+        if (ret.errmsg == "No matching object found"){
+            return {};
+        }
+        throw "findAndModifyFailed failed: " + tojson( ret.errmsg );
+    }
+    return ret.value;
+}
+
+DBCollection.prototype.renameCollection = function( newName , dropTarget ){
+    return this._db._adminCommand( { renameCollection : this._fullName , 
+                                     to : this._db._name + "." + newName , 
+                                     dropTarget : dropTarget } )
 }
 
 DBCollection.prototype.validate = function() {

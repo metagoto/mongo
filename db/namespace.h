@@ -33,10 +33,10 @@ namespace mongo {
 
 	/* in the mongo source code, "client" means "database". */
 
-    const int MaxClientLen = 256; // max str len for the db name, including null char
+    const int MaxDatabaseLen = 256; // max str len for the db name, including null char
 
 	// "database.a.b.c" -> "database"
-    inline void nsToClient(const char *ns, char *database) {
+    inline void nsToDatabase(const char *ns, char *database) {
         const char *p = ns;
         char *q = database;
         while ( *p != '.' ) {
@@ -45,14 +45,14 @@ namespace mongo {
             *q++ = *p++;
         }
         *q = 0;
-        if (q-database>=MaxClientLen) {
-            log() << "nsToClient: ns too long. terminating, buf overrun condition" << endl;
+        if (q-database>=MaxDatabaseLen) {
+            log() << "nsToDatabase: ns too long. terminating, buf overrun condition" << endl;
             dbexit( EXIT_POSSIBLE_CORRUPTION );
         }
     }
-    inline string nsToClient(const char *ns) {
-        char buf[MaxClientLen];
-        nsToClient(ns, buf);
+    inline string nsToDatabase(const char *ns) {
+        char buf[MaxDatabaseLen];
+        nsToDatabase(ns, buf);
         return buf;
     }
 
@@ -88,7 +88,7 @@ namespace mongo {
             *this = ns;
         }
         Namespace& operator=(const char *ns) {
-            uassert("ns name too long, max size is 128", strlen(ns) < MaxNsLen);
+            uassert( 10080 , "ns name too long, max size is 128", strlen(ns) < MaxNsLen);
             //memset(buf, 0, MaxNsLen); /* this is just to keep stuff clean in the files for easy dumping and reading */
             strcpy_s(buf, MaxNsLen, ns);
             return *this;
@@ -97,7 +97,7 @@ namespace mongo {
         /* for more than 10 indexes -- see NamespaceDetails::Extra */
         string extraName() { 
             string s = string(buf) + "$extra";
-            massert("ns name too long", s.size() < MaxNsLen);
+            massert( 10348 , "ns name too long", s.size() < MaxNsLen);
             return s;
         }
 
@@ -311,7 +311,16 @@ namespace mongo {
         }
         DiskLoc firstExtent;
         DiskLoc lastExtent;
+
+        /* NOTE: capped collections override the meaning of deleted list.  
+                 deletedList[0] points to a list of free records (DeletedRecord's) for all extents in
+                 the namespace.
+                 deletedList[1] points to the last record in the prev extent.  When the "current extent" 
+                 changes, this value is updated.  !deletedList[1].isValid() when this value is not 
+                 yet computed.
+        */
         DiskLoc deletedList[Buckets];
+
         long long datasize;
         long long nrecords;
         int lastExtentSize;
@@ -386,7 +395,7 @@ namespace mongo {
                 if( &i.next() == &idx )
                     return i.pos()-1;
             }
-            massert("E12000 idxNo fails", false);
+            massert( 10349 , "E12000 idxNo fails", false);
             return -1;
         }
 
@@ -634,7 +643,7 @@ namespace mongo {
 		void add_ns( const char *ns, const NamespaceDetails &details ) {
             init();
             Namespace n(ns);
-            uassert("too many namespaces/collections", ht->put(n, details));
+            uassert( 10081 , "too many namespaces/collections", ht->put(n, details));
 		}
 
         /* just for diagnostics */
@@ -649,12 +658,12 @@ namespace mongo {
             Namespace n(ns);
             Namespace extra(n.extraName().c_str()); // throws userexception if ns name too long
             NamespaceDetails *d = details(ns);
-            massert( "allocExtra: base ns missing?", d );
+            massert( 10350 ,  "allocExtra: base ns missing?", d );
             assert( d->extraOffset == 0 );
-            massert( "allocExtra: extra already exists", ht->get(extra) == 0 );
+            massert( 10351 ,  "allocExtra: extra already exists", ht->get(extra) == 0 );
             NamespaceDetails::Extra temp;
             memset(&temp, 0, sizeof(temp));
-            uassert( "allocExtra: too many namespaces/collections", ht->put(extra, (NamespaceDetails&) temp));
+            uassert( 10082 ,  "allocExtra: too many namespaces/collections", ht->put(extra, (NamespaceDetails&) temp));
             NamespaceDetails::Extra *e = (NamespaceDetails::Extra *) ht->get(extra);
             d->extraOffset = ((char *) e) - ((char *) d);
             assert( d->extra() == e );

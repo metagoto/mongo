@@ -111,21 +111,18 @@ namespace mongo {
                 if done here, as there are pointers into those objects in 
                 NamespaceDetails.
                 */
-                if( ! legalClientSystemNS( ns , true ) ){
-                    uasserted("cannot delete from system namespace");
-                    return -1;
-                }
+                uassert(12050, "cannot delete from system namespace", legalClientSystemNS( ns , true ) );
             }
             if ( strchr( ns , '$' ) ){
                 log() << "cannot delete from collection with reserved $ in name: " << ns << endl;
-                uassert( "cannot delete from collection with reserved $ in name", strchr(ns, '$') == 0 );
+                uassert( 10100 ,  "cannot delete from collection with reserved $ in name", strchr(ns, '$') == 0 );
             }
         }
 
         NamespaceDetails *d = nsdetails( ns );
         if ( ! d )
             return 0;
-        uassert( "can't remove from a capped collection E00052" , ! d->capped );
+        uassert( 10101 ,  "can't remove from a capped collection" , ! d->capped );
 
         int nDeleted = 0;
         QueryPlanSet s( ns, pattern, BSONObj() );
@@ -209,15 +206,15 @@ namespace mongo {
 
     int initialExtentSize(int len);
 
-    bool runCommands(const char *ns, BSONObj& jsobj, stringstream& ss, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions) {
+    bool runCommands(const char *ns, BSONObj& jsobj, CurOp& curop, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions) {
         try {
-            return _runCommands(ns, jsobj, ss, b, anObjBuilder, fromRepl, queryOptions);
+            return _runCommands(ns, jsobj, b, anObjBuilder, fromRepl, queryOptions);
         }
         catch ( AssertionException& e ) {
             if ( !e.msg.empty() )
                 anObjBuilder.append("assertion", e.msg);
         }
-        ss << " assertion ";
+        curop.debug().str << " assertion ";
         anObjBuilder.append("errmsg", "db assertion failure");
         anObjBuilder.append("ok", 0.0);
         BSONObj x = anObjBuilder.done();
@@ -252,11 +249,11 @@ namespace mongo {
             if ( j.isEmpty() )
                 break;
             BSONElement e = j.firstElement();
-            uassert("bad order array", !e.eoo());
-            uassert("bad order array [2]", e.isNumber());
+            uassert( 10102 , "bad order array", !e.eoo());
+            uassert( 10103 , "bad order array [2]", e.isNumber());
             b.append(e);
             (*p)++;
-            uassert("too many ordering elements", *p <= '9');
+            uassert( 10104 , "too many ordering elements", *p <= '9');
         }
 
         return b.obj();
@@ -279,8 +276,10 @@ namespace mongo {
         return qr;
     }
 
-    QueryResult* getMore(const char *ns, int ntoreturn, long long cursorid , stringstream& ss) {
-        ClientCursor *cc = ClientCursor::find(cursorid);
+    QueryResult* getMore(const char *ns, int ntoreturn, long long cursorid , CurOp& curop ) {
+        StringBuilder& ss = curop.debug().str;
+        ClientCursor::Pointer p(cursorid);
+        ClientCursor *cc = p._c;
         
         int bufSize = 512;
         if ( cc ){
@@ -291,7 +290,7 @@ namespace mongo {
 
         b.skip(sizeof(QueryResult));
 
-        int resultFlags = 0;
+        int resultFlags = 0; //QueryResult::ResultFlag_AwaitCapable;
         int start = 0;
         int n = 0;
 
@@ -313,6 +312,7 @@ namespace mongo {
                         }
                         break;
                     }
+                    p.release();
                     bool ok = ClientCursor::erase(cursorid);
                     assert(ok);
                     cursorid = 0;
@@ -350,7 +350,7 @@ namespace mongo {
         QueryResult *qr = (QueryResult *) b.buf();
         qr->len = b.len();
         qr->setOperation(opReply);
-        qr->resultFlags() = resultFlags;
+        qr->_resultFlags() = resultFlags;
         qr->cursorId = cursorid;
         qr->startingFrom = start;
         qr->nReturned = n;
@@ -494,10 +494,10 @@ namespace mongo {
             n_(),
             soSize_(),
             saveClientCursor_(),
-            findingStart_( (queryOptions & Option_OplogReplay) != 0 ),
+            findingStart_( (queryOptions & QueryOption_OplogReplay) != 0 ),
             findingStartCursor_()
         {
-            uassert("bad skip value in query", ntoskip >= 0);
+            uassert( 10105 , "bad skip value in query", ntoskip >= 0);
         }
 
         virtual void init() {
@@ -648,7 +648,7 @@ namespace mongo {
         int n() const { return n_; }
         long long nscanned() const { return nscanned_; }
         bool saveClientCursor() const { return saveClientCursor_; }
-        bool mayCreateCursor2() const { return ( queryOptions_ & Option_CursorTailable ) && ntoreturn_ != 1; }
+        bool mayCreateCursor2() const { return ( queryOptions_ & QueryOption_CursorTailable ) && ntoreturn_ != 1; }
     private:
         BufBuilder b_;
         int ntoskip_;
@@ -670,7 +670,9 @@ namespace mongo {
         ClientCursor * findingStartCursor_;
     };
     
-    auto_ptr< QueryResult > runQuery(Message& m, QueryMessage& q, stringstream& ss ) {
+    /* run a query -- includes checking for and running a Command */
+    auto_ptr< QueryResult > runQuery(Message& m, QueryMessage& q, CurOp& curop ) {
+        StringBuilder& ss = curop.debug().str;
         const char *ns = q.ns;
         int ntoskip = q.ntoskip;
         int _ntoreturn = q.ntoreturn;
@@ -695,7 +697,7 @@ namespace mongo {
             wantMore = false;
         }
         ss << "query " << ns << " ntoreturn:" << ntoreturn;
-        cc().curop()->setQuery(jsobj);
+        curop.setQuery(jsobj);
         
         BufBuilder bb;
         BSONObjBuilder cmdResBuf;
@@ -706,12 +708,13 @@ namespace mongo {
         auto_ptr< QueryResult > qr;
         int n = 0;
         
+        Client& c = cc();
         /* we assume you are using findOne() for running a cmd... */
-        if ( ntoreturn == 1 && runCommands(ns, jsobj, ss, bb, cmdResBuf, false, queryOptions) ) {
+        if ( ntoreturn == 1 && runCommands(ns, jsobj, curop, bb, cmdResBuf, false, queryOptions) ) {
             n = 1;
             qr.reset( (QueryResult *) bb.buf() );
             bb.decouple();
-            qr->resultFlags() = 0;
+            qr->setResultFlagsToOk();
             qr->len = bb.len();
             ss << " reslen:" << bb.len();
             //	qr->channel = 0;
@@ -721,15 +724,16 @@ namespace mongo {
             qr->nReturned = n;            
         }
         else {
+            /* regular query */
             
             AuthenticationInfo *ai = currentClient.get()->ai;
-            uassert("unauthorized", ai->isAuthorized(cc().database()->name.c_str()));
+            uassert( 10106 , "unauthorized", ai->isAuthorized(c.database()->name.c_str()));
 
 			/* we allow queries to SimpleSlave's -- but not to the slave (nonmaster) member of a replica pair 
 			   so that queries to a pair are realtime consistent as much as possible.  use setSlaveOk() to 
 			   query the nonmaster member of a replica pair.
 			*/
-            uassert( "not master", isMaster() || (queryOptions & Option_SlaveOk) || slave == SimpleSlave );
+            uassert( 10107 ,  "not master", isMaster() || (queryOptions & QueryOption_SlaveOk) || slave == SimpleSlave );
 
             BSONElement hint;
             BSONObj min;
@@ -769,8 +773,8 @@ namespace mongo {
                 BSONElement e = jsobj.getField("$snapshot");
                 snapshot = !e.eoo() && e.trueValue();
                 if( snapshot ) { 
-                    uassert("E12001 can't sort with $snapshot", order.isEmpty());
-					uassert("E12002 can't use hint with $snapshot", hint.eoo());
+                    uassert( 12001 , "E12001 can't sort with $snapshot", order.isEmpty());
+					uassert( 12002 , "E12002 can't use hint with $snapshot", hint.eoo());
                     NamespaceDetails *d = nsdetails(ns);
                     if ( d ){
                         int i = d->findIdIndex();
@@ -800,21 +804,21 @@ namespace mongo {
                 out() << "Bad query object?\n  jsobj:";
                 out() << jsobj.toString() << "\n  query:";
                 out() << query.toString() << endl;
-                uassert("bad query object", false);
+                uassert( 10110 , "bad query object", false);
             }
             
             if ( strcmp( query.firstElement().fieldName() , "_id" ) == 0 && query.nFields() == 1 && query.firstElement().isSimpleType() ){
                 nscanned = 1;
 
                 BSONObj resObject;
-                bool found = Helpers::findById( ns , query , resObject );
+                bool found = Helpers::findById( c, ns , query , resObject );
                 if ( found ){
                     n = 1;
                     fillQueryResultFromObj( bb , filter.get() , resObject );
                 }
                 qr.reset( (QueryResult *) bb.buf() );
                 bb.decouple();
-                qr->resultFlags() = 0;
+                qr->setResultFlagsToOk();
                 qr->len = bb.len();
                 ss << " reslen:" << bb.len();
                 qr->setOperation(opReply);
@@ -833,7 +837,7 @@ namespace mongo {
                 UserQueryOp original( ntoskip, ntoreturn, order, wantMore, explain, filter.get(), queryOptions );
                 shared_ptr< UserQueryOp > o = qps.runOp( original );
                 UserQueryOp &dqo = *o;
-                massert( dqo.exceptionMessage(), dqo.complete() );
+                massert( 10362 ,  dqo.exceptionMessage(), dqo.complete() );
                 n = dqo.n();
                 nscanned = dqo.nscanned();
                 if ( dqo.scanAndOrderRequired() )
@@ -842,7 +846,7 @@ namespace mongo {
                 log( 5 ) << "   used cursor: " << c.get() << endl;
                 if ( dqo.saveClientCursor() ) {
                     ClientCursor *cc = new ClientCursor();
-                    if ( queryOptions & Option_NoCursorTimeout )
+                    if ( queryOptions & QueryOption_NoCursorTimeout )
                         cc->noTimeout();
                     cc->c = c;
                     cursorid = cc->cursorid;
@@ -881,7 +885,7 @@ namespace mongo {
                 qr.reset( (QueryResult *) dqo.builder().buf() );
                 dqo.builder().decouple();
                 qr->cursorId = cursorid;
-                qr->resultFlags() = 0;
+                qr->setResultFlagsToOk();
                 qr->len = dqo.builder().len();
                 ss << " reslen:" << qr->len;
                 qr->setOperation(opReply);
@@ -891,7 +895,7 @@ namespace mongo {
         }
         
         int duration = t.millis();
-        Database *database = cc().database();
+        Database *database = c.database();
         if ( (database && database->profile) || duration >= 100 ) {
             ss << " nscanned:" << nscanned << ' ';
             if ( ntoskip )

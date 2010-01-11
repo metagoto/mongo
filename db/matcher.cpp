@@ -43,9 +43,9 @@ namespace mongo {
             if ( scope.get() )
                 scope->execSetup( "_mongo.readOnly = false;" , "make not read only" );
 
-
             if ( jsScope ){
                 delete jsScope;
+                jsScope = 0;
             }
             func = 0;
         }
@@ -55,7 +55,7 @@ namespace mongo {
         BSONObj *jsScope;
         
         void setFunc(const char *code) {
-            massert( "scope has to be created first!" , scope.get() );
+            massert( 10341 ,  "scope has to be created first!" , scope.get() );
             func = scope->createFunction( code );
         }
         
@@ -63,7 +63,32 @@ namespace mongo {
 
     JSMatcher::~JSMatcher() {
         delete where;
+        where = 0;
     }
+
+    BasicMatcher::BasicMatcher( BSONElement _e , int _op ) : toMatch( _e ) , compareOp( _op ) {
+        if ( _op == BSONObj::opMOD ){
+            BSONObj o = _e.embeddedObject().firstElement().embeddedObject();
+            mod = o["0"].numberInt();
+            modm = o["1"].numberInt();
+            
+            uassert( 10073 ,  "mod can't be 0" , mod );
+        }
+        else if ( _op == BSONObj::opTYPE ){
+            type = (BSONType)(_e.embeddedObject().firstElement().numberInt());
+        }
+        else if ( _op == BSONObj::opELEM_MATCH ){
+            BSONElement m = toMatch.embeddedObjectUserCheck().firstElement();
+            uassert( 12517 , "$elemMatch needs an Object" , m.type() == Object );
+            subMatcher.reset( new JSMatcher( m.embeddedObject() ) );
+        }
+    }
+
+
+    BasicMatcher::~BasicMatcher(){
+    }
+
+
 
 } // namespace mongo
 
@@ -118,7 +143,7 @@ namespace mongo {
     */
     JSMatcher::JSMatcher(const BSONObj &_jsobj, const BSONObj &constrainIndexKey) :
         where(0), jsobj(_jsobj), haveSize(), all(), hasArray(0), _atomic(false), nRegex(0){
-
+        
         BSONObjIterator i(jsobj);
         while ( i.moreWithEOO() ) {
             BSONElement e = i.next();
@@ -127,8 +152,8 @@ namespace mongo {
 
             if ( ( e.type() == CodeWScope || e.type() == Code || e.type() == String ) && strcmp(e.fieldName(), "$where")==0 ) {
                 // $where: function()...
-                uassert( "$where occurs twice?", where == 0 );
-                uassert( "$where query, but no script engine", globalScriptEngine );
+                uassert( 10066 ,  "$where occurs twice?", where == 0 );
+                uassert( 10067 ,  "$where query, but no script engine", globalScriptEngine );
                 where = new Where();
                 where->scope = globalScriptEngine->getPooledScope( cc().ns() );
                 where->scope->localConnect( cc().database()->name.c_str() );
@@ -183,7 +208,7 @@ namespace mongo {
                             if ( fn[1] == 'r' && fn[2] == 'e' && fn[3] == 'f' && fn[4] == 0 ){
                                 break; // { $ref : xxx } - treat as normal object
                             }
-                            uassert( (string)"invalid operator: " + fn , op != -1 );
+                            uassert( 10068 ,  (string)"invalid operator: " + fn , op != -1 );
                         }
 
                         isOperator = true;
@@ -215,6 +240,8 @@ namespace mongo {
                             break;
                         case BSONObj::opMOD:
                         case BSONObj::opTYPE:
+                        case BSONObj::opELEM_MATCH:
+                            // these are types where BasicMatcher has all the info
                             basics.push_back( BasicMatcher( e , op ) );
                             break;
                         case BSONObj::opSIZE:{
@@ -241,7 +268,7 @@ namespace mongo {
                             break;
                         }
                         default:
-                            uassert( (string)"BUG - can't operator for: " + fn , 0 );
+                            uassert( 10069 ,  (string)"BUG - can't operator for: " + fn , 0 );
                         }
                         
                     }
@@ -282,7 +309,7 @@ namespace mongo {
     inline int JSMatcher::valuesMatch(const BSONElement& l, const BSONElement& r, int op, const BasicMatcher& bm) {
         assert( op != BSONObj::NE && op != BSONObj::NIN );
         
-        if ( op == 0 )
+        if ( op == BSONObj::Equality )
             return l.valuesEqual(r);
         
         if ( op == BSONObj::opIN ) {
@@ -437,15 +464,30 @@ namespace mongo {
             valuesMatch(e, toMatch, compareOp, bm ) ) {
             return 1;
         } else if ( e.type() == Array && compareOp != BSONObj::opSIZE ) {
+            
             BSONObjIterator ai(e.embeddedObject());
+
             while ( ai.moreWithEOO() ) {
                 BSONElement z = ai.next();
-                if ( valuesMatch( z, toMatch, compareOp, bm) ) {
-                    return 1;
+                
+                if ( compareOp == BSONObj::opELEM_MATCH ){
+                    // SERVER-377
+                    if ( z.type() == Object && bm.subMatcher->matches( z.embeddedObject() ) )
+                        return 1;
                 }
+                else {
+                    if ( valuesMatch( z, toMatch, compareOp, bm) ) {
+                        return 1;
+                    }
+                }
+
             }
-            if ( compareOp == BSONObj::Equality && e.woCompare( toMatch ) == 0 )
+            
+            if ( compareOp == BSONObj::Equality && e.woCompare( toMatch ) == 0 ){
+                // match an entire array to itself
                 return 1;
+            }
+            
         }
         else if ( e.eoo() ) {
             // 0 indicates "missing element"
@@ -520,7 +562,7 @@ namespace mongo {
         
         if ( where ) {
             if ( where->func == 0 ) {
-                uassert("$where compile error", false);
+                uassert( 10070 , "$where compile error", false);
                 return false; // didn't compile
             }
             
@@ -537,10 +579,10 @@ namespace mongo {
                 stringstream ss;
                 ss << "error on invocation of $where function:\n" 
                    << where->scope->getError();
-                uassert(ss.str(), false);
+                uassert( 10071 , ss.str(), false);
                 return false;
             } else if ( err != 0 ) { // ! INVOKE_SUCCESS
-                uassert("unknown error in invocation of $where function", false);
+                uassert( 10072 , "unknown error in invocation of $where function", false);
                 return false;                
             }
             return where->scope->getBoolean( "return" ) != 0;
@@ -609,7 +651,7 @@ namespace mongo {
             int ret = 0;
             
             pcre_config( PCRE_CONFIG_UTF8 , &ret );
-            massert( "pcre not compiled with utf8 support" , ret );
+            massert( 10342 ,  "pcre not compiled with utf8 support" , ret );
 
             pcrecpp::RE re1(")({a}h.*o");
             pcrecpp::RE re("h.llo");

@@ -40,24 +40,83 @@ namespace mongo {
        could be slightly larger.
     */
     const int MaxBSONObjectSize = 4 * 1024 * 1024;
+    
+    /**
+     * class to hold path + dbname -> Database
+     * might be able to optimizer further
+     */
+    class DatabaseHolder {
+    public:
+        DatabaseHolder() : _size(0){
+        }
 
-    // tempish...move to TLS or pass all the way down as a parm
-    extern map<string,Database*> databases;
-    extern bool master;
+        Database * get( const string& ns , const string& path ){
+            dbMutex.assertAtLeastReadLocked();
+            map<string,Database*>& m = _paths[path];
+            
+            string db = _todb( ns );
 
-    /* sometimes we deal with databases with the same name in different directories - thus this */
-    inline string makeDbKeyStr( const char *ns, const string& path ) {
-        char cl[256];
-        nsToClient(ns, cl);
-        return string( cl ) + ":" + path;
-    }
+            map<string,Database*>::iterator it = m.find(db);
+            if ( it != m.end() ) 
+                return it->second;
+            return 0;
+        }
+        
+        void put( const string& ns , const string& path , Database * db ){
+            dbMutex.assertWriteLocked();
+            map<string,Database*>& m = _paths[path];
+            Database*& d = m[_todb(ns)];
+            if ( ! d )
+                _size++;
+            d = db;
+        }
+        
+        void erase( const string& ns , const string& path ){
+            dbMutex.assertWriteLocked();
+            map<string,Database*>& m = _paths[path];
+            _size -= m.erase( _todb( ns ) );
+        }
+
+        bool closeAll( const string& path , BSONObjBuilder& result );
+
+        int size(){
+            return _size;
+        }
+        
+        /**
+         * gets all unique db names, ignoring paths
+         */
+        void getAllShortNames( set<string>& all ) const{
+            dbMutex.assertAtLeastReadLocked();
+            for ( map<string, map<string,Database*> >::const_iterator i=_paths.begin(); i!=_paths.end(); i++ ){
+                map<string,Database*> m = i->second;
+                for( map<string,Database*>::const_iterator j=m.begin(); j!=m.end(); j++ ){
+                    all.insert( j->first );
+                }
+            }
+        }
+        
+    private:
+        
+        string _todb( const string& ns ){
+            size_t i = ns.find( '.' );
+            if ( i == string::npos )
+                return ns;
+            return ns.substr( 0 , i );
+        }
+        
+        map<string, map<string,Database*> > _paths;
+        int _size;
+        
+    };
+
+    extern DatabaseHolder dbHolder;
 
     inline void resetClient(const char *ns, const string& path=dbpath) {
         dbMutex.assertAtLeastReadLocked();
-        string key = makeDbKeyStr( ns, path );
-        map<string,Database*>::iterator it = databases.find(key);
-        if ( it != databases.end() ) {
-            cc().setns(ns, it->second);
+        Database * d = dbHolder.get( ns , path );
+        if ( d ){
+            cc().setns(ns, d);
             return;
         }
         assert(false);
@@ -73,49 +132,35 @@ namespace mongo {
 
         dbMutex.assertAtLeastReadLocked();
 
-        cc().top.clientStart( ns );
+        Client& c = cc();
+        c.top.clientStart( ns );
 
-        string key = makeDbKeyStr( ns, path );
-        map<string,Database*>::iterator it = databases.find(key);
-        if ( it != databases.end() ) {
-            cc().setns(ns, it->second);
+        Database * db = dbHolder.get( ns , path );
+        if ( db ){
+            c.setns(ns, db );
             return false;
         }
 
         if( lock )
             lock->releaseAndWriteLock();
 
-        // when master for replication, we advertise all the db's, and that
-        // looks like a 'first operation'. so that breaks this log message's
-        // meaningfulness.  instead of fixing (which would be better), we just
-        // stop showing for now.
-        // 2008-12-22 We now open every database on startup, so this log is
-        // no longer helpful.  Commenting.
-        //    if( !master )
-        //        log() << "first operation for database " << key << endl;
-
         assertInWriteLock();
-
+        
         char cl[256];
-        nsToClient(ns, cl);
+        nsToDatabase(ns, cl);
         bool justCreated;
         Database *newdb = new Database(cl, justCreated, path);
-        databases[key] = newdb;
-        //newdb->finishInit();
-        cc().setns(ns, newdb);
+        dbHolder.put(ns,path,newdb);
+        c.setns(ns, newdb);
+
+        newdb->finishInit();
 
         return justCreated;
     }
 
-// shared functionality for removing references to a database from this program instance
-// does not delete the files on disk
+    // shared functionality for removing references to a database from this program instance
+    // does not delete the files on disk
     void closeDatabase( const char *cl, const string& path = dbpath );
-
-    /* remove database from the databases map */
-    inline void eraseDatabase( const char *ns, const string& path=dbpath ) {
-        string key = makeDbKeyStr( ns, path );
-        databases.erase( key );
-    }
 
     inline bool clientIsEmpty() {
         return !cc().database()->namespaceIndex.allocated();
@@ -136,11 +181,11 @@ namespace mongo {
             locktype = dbMutex.getState();
             assert( locktype );
             if ( locktype > 0 ) {
-				massert("can't temprelease nested write lock", locktype == 1);
+				massert( 10298 , "can't temprelease nested write lock", locktype == 1);
                 dbMutex.unlock();
 			}
             else {
-				massert("can't temprelease nested read lock", locktype == -1);
+				massert( 10299 , "can't temprelease nested read lock", locktype == -1);
                 dbMutex.unlock_shared();
 			}
         }
@@ -179,7 +224,10 @@ namespace mongo {
         
     };
 
+    extern TicketHolder connTicketHolder;
+
+
 } // namespace mongo
 
-#include "dbinfo.h"
+//#include "dbinfo.h"
 #include "concurrency.h"

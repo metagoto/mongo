@@ -117,9 +117,9 @@ namespace mongo {
     public:
         // caller locks
         void doLockedStuff(stringstream& ss) {
-            ss << "# databases: " << databases.size() << '\n';
+            ss << "# databases: " << dbHolder.size() << '\n';
             if ( cc().database() ) {
-                ss << "curclient: " << cc().database()->name;
+                ss << "curclient: " << cc().database()->name; // TODO: isn't this useless?
                 ss << '\n';
             }
             ss << bold(ClientCursor::byLocSize()>10000) << "Cursors byLoc.size(): " << ClientCursor::byLocSize() << bold() << '\n';
@@ -486,8 +486,8 @@ namespace mongo {
         DbWebServer mini;
         int p = cmdLine.port + 1000;
         if ( mini.init(bind_ip, p) ) {
-            registerListenerSocket( mini.socket() );
-            log() << "web admin interface listening on port " << p << '\n';
+            ListeningSockets::get()->add( mini.socket() );
+            log() << "web admin interface listening on port " << p << endl;
             mini.run();
         }
         else { 

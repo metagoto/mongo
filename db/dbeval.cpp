@@ -39,7 +39,7 @@ namespace mongo {
 
     bool dbEval(const char *ns, BSONObj& cmd, BSONObjBuilder& result, string& errmsg) {
         BSONElement e = cmd.firstElement();
-        uassert( "eval needs Code" , e.type() == Code || e.type() == CodeWScope || e.type() == String );
+        uassert( 10046 ,  "eval needs Code" , e.type() == Code || e.type() == CodeWScope || e.type() == String );
 
         const char *code = 0;
         switch ( e.type() ) {
@@ -88,7 +88,7 @@ namespace mongo {
             Timer t;
             res = s->invoke(f,args, cmdLine.quota ? 10 * 60 * 1000 : 0 );
             int m = t.millis();
-            if ( m > 100 ) {
+            if ( m > cmdLine.slowMS ) {
                 out() << "dbeval slow, time: " << dec << m << "ms " << ns << endl;
                 if ( m >= 1000 ) log() << code << endl;
                 else OCCASIONALLY log() << code << endl;

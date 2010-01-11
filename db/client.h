@@ -34,6 +34,7 @@ namespace mongo {
     class AuthenticationInfo;
     class Database;
     class CurOp;
+    class Command;
 
     class Client : boost::noncopyable { 
     public:
@@ -128,7 +129,7 @@ namespace mongo {
             int s = dbMutex.getState();
             if( s != -1 ) {
                 log() << "error: releaseAndWriteLock() s == " << s << endl;
-                msgasserted( "releaseAndWriteLock: unlock_shared failed, probably recursive" );
+                msgasserted( 12600, "releaseAndWriteLock: unlock_shared failed, probably recursive" );
             }
 #endif
 
