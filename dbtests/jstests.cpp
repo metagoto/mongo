@@ -515,6 +515,37 @@ namespace JSTests {
         
     };
     
+    class NumberLong {
+    public:
+        void run() {
+            Scope * s = globalScriptEngine->newScope();
+            s->localConnect( "blah" );
+            BSONObjBuilder b;
+            long long val = (long long)( 0xbabadeadbeefbaddULL );
+            b.append( "a", val );
+            BSONObj in = b.obj();
+            s->setObject( "a", in );
+            BSONObj out = s->getObject( "a" );
+            ASSERT_EQUALS( mongo::NumberLong, out.firstElement().type() );
+            
+            ASSERT( s->exec( "b = {b:a.a}", "foo", false, true, false ) );
+            out = s->getObject( "b" );
+            ASSERT_EQUALS( mongo::NumberLong, out.firstElement().type() );
+            ASSERT_EQUALS( val, out.firstElement().numberLong() );
+            
+            ASSERT( s->exec( "c = {c:a.a.toString()}", "foo", false, true, false ) );
+            out = s->getObject( "c" );
+            stringstream ss;
+            ss << val;
+            ASSERT_EQUALS( ss.str(), out.firstElement().valuestr() );
+
+            ASSERT( s->exec( "d = {d:a.a.toNumber()}", "foo", false, true, false ) );
+            out = s->getObject( "d" );
+            ASSERT_EQUALS( NumberDouble, out.firstElement().type() );
+            ASSERT_EQUALS( double( val ), out.firstElement().number() );
+        }
+    };
+    
     class WeirdObjects {
     public:
 
@@ -690,7 +721,7 @@ namespace JSTests {
             Scope * s = globalScriptEngine->newScope();
             s->localConnect( "asd" );
             const char * foo = "asdas\0asdasd";
-
+            const char * base64 = "YXNkYXMAYXNkYXNk";
             
             BSONObj in;
             {
@@ -706,13 +737,30 @@ namespace JSTests {
             
             BSONObj out = s->getObject( "y" );
             ASSERT_EQUALS( BinData , out["c"].type() );
-            //blah( "in " , in["b"] );
-            //blah( "out" , out["c"] );
+//            pp( "in " , in["b"] );
+//            pp( "out" , out["c"] );
             ASSERT_EQUALS( 0 , in["b"].woCompare( out["c"] , false ) );
 
             // check that BinData js class is utilized
-            s->invokeSafe( "q = tojson( x.b );", BSONObj() );
-            ASSERT_EQUALS( "BinData", s->getString( "q" ).substr( 0, 7 ) );
+            s->invokeSafe( "q = x.b.toString();", BSONObj() );
+            stringstream expected;
+            expected << "BinData( type: " << ByteArray << ", base64: \"" << base64 << "\" )";
+            ASSERT_EQUALS( expected.str(), s->getString( "q" ) );
+            
+            stringstream scriptBuilder;
+            scriptBuilder << "z = { c : new BinData( " << ByteArray << ", \"" << base64 << "\" ) };";
+            string script = scriptBuilder.str();
+            s->invokeSafe( script.c_str(), BSONObj() );
+            out = s->getObject( "z" );
+//            pp( "out" , out["c"] );
+            ASSERT_EQUALS( 0 , in["b"].woCompare( out["c"] , false ) );            
+
+            s->invokeSafe( "a = { f: new BinData( 128, \"\" ) };", BSONObj() );
+            out = s->getObject( "a" );
+            int len = -1;
+            out[ "f" ].binData( len );
+            ASSERT_EQUALS( 0, len );
+            ASSERT_EQUALS( 128, out[ "f" ].binDataType() );
             
             delete s;
         }
@@ -752,6 +800,7 @@ namespace JSTests {
             add< OtherJSTypes >();
             add< SpecialDBTypes >();
             add< TypeConservation >();
+            add< NumberLong >();
 
             add< WeirdObjects >();
             add< Utf8Check >();

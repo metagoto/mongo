@@ -88,5 +88,12 @@ namespace mongo {
     }
 
     BSONObj CurOp::_tooBig = fromjson("{\"$msg\":\"query not recording (too large)\"}");
-    WrappingInt CurOp::_nextOpNum;
+    AtomicUInt CurOp::_nextOpNum;
+    
+    Client::Context::Context( string ns , Database * db )
+        : _client( currentClient.get() ) {
+        assert( db && db->isOk() );
+        _client->setns( ns.c_str() , db );
+    }
+
 }

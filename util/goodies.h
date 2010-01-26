@@ -24,7 +24,7 @@
 
 namespace mongo {
 
-#if !defined(_WIN32) && !defined(NOEXECINFO)
+#if !defined(_WIN32) && !defined(NOEXECINFO) && !defined(__freebsd__)
 
 } // namespace mongo
 
@@ -120,36 +120,11 @@ namespace mongo {
             x = 0;
         }
         WrappingInt(unsigned z) : x(z) { }
-        volatile unsigned x;
+        unsigned x;
         operator unsigned() const {
             return x;
         }
 
-        // returns original value (like x++)
-        WrappingInt atomicIncrement(){
-#if defined(_WIN32)
-            // InterlockedIncrement returns the new value
-            return InterlockedIncrement((volatile long*)&x)-1; //long is 32bits in Win64
-#elif defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4)
-            // this is in GCC >= 4.1
-            return __sync_fetch_and_add(&x, 1);
-#elif defined(__GNUC__)  && (defined(__i386__) || defined(__x86_64__))
-            // from boost 1.39 interprocess/detail/atomic.hpp
-            int r;
-            int val = 1;
-            asm volatile
-            (
-               "lock\n\t"
-               "xadd %1, %0":
-               "+m"( x ), "=r"( r ): // outputs (%0, %1)
-               "1"( val ): // inputs (%2 == %1)
-               "memory", "cc" // clobbers
-            );
-            return r;
-#else
-#  error "unsupported compiler or platform"
-#endif
-        }
 
         static int diff(unsigned a, unsigned b) {
             return a-b;
@@ -184,6 +159,7 @@ namespace mongo {
 #define localtime _localtime_not_threadsafe_
 #define ctime _ctime_is_not_threadsafe_
 
+#if defined(_WIN32) || defined(__sunos__)
     inline void sleepsecs(int s) {
         boost::xtime xt;
         boost::xtime_get(&xt, boost::TIME_UTC);
@@ -212,6 +188,28 @@ namespace mongo {
         }        
         boost::thread::sleep(xt);
     }
+#else
+    inline void sleepsecs(int s) {
+        struct timespec t;
+        t.tv_sec = s;
+        t.tv_nsec = 0;
+        if ( nanosleep( &t , 0 ) ){
+            cout << "nanosleep failed" << endl;
+        }
+    }
+    inline void sleepmicros(int s) {
+        struct timespec t;
+        t.tv_sec = (int)(s / 1000000);
+        t.tv_nsec = s % 1000000;
+        if ( nanosleep( &t , 0 ) ){
+            cout << "nanosleep failed" << endl;
+        }
+    }
+    inline void sleepmillis(int s) {
+        sleepmicros( s * 1000 );
+    }
+#endif
+
 // note this wraps
     inline int tdiff(unsigned told, unsigned tnew) {
         return WrappingInt::diff(tnew, told);

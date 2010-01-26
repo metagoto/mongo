@@ -47,11 +47,43 @@ namespace mongo {
     }
     
     boost::filesystem::path NamespaceIndex::path() const {
-        return boost::filesystem::path( dir_ ) / ( database_ + ".ns" );
+        boost::filesystem::path ret( dir_ );
+        if ( directoryperdb )
+            ret /= database_;
+        ret /= ( database_ + ".ns" );
+        return ret;
     }
 
+    void NamespaceIndex::maybeMkdir() const {
+        if ( !directoryperdb )
+            return;
+        boost::filesystem::path dir( dir_ );
+        dir /= database_;
+        if ( !boost::filesystem::exists( dir ) )
+            BOOST_CHECK_EXCEPTION( boost::filesystem::create_directory( dir ) );
+    }
+    
 	int lenForNewNsFiles = 16 * 1024 * 1024;
     
+    void NamespaceDetails::onLoad(const Namespace& k) { 
+        if( k.isExtra() ) { 
+            /* overflow storage for indexes - so don't treat as a NamespaceDetails object. */
+            return;
+        }
+
+        assertInWriteLock();
+        if( backgroundIndexBuildInProgress ) { 
+            log() << "backgroundIndexBuildInProgress was " << backgroundIndexBuildInProgress << " for " << k << ", indicating an abnormal db shutdown" << endl;
+            backgroundIndexBuildInProgress = 0;
+        }
+    }
+
+    static void callback(const Namespace& k, NamespaceDetails& v) { 
+        v.onLoad(k);
+    }
+
+    bool checkNsFilesOnLoad = true;
+
     void NamespaceIndex::init() {
         if ( ht )
             return;
@@ -82,6 +114,7 @@ namespace mongo {
 		else {
 			// use lenForNewNsFiles, we are making a new database
 			massert( 10343 ,  "bad lenForNewNsFiles", lenForNewNsFiles >= 1024*1024 );
+            maybeMkdir();
 			long l = lenForNewNsFiles;
 			p = f.map(pathString.c_str(), l);
             if( p ) { 
@@ -95,6 +128,8 @@ namespace mongo {
             dbexit( EXIT_FS );
         }
         ht = new HashTable<Namespace,NamespaceDetails>(p, len, "namespace index");
+        if( checkNsFilesOnLoad )
+            ht->iterAll(callback);
     }
 
     void NamespaceDetails::addDeletedRec(DeletedRecord *d, DiskLoc dloc) {
@@ -570,6 +605,7 @@ namespace mongo {
     void NamespaceDetailsTransient::reset() {
         clearQueryCache();
         _keysComputed = false;
+        _indexSpecs.clear();
     }
     
 /*    NamespaceDetailsTransient& NamespaceDetailsTransient::get(const char *ns) {
@@ -594,6 +630,8 @@ namespace mongo {
         _keysComputed = true;
         _indexKeys.clear();
         NamespaceDetails *d = nsdetails(_ns.c_str());
+        if ( ! d )
+            return;
         NamespaceDetails::IndexIterator i = d->ii();
         while( i.more() )
             i.next().keyPattern().getFieldNames(_indexKeys);

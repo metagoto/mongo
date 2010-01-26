@@ -873,7 +873,7 @@ namespace mongo {
             return;
         }
 
-        bool empty = clientIsEmpty();
+        bool empty = cc().database()->isEmpty();
         bool incompleteClone = incompleteCloneDbs.count( clientName ) != 0;
 
         log( 6 ) << "ns: " << ns << ", justCreated: " << justCreated << ", empty: " << empty << ", incompleteClone: " << incompleteClone << endl;
@@ -1292,7 +1292,7 @@ namespace mongo {
 		BSONObj user;
 		{
 			dblock lk;
-			DBContext ctxt("local.");
+			Client::Context ctxt("local.");
 			if( !Helpers::findOne("local.system.users", userReplQuery, user) ) { 
 				// try the first user is local
 				if( !Helpers::getSingleton("local.system.users", user) ) {
@@ -1348,12 +1348,10 @@ namespace mongo {
         }
 
         if ( !connect() ) {
+			log() << "repl:   can't connect to sync source" << endl;
             if ( replPair && paired ) {
                 assert( startsWith(hostName.c_str(), replPair->remoteHost.c_str()) );
                 replPair->arbitrate();
-            }
-            {
-                ReplInfo r("can't connect to sync source");
             }
             return false;            
         }
@@ -1428,7 +1426,7 @@ namespace mongo {
 
         DEV assertInWriteLock();
 
-        DBContext context;
+        Client::Context context;
 
         /* we jump through a bunch of hoops here to avoid copying the obj buffer twice --
            instead we do a single copy to the destination position in the memory mapped file.
@@ -1563,7 +1561,7 @@ namespace mongo {
                     if ( !autoresync || !ReplSource::throttledForceResyncDead( "auto" ) )
                         break;
                 }
-                assert( syncing == 0 );
+                assert( syncing == 0 ); // i.e., there is only one sync thread running. we will want to change/fix this.
                 syncing++;
             }
             try {

@@ -23,11 +23,17 @@
 
 namespace mongo {
 
-    /* Used for modifiers such as $inc, $set, ... */
+    class ModState;
+    class ModSetState;
+
+    /* Used for modifiers such as $inc, $set, $push, ... 
+     * stores the info about a single operation
+     * once created should never be modified
+     */
     struct Mod {
         // See opFromStr below
-        //        0    1    2     3         4     5          6    7      8       9       10
-        enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP, UNSET, BITAND, BITOR , BIT  } op;
+        //        0    1    2     3         4     5          6    7      8       9       10    11
+        enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP, UNSET, BITAND, BITOR , BIT , ADDTOSET  } op;
         
         static const char* modNames[];
         static unsigned modNamesNum;
@@ -35,20 +41,14 @@ namespace mongo {
         const char *fieldName;
         const char *shortFieldName;
         
-        // kind of lame; fix one day?
-        double *ndouble;
-        int *nint;
-        long long *nlong;
-
         BSONElement elt; // x:5 note: this is the actual element from the updateobj
-        int pushStartSize;
-        boost::shared_ptr<JSMatcher> matcher;
+        boost::shared_ptr<Matcher> matcher;
 
         void init( Op o , BSONElement& e ){
             op = o;
             elt = e;
             if ( op == PULL && e.type() == Object )
-                matcher.reset( new JSMatcher( e.embeddedObject() ) );
+                matcher.reset( new Matcher( e.embeddedObject() ) );
         }
 
         void setFieldName( const char * s ){
@@ -59,36 +59,31 @@ namespace mongo {
             else
                 shortFieldName = fieldName;
         }
-
-        /* [dm] why is this const? (or rather, why was setn const?)  i see why but think maybe clearer if were not.  */
-        void inc(BSONElement& n) const { 
-            uassert( 10160 ,  "$inc value is not a number", n.isNumber() );
-            if( ndouble ) 
-                *ndouble += n.numberDouble();
-            else if( nint )
-                *nint += n.numberInt();
-            else
-                *nlong += n.numberLong();
+        
+        /**
+         * @param in incrememnts the actual value inside in
+         */
+        void incrementMe( BSONElement& in ) const {
+            BSONElementManipulator manip( in );
+            
+            switch ( in.type() ){
+            case NumberDouble:
+                manip.setNumber( elt.numberDouble() + in.numberDouble() );
+                break;
+            case NumberLong:
+                manip.setLong( elt.numberLong() + in.numberLong() );
+                break;
+            case NumberInt:
+                manip.setInt( elt.numberInt() + in.numberInt() );
+                break;
+            default:
+                assert(0);
+            }
+            
         }
-
-        void setElementToOurNumericValue(BSONElement& e) const { 
-            BSONElementManipulator manip(e);
-            if( e.type() == NumberLong )
-                manip.setLong(_getlong());
-            else
-                manip.setNumber(_getn());
-        }
-
-        double _getn() const {
-            if( ndouble ) return *ndouble;
-            if( nint ) return *nint;
-            return (double) *nlong;
-        }
-        long long _getlong() const {
-            if( nlong ) return *nlong; 
-            if( ndouble ) return (long long) *ndouble;
-            return *nint;
-        }
+        
+        void appendIncremented( BSONObjBuilder& bb , const BSONElement& in, ModState& ms ) const;
+        
         bool operator<( const Mod &other ) const {
             return strcmp( fieldName, other.fieldName ) < 0;
         }
@@ -120,38 +115,34 @@ namespace mongo {
             return false;
         }
         
-        void apply( BSONObjBuilder& b , BSONElement in );
+        void apply( BSONObjBuilder& b , BSONElement in , ModState& ms ) const;
         
         /**
          * @return true iff toMatch should be removed from the array
          */
         bool _pullElementMatch( BSONElement& toMatch ) const;
 
-        bool needOpLogRewrite() const {
-            switch( op ){
-            case BIT:
-            case BITAND:
-            case BITOR:
-                // TODO: should we convert this to $set?
-                return false;
-            default:
-                return false;
+        void _checkForAppending( const BSONElement& e ) const {
+            if ( e.type() == Object ){
+                // this is a tiny bit slow, but rare and important
+                // only when setting something TO an object, not setting something in an object
+                // and it checks for { $set : { x : { 'a.b' : 1 } } } 
+                // which is feel has been common
+                uassert( 12527 , "not okForStorage" , e.embeddedObject().okForStorage() );
             }
         }
         
-        void appendForOpLog( BSONObjBuilder& b ) const {
-            const char * name = modNames[op];
-            
-            BSONObjBuilder bb( b.subobjStart( name ) );
-            bb.append( elt );
-            bb.done();
-        }
     };
 
-    class ModSet {
+    /**
+     * stores a set of Mods
+     * once created, should never be changed
+     */
+    class ModSet : boost::noncopyable {
         typedef map<string,Mod> ModHolder;
         ModHolder _mods;
-        
+        int _isIndexed;
+
         static void extractFields( map< string, BSONElement > &fields, const BSONElement &top, const string &base );
         
         FieldCompareResult compare( const ModHolder::iterator &m, map< string, BSONElement >::iterator &p, const map< string, BSONElement >::iterator &pEnd ) const {
@@ -168,45 +159,6 @@ namespace mongo {
                 return LEFT_BEFORE;
 
             return compareDottedFieldNames( m->first, p->first.c_str() );
-        }
-
-        void _appendNewFromMods( const string& root , Mod& m , BSONObjBuilder& b , set<string>& onedownseen );
-        
-        void appendNewFromMod( Mod& m , BSONObjBuilder& b ){
-            
-            switch ( m.op ){
-                
-            case Mod::PUSH: { 
-                BSONObjBuilder arr( b.subarrayStart( m.shortFieldName ) );
-                arr.appendAs( m.elt, "0" );
-                arr.done();
-                m.pushStartSize = -1;
-                break;
-            } 
-                
-            case Mod::PUSH_ALL: {
-                b.appendAs( m.elt, m.shortFieldName );
-                m.pushStartSize = -1;
-                break;
-            } 
-                
-            case Mod::UNSET:
-            case Mod::PULL:
-            case Mod::PULL_ALL:
-                // no-op b/c unset/pull of nothing does nothing
-                break;
-                
-            case Mod::INC:
-            case Mod::SET: {
-                b.appendAs( m.elt, m.shortFieldName );
-                break;
-            }
-            default: 
-                stringstream ss;
-                ss << "unknown mod in appendNewFromMod: " << m.op;
-                throw UserException( 9015, ss.str() );
-            }
-         
         }
         
         bool mayAddEmbedded( map< string, BSONElement > &existing, string right ) {
@@ -268,6 +220,14 @@ namespace mongo {
                 }
                 break;
             }
+            case 'a': {
+                if ( fn[2] == 'd' && fn[3] == 'd' ){
+                    // add
+                    if ( fn[4] == 'T' && fn[5] == 'o' && fn[6] == 'S' && fn[7] == 'e' && fn[8] == 't' && fn[9] == 0 )
+                        return Mod::ADDTOSET;
+                    
+                }
+            }
             default: break;
             }
             uassert( 10161 ,  "Invalid modifier specified " + string( fn ), false );
@@ -275,32 +235,26 @@ namespace mongo {
         }
         
     public:
+        
+        ModSet( const BSONObj &from , const set<string>& idxKeys = set<string>() );
 
-        void getMods( const BSONObj &from );
         /**
-           will return if can be done in place, or uassert if there is an error
-           @return whether or not the mods can be done in place
+         * creates a ModSetState suitable for operation on obj
+         * doesn't change or modify this ModSet or any underying Mod
          */
-        bool canApplyInPlaceAndVerify( const BSONObj &obj ) const;
-        void applyModsInPlace( const BSONObj &obj ) const;
-
-        // new recursive version, will replace at some point
-        void createNewFromMods( const string& root , BSONObjBuilder& b , const BSONObj &obj );
-
-        BSONObj createNewFromMods( const BSONObj &obj );
-
+        auto_ptr<ModSetState> prepare( const BSONObj& obj ) const;
+        
+        /**
+         * given a query pattern, builds an object suitable for an upsert
+         * will take the query spec and combine all $ operators
+         */
         BSONObj createNewFromQuery( const BSONObj& query );
 
         /**
          *
          */
-        int isIndexed( const set<string>& idxKeys ) const {
-            int numIndexes = 0;
-            for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ ){
-                if ( i->second.isIndexed( idxKeys ) )
-                    numIndexes++;
-            }
-            return numIndexes;
+        int isIndexed() const {
+            return _isIndexed;
         }
 
         unsigned size() const { return _mods.size(); }
@@ -330,10 +284,174 @@ namespace mongo {
             
         }
         
+    };
+
+    /**
+     * stores any information about a single Mod operating on a single Object
+     */
+    class ModState {
+    public:
+        const Mod * m;
+        BSONElement old;
+        
+        const char * fixedName;
+        BSONElement * fixed;
+        int pushStartSize;
+        
+        BSONType incType;
+        int incint;
+        double incdouble;
+        long long inclong;
+        
+        ModState(){
+            fixedName = 0;
+            fixed = 0;
+            pushStartSize = -1;
+            incType = EOO;
+        }
+           
+        Mod::Op op() const {
+            return m->op;
+        }
+
+        const char * fieldName() const {
+            return m->fieldName;
+        }
+        
+        bool needOpLogRewrite() const {
+            if ( fixed || incType )
+                return true;
+            
+            switch( op() ){
+            case Mod::BIT:
+            case Mod::BITAND:
+            case Mod::BITOR:
+                // TODO: should we convert this to $set?
+                return false;
+            default:
+                return false;
+            }
+        }
+        
+        void appendForOpLog( BSONObjBuilder& b ) const {
+            if ( incType ){
+                BSONObjBuilder bb( b.subobjStart( "$set" ) );
+                appendIncValue( bb );
+                bb.done();
+                return;
+            }
+            
+            const char * name = fixedName ? fixedName : Mod::modNames[op()];
+            
+            BSONObjBuilder bb( b.subobjStart( name ) );
+            if ( fixed )
+                bb.append( *fixed );
+            else
+                bb.append( m->elt );
+            bb.done();
+        }
+
+        void apply( BSONObjBuilder& b , BSONElement in ){
+            m->apply( b , in , *this );
+        }
+        
+        void appendIncValue( BSONObjBuilder& b ) const {
+            switch ( incType ){
+            case NumberDouble:
+                b.append( m->shortFieldName , incdouble ); break;
+            case NumberLong:
+                b.append( m->shortFieldName , inclong ); break;
+            case NumberInt:
+                b.append( m->shortFieldName , incint ); break;
+            default:
+                assert(0);
+            }
+        }
+    };
+    
+    /**
+     * this is used to hold state, meta data while applying a ModSet to a BSONObj
+     * the goal is to make ModSet const so its re-usable
+     */
+    class ModSetState : boost::noncopyable {
+        typedef map<string,ModState> ModStateHolder;
+        const BSONObj& _obj;
+        ModStateHolder _mods;
+        bool _inPlacePossible;
+        
+        ModSetState( const BSONObj& obj ) 
+            : _obj( obj ) , _inPlacePossible(true){
+        }
+        
+        /**
+         * @return if in place is still possible
+         */
+        bool amIInPlacePossible( bool inPlacePossible ){
+            if ( ! inPlacePossible )
+                _inPlacePossible = false;
+            return _inPlacePossible;
+        }
+
+        
+        void createNewFromMods( const string& root , BSONObjBuilder& b , const BSONObj &obj );
+
+        void _appendNewFromMods( const string& root , ModState& m , BSONObjBuilder& b , set<string>& onedownseen );
+        
+        void appendNewFromMod( ModState& ms , BSONObjBuilder& b ){
+            //const Mod& m = *(ms.m); // HACK
+            Mod& m = *((Mod*)(ms.m)); // HACK
+                
+            switch ( m.op ){
+                    
+            case Mod::PUSH: { 
+                BSONObjBuilder arr( b.subarrayStart( m.shortFieldName ) );
+                arr.appendAs( m.elt, "0" );
+                arr.done();
+                break;
+            } 
+                
+            case Mod::PUSH_ALL: {
+                b.appendAs( m.elt, m.shortFieldName );
+                break;
+            } 
+                
+            case Mod::UNSET:
+            case Mod::PULL:
+            case Mod::PULL_ALL:
+                // no-op b/c unset/pull of nothing does nothing
+                break;
+                
+            case Mod::INC:
+            case Mod::SET: {
+                m._checkForAppending( m.elt );
+                b.appendAs( m.elt, m.shortFieldName );
+                break;
+            }
+            default: 
+                stringstream ss;
+                ss << "unknown mod in appendNewFromMod: " << m.op;
+                throw UserException( 9015, ss.str() );
+            }
+         
+        }
+
+    public:
+        
+        bool canApplyInPlace() const {
+            return _inPlacePossible;
+        }
+        
+        /**
+         * modified underlying _obj
+         */
+        void applyModsInPlace();
+
+        BSONObj createNewFromMods();
+
         // re-writing for oplog
 
         bool needOpLogRewrite() const {
-            for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
+            for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
                 if ( i->second.needOpLogRewrite() )
                     return true;
             return false;            
@@ -341,31 +459,33 @@ namespace mongo {
         
         BSONObj getOpLogRewrite() const {
             BSONObjBuilder b;
-            for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
+            for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
                 i->second.appendForOpLog( b );
             return b.obj();
         }
 
         bool haveArrayDepMod() const {
-            for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
-                if ( i->second.arrayDep() )
+            for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ )
+                if ( i->second.m->arrayDep() )
                     return true;
             return false;
         }
 
         void appendSizeSpecForArrayDepMods( BSONObjBuilder &b ) const {
-            for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ ) {
-                const Mod& m = i->second;
-                if ( m.arrayDep() ){
+            for ( ModStateHolder::const_iterator i = _mods.begin(); i != _mods.end(); i++ ) {
+                const ModState& m = i->second;
+                if ( m.m->arrayDep() ){
                     if ( m.pushStartSize == -1 )
-                        b.appendNull( m.fieldName );
+                        b.appendNull( m.fieldName() );
                     else
-                        b << m.fieldName << BSON( "$size" << m.pushStartSize );
+                        b << m.fieldName() << BSON( "$size" << m.pushStartSize );
                 }
             }
         }
+
+
+        friend class ModSet;
     };
     
-
 }
 

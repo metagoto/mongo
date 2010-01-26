@@ -20,22 +20,22 @@
 
 #include "cmdline.h"
 
-/* Database represents a database database
-   Each database database has its own set of files -- dbname.ns, dbname.0, dbname.1, ...
-*/
-
 namespace mongo {
 
+
+    /**
+     * Database represents a database database
+     * Each database database has its own set of files -- dbname.ns, dbname.0, dbname.1, ...
+     * NOT memory mapped
+    */
     class Database {
     public:
         static bool _openAllFiles;
-
-        Database(const char *nm, bool& newDb, const string& _path = dbpath) :
-        name(nm),
-        path(_path),
-        namespaceIndex( path, name )
-        {
-            {
+        
+        Database(const char *nm, bool& newDb, const string& _path = dbpath)
+            : name(nm), path(_path), namespaceIndex( path, name ) {
+            
+            { // check db name is valid
                 int L = strlen(nm);
                 uassert( 10028 ,  "db name is empty", L > 0 );
                 uassert( 10029 ,  "bad db name [1]", *nm != '.' );
@@ -57,21 +57,41 @@ namespace mongo {
 
             }
             
+            magic = 781231;
         }
-
+        
         ~Database() {
+            magic = 0;
             btreeStore->closeFiles(name, path);
             int n = files.size();
             for ( int i = 0; i < n; i++ )
                 delete files[i];
         }
+        
+        /**
+         * tries to make sure that this hasn't been deleted
+         */
+        bool isOk(){
+            return magic == 781231;
+        }
 
-        bool exists(int n) { 
+        bool isEmpty(){
+            return ! namespaceIndex.allocated();
+        }
+
+        boost::filesystem::path fileName( int n ) {
             stringstream ss;
             ss << name << '.' << n;
             boost::filesystem::path fullName;
-            fullName = boost::filesystem::path(path) / ss.str();
-            return boost::filesystem::exists(fullName);
+            fullName = boost::filesystem::path(path);
+            if ( directoryperdb )
+                fullName /= name;
+            fullName /= ss.str();
+            return fullName;
+        }
+        
+        bool exists(int n) { 
+            return boost::filesystem::exists( fileName( n ) );
         }
 
         void openAllFiles() { 
@@ -79,6 +99,12 @@ namespace mongo {
             while( exists(n) ) { 
                 getFile(n);
                 n++;
+            }
+            // If last file is empty, consider it preallocated and make sure it's not mapped
+            // until a write is requested
+            if ( n > 1 && getFile( n - 1 )->getHeader()->isEmpty() ) {
+                delete files[ n - 1 ];
+                files.pop_back();
             }
         }
 
@@ -105,10 +131,7 @@ namespace mongo {
                 p = files[n];
             }
             if ( p == 0 ) {
-                stringstream ss;
-                ss << name << '.' << n;
-                boost::filesystem::path fullName;
-                fullName = boost::filesystem::path(path) / ss.str();
+                boost::filesystem::path fullName = fileName( n );
                 string fullNameString = fullName.string();
                 p = new MongoDataFile(n);
                 int minSize = 0;
@@ -142,7 +165,7 @@ namespace mongo {
         // safe to call this multiple times - the implementation will only preallocate one file
         void preallocateAFile() {
             int n = (int) files.size();
-            getFile( n, 0, true );            
+            getFile( n, 0, true );
         }
 
         MongoDataFile* suitableFile( int sizeNeeded ) {
@@ -175,14 +198,14 @@ namespace mongo {
         bool setProfilingLevel( int newLevel , string& errmsg );
 
         void finishInit();
-
+        
         vector<MongoDataFile*> files;
         string name; // "alleyinsider"
         string path;
         NamespaceIndex namespaceIndex;
         int profile; // 0=off.
         string profileName; // "alleyinsider.system.profile"
-
+        int magic; // used for making sure the object is still loaded in memory 
     };
 
 } // namespace mongo

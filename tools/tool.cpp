@@ -26,6 +26,7 @@ mongo::Tool::Tool( string name , string defaultDB , string defaultCollection ) :
         ("username,u",po::value<string>(), "username" )
         ("password,p",po::value<string>(), "password" )
         ("dbpath",po::value<string>(), "directly access mongod data files in this path, instead of connecting to a mongod instance" )
+        ("directoryperdb", "if dbpath specified, each db is in a separate directory" )
         ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
         ;
 
@@ -53,6 +54,8 @@ void mongo::Tool::printHelp(ostream &out) {
 }
 
 int mongo::Tool::main( int argc , char ** argv ){
+    cmdLine.prealloc = false;
+
     boost::filesystem::path::default_name_check( boost::filesystem::no_check );
 
     _name = argv[0];
@@ -73,8 +76,8 @@ int mongo::Tool::main( int argc , char ** argv ){
 
         po::notify( _params );
     } catch (po::error &e) {
-        cout << "ERROR: " << e.what() << endl << endl;
-        printHelp(cout);
+        cerr << "ERROR: " << e.what() << endl << endl;
+        printHelp(cerr);
         return EXIT_BADOPTIONS;
     }
 
@@ -123,6 +126,9 @@ int mongo::Tool::main( int argc , char ** argv ){
         cerr << "connected to: " << _host << endl;
     }
     else {
+        if ( _params.count( "directoryperdb" ) ) {
+            directoryperdb = true;
+        }
         Client::initThread("tools");
         _conn = new DBDirectClient();
         _host = "DIRECT";

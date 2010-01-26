@@ -509,7 +509,7 @@ namespace mongo {
         BinDataType binDataType() const {
             // BinData: <int len> <byte subtype> <byte[len] data>
             assert( type() == BinData );
-            char c = (value() + 4)[0];
+            unsigned char c = (value() + 4)[0];
             return (BinDataType)c;
         }
 
@@ -518,12 +518,6 @@ namespace mongo {
             assert(type() == RegEx);
             return value();
         }
-
-        /** returns a string that when used as a matcher, would match a super set of regex() 
-			returns "" for complex regular expressions
-			used to optimize queries in some simple regex cases that start with '^'
-		 */
-        string simpleRegex() const;
 
         /** Retrieve the regex flags (options) for a Regex element */
         const char *regexFlags() const {
@@ -706,6 +700,11 @@ namespace mongo {
             if ( ! isValid() ){
                 stringstream ss;
                 ss << "Invalid BSONObj spec size: " << objsize();
+                try {
+                    BSONElement e = firstElement();
+                    ss << " first element:" << e.toString() << " ";
+                }
+                catch ( ... ){}
                 string s = ss.str();
                 massert( 10334 ,  s , 0 );
             }
@@ -857,6 +856,11 @@ namespace mongo {
         }
 
         bool isValid();
+
+        /** @return if the user is a valid user doc
+            criter: isValid() no . or $ field names
+         */
+        bool okForStorage() const;
 
 		/** @return true if object is empty -- i.e.,  {} */
         bool isEmpty() const {
@@ -1341,6 +1345,9 @@ namespace mongo {
             b.append( val );
         }
 
+        /**
+         * @param time - in millis (but stored in seconds)
+         */
         void appendTimestamp( const char *fieldName , unsigned long long time , unsigned int inc ){
             OpTime t( (unsigned) (time / 1000) , inc );
             appendTimestamp( fieldName , t.asDate() );

@@ -36,6 +36,8 @@
 #include "security.h"
 #include "queryoptimizer.h"
 #include "../scripting/engine.h"
+#include "dbstats.h"
+#include "background.h"
 
 namespace mongo {
 
@@ -60,8 +62,9 @@ namespace mongo {
         }
         CmdShutdown() : Command("shutdown") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            cc().shutdown();
             log() << "terminating, shutdown command received" << endl;
-            dbexit( EXIT_CLEAN );
+            dbexit( EXIT_CLEAN ); // this never returns
             return true;
         }
     } cmdShutdown;
@@ -130,9 +133,7 @@ namespace mongo {
         }
         CmdGetLastError() : Command("getlasterror") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            LastError *le = lastError.get();
-            assert( le );
-            le->nPrev--; // we don't count as an operation
+            LastError *le = lastError.disableForCommand();
             if ( le->nPrev != 1 )
                 LastError::noError.appendSelf( result );
             else
@@ -178,9 +179,7 @@ namespace mongo {
         }
         CmdGetPrevError() : Command("getpreverror") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            LastError *le = lastError.get();
-            assert( le );
-            le->nPrev--; // we don't count as an operation
+            LastError *le = lastError.disableForCommand();
             le->appendSelf( result );
             if ( le->valid )
                 result.append( "nPrev", le->nPrev );
@@ -208,9 +207,7 @@ namespace mongo {
                 errmsg = "already in client id mode";
                 return false;
             }
-            LastError *le = lastError.get();
-            assert( le );
-            le->nPrev--;
+            LastError *le = lastError.disableForCommand();
             le->overridenById = true;
             result << "ok" << 1;
             return true;
@@ -327,17 +324,23 @@ namespace mongo {
             }
             
             {
+
+                BSONObjBuilder t( result.subobjStart( "mem" ) );
+                
                 ProcessInfo p;
                 if ( p.supported() ){
-                    BSONObjBuilder t;
                     t.append( "resident" , p.getResidentSize() );
                     t.append( "virtual" , p.getVirtualMemorySize() );
-                    t.append( "mapped" , MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) );
-                    result.append( "mem" , t.obj() );
+                    t.appendBool( "supported" , true );
                 }
                 else {
-                    result.append( "mem" , "not support on this platform" );
+                    result.append( "note" , "not all mem info support on this platform" );
+                    t.appendBool( "supported" , false );
                 }
+                    
+                t.append( "mapped" , MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) );
+
+                t.done();
                     
             }
             
@@ -347,8 +350,16 @@ namespace mongo {
                 bb.append( "available" , connTicketHolder.available() );
                 bb.done();
             }
+            {
+                BSONObjBuilder bb( result.subobjStart( "extra_info" ) );
+                bb.append("note", "fields vary by platform");
+                ProcessInfo p;
+                p.getExtraInfo(bb);
+                bb.done();
+            }
 
-
+            result.append( "opcounters" , globalOpCounters.getObj() );
+            
             return true;
         }
         time_t started;
@@ -442,7 +453,12 @@ namespace mongo {
         }
     } dbc_unittest;
 
-    bool deleteIndexes( NamespaceDetails *d, const char *ns, const char *name, string &errmsg, BSONObjBuilder &anObjBuilder, bool mayDeleteIdIndex ) {
+    void assureSysIndexesEmptied(const char *ns, IndexDetails *exceptForIdIndex);
+    int removeFromSysIndexes(const char *ns, const char *idxName);
+
+    bool dropIndexes( NamespaceDetails *d, const char *ns, const char *name, string &errmsg, BSONObjBuilder &anObjBuilder, bool mayDeleteIdIndex ) {
+
+        BackgroundOperation::assertNoBgOpInProgForNs(ns);
 
         d->aboutToDeleteAnIndex();
 
@@ -470,7 +486,8 @@ namespace mongo {
             }
             /* assuming here that id index is not multikey: */
             d->multiKeyIndexBits = 0;
-            anObjBuilder.append("msg", "all indexes deleted for collection");
+            assureSysIndexesEmptied(ns, idIndex);
+            anObjBuilder.append("msg", "non-_id indexes dropped for collection");
         }
         else {
             // delete just one index
@@ -494,7 +511,11 @@ namespace mongo {
                 for ( int i = x; i < d->nIndexes; i++ )
                     d->idx(i) = d->idx(i+1);
             } else {
-                log() << "deleteIndexes: " << name << " not found" << endl;
+                int n = removeFromSysIndexes(ns, name); // just in case an orphaned listing there - i.e. should have been repaired but wasn't
+                if( n ) { 
+                    log() << "info: removeFromSysIndexes cleaned up " << n << " entries" << endl;
+                }
+                log() << "dropIndexes: " << name << " not found" << endl;
                 errmsg = "index not found";
                 return false;
             }
@@ -595,7 +616,8 @@ namespace mongo {
         }
     } cmdCreate;
 
-    class CmdDeleteIndexes : public Command {
+    /* "dropIndexes" is now the preferred form - "deleteIndexes" deprecated */
+    class CmdDropIndexes : public Command {
     public:
         virtual bool logTheOp() {
             return true;
@@ -604,20 +626,19 @@ namespace mongo {
             return false;
         }
         virtual void help( stringstream& help ) const {
-            help << "delete indexes for a collection";
+            help << "drop indexes for a collection";
         }
-        CmdDeleteIndexes() : Command("deleteIndexes") { }
+        CmdDropIndexes(const char *cmdname = "dropIndexes") : Command(cmdname) { }
         bool run(const char *ns, BSONObj& jsobj, string& errmsg, BSONObjBuilder& anObjBuilder, bool /*fromRepl*/) {
-            /* note: temp implementation.  space not reclaimed! */
             BSONElement e = jsobj.findElement(name.c_str());
             string toDeleteNs = cc().database()->name + '.' + e.valuestr();
             NamespaceDetails *d = nsdetails(toDeleteNs.c_str());
             if ( !cmdLine.quiet )
-                log() << "CMD: deleteIndexes " << toDeleteNs << endl;
+                log() << "CMD: dropIndexes " << toDeleteNs << endl;
             if ( d ) {
                 BSONElement f = jsobj.findElement("index");
                 if ( f.type() == String ) {
-                    return deleteIndexes( d, toDeleteNs.c_str(), f.valuestr(), errmsg, anObjBuilder, false );
+                    return dropIndexes( d, toDeleteNs.c_str(), f.valuestr(), errmsg, anObjBuilder, false );
                 }
                 else {
                     errmsg = "invalid index name spec";
@@ -629,6 +650,10 @@ namespace mongo {
                 return false;
             }
         }
+    } cmdDropIndexes;
+    class CmdDeleteIndexes : public CmdDropIndexes { 
+    public:
+        CmdDeleteIndexes() : CmdDropIndexes("deleteIndexes") { }
     } cmdDeleteIndexes;
 
     class CmdReIndex : public Command {
@@ -644,6 +669,8 @@ namespace mongo {
         }
         CmdReIndex() : Command("reIndex") { }
         bool run(const char *ns, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
+            BackgroundOperation::assertNoBgOpInProgForNs(ns);
+
             static DBDirectClient db;
 
             BSONElement e = jsobj.findElement(name.c_str());
@@ -666,9 +693,9 @@ namespace mongo {
             }
 
 
-            bool ok = deleteIndexes( d, toDeleteNs.c_str(), "*" , errmsg, result, true );
+            bool ok = dropIndexes( d, toDeleteNs.c_str(), "*" , errmsg, result, true );
             if ( ! ok ){
-                errmsg = "deleteIndexes failed";
+                errmsg = "dropIndexes failed";
                 return false;
             }
 
@@ -683,8 +710,6 @@ namespace mongo {
             return true;
         }
     } cmdReIndex;
-
-
 
     class CmdListDatabases : public Command {
     public:
@@ -714,7 +739,7 @@ namespace mongo {
                 boost::intmax_t size = dbSize( i->c_str() );
                 b.append( "sizeOnDisk", (double) size );
                 setClient( i->c_str() );
-                b.appendBool( "empty", clientIsEmpty() );
+                b.appendBool( "empty", cc().database()->isEmpty() );
                 totalSize += size;
                 dbInfos.push_back( b.obj() );
 
@@ -733,7 +758,7 @@ namespace mongo {
                 BSONObjBuilder b;
                 b << "name" << name << "sizeOnDisk" << double( 1 );
                 setClient( name.c_str() );
-                b.appendBool( "empty", clientIsEmpty() );
+                b.appendBool( "empty", cc().database()->isEmpty() );
 
                 dbInfos.push_back( b.obj() );
             }
@@ -744,13 +769,16 @@ namespace mongo {
         }
     } cmdListDatabases;
 
+    /* note an access to a database right after this will open it back up - so this is mainly 
+       for diagnostic purposes. 
+       */
     class CmdCloseAllDatabases : public Command {
     public:
         virtual bool adminOnly() { return true; }
         virtual bool slaveOk() { return false; }
         CmdCloseAllDatabases() : Command( "closeAllDatabases" ) {}
         bool run(const char *ns, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
-            return dbHolder.closeAll( dbpath , result );
+            return dbHolder.closeAll( dbpath , result, false );
         }
     } cmdCloseAllDatabases;
 
@@ -965,6 +993,7 @@ namespace mongo {
         }
     } cmdBuildInfo;
 
+    /* convertToCapped seems to use this */
     class CmdCloneCollectionAsCapped : public Command {
     public:
         CmdCloneCollectionAsCapped() : Command( "cloneCollectionAsCapped" ) {}
@@ -1003,9 +1032,7 @@ namespace mongo {
             CursorId id;
             {
                 auto_ptr< Cursor > c = theDataFileMgr.findAll( fromNs.c_str(), startLoc );
-                ClientCursor *cc = new ClientCursor();
-                cc->c = c;
-                cc->ns = fromNs;
+                ClientCursor *cc = new ClientCursor(c, fromNs.c_str(), true);
                 cc->matcher.reset( new CoveredIndexMatcher( BSONObj(), fromjson( "{$natural:1}" ) ) );
                 id = cc->cursorid;
             }
@@ -1028,6 +1055,11 @@ namespace mongo {
         }
     } cmdCloneCollectionAsCapped;
 
+    /* jan2010: 
+       Converts the given collection to a capped collection w/ the specified size. 
+       This command is not highly used, and is not currently supported with sharded 
+       environments. 
+       */
     class CmdConvertToCapped : public Command {
     public:
         CmdConvertToCapped() : Command( "convertToCapped" ) {}
@@ -1036,6 +1068,8 @@ namespace mongo {
             help << "example: { convertToCapped:<fromCollectionName>, size:<sizeInBytes> }";
         }
         bool run(const char *dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+            BackgroundOperation::assertNoBgOpInProgForDb(dbname);
+
             string from = jsobj.getStringField( "convertToCapped" );
             long long size = (long long)jsobj.getField( "size" ).number();
 
@@ -1345,9 +1379,7 @@ namespace mongo {
             return true;
         }
     } cmdFindAndModify;
-
-    extern map<string,Command*> *commands;
-
+    
     bool commandIsReadOnly(BSONObj& _cmdobj) { 
         BSONObj jsobj;
         {
@@ -1360,12 +1392,9 @@ namespace mongo {
             }
         }
         BSONElement e = jsobj.firstElement();
-        map<string,Command*>::iterator i;
-        if ( e.type() && ( i = commands->find(e.fieldName()) ) != commands->end() ){
-            Command *c = i->second;
-            return c->readOnly();
-        }
-        return false;
+        if ( ! e.type() )
+            return false;
+        return Command::readOnly( e.fieldName() );
     }
 
     /* TODO make these all command objects -- legacy stuff here
@@ -1398,11 +1427,9 @@ namespace mongo {
 
         BSONElement e = jsobj.firstElement();
 
-        map<string,Command*>::iterator i;
-
-        if ( e.type() && ( i = commands->find(e.fieldName()) ) != commands->end() ){
+        Command * c = e.type() ? Command::findCommand( e.fieldName() ) : 0;
+        if ( c ){
             string errmsg;
-            Command *c = i->second;
             AuthenticationInfo *ai = currentClient.get()->ai;
             uassert( 10045 , "unauthorized", ai->isAuthorized(cc().database()->name.c_str()) || !c->requiresAuth());
 

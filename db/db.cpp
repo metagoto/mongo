@@ -58,6 +58,8 @@ namespace mongo {
     extern int diagLogging;
     extern int lenForNewNsFiles;
     extern int lockFile;
+    
+    extern string repairpath;
 
     void setupSignals();
     void closeAllSockets();
@@ -103,42 +105,45 @@ namespace mongo {
         cc().clearns();
     }
 
-    MessagingPort *grab = 0;
+    MessagingPort *connGrab = 0;
     void connThread();
 
     class OurListener : public Listener {
     public:
         OurListener(const string &ip, int p) : Listener(ip, p) { }
         virtual void accepted(MessagingPort *mp) {
-            assert( grab == 0 );
+            assert( connGrab == 0 );
             if ( ! connTicketHolder.tryAcquire() ){
                 log() << "connection refused because too many open connections" << endl;
                 // TODO: would be nice if we notified them...
                 mp->shutdown();
                 return;
             }
-            grab = mp;
+            connGrab = mp;
             try {
                 boost::thread thr(connThread);
-                while ( grab )
+                while ( connGrab )
                     sleepmillis(1);
             }
-            catch ( boost::thread_resource_error& e ){
+            catch ( boost::thread_resource_error& ){
                 log() << "can't create new thread, closing connection" << endl;
                 mp->shutdown();
-                grab = 0;
+                connGrab = 0;
+            }
+            catch ( ... ){
+                log() << "unkonwn exception starting connThread" << endl;
+                mp->shutdown();
+                connGrab = 0;
             }
         }
     };
 
     void webServerThread();
-    void pdfileInit();
 
     void listen(int port) {
         log() << mongodVersion() << endl;
         printGitVersion();
         printSysInfo();
-        pdfileInit();
         //testTheDb();
         log() << "waiting for connections on port " << port << endl;
         OurListener l(bind_ip, port);
@@ -182,8 +187,8 @@ namespace mongo {
         LastError *le = new LastError();
         lastError.reset(le);
 
-        MessagingPort& dbMsgPort = *grab;
-        grab = 0;
+        MessagingPort& dbMsgPort = *connGrab;
+        connGrab = 0;
         Client& c = cc();
 
         try {
@@ -201,6 +206,11 @@ namespace mongo {
                     break;
                 }
 
+                if ( inShutdown() ) {
+                    log() << "got request after shutdown()" << endl;
+                    break;
+                }
+                
                 lastError.startRequest( m , le );
 
                 DbResponse dbresponse;
@@ -322,8 +332,14 @@ namespace mongo {
         return repairDatabase( dbName.c_str(), errmsg );
     }
     
+    extern bool checkNsFilesOnLoad;
+
     void repairDatabases() {
         log(1) << "enter repairDatabases" << endl;
+
+        assert(checkNsFilesOnLoad);
+        checkNsFilesOnLoad = false; // we are mainly just checking the header - don't scan the whole .ns file for every db here.
+
         dblock lk;
         vector< string > dbNames;
         getDatabaseNames( dbNames );
@@ -361,8 +377,11 @@ namespace mongo {
 
         if ( shouldRepairDatabases ){
             log() << "finished checking dbs" << endl;
+            cc().shutdown();
             dbexit( EXIT_CLEAN );
         }
+
+        checkNsFilesOnLoad = true;
     }
 
     void clearTmpFiles() {
@@ -371,7 +390,7 @@ namespace mongo {
                 i != boost::filesystem::directory_iterator(); ++i ) {
             string fileName = boost::filesystem::path(*i).leaf();
             if ( boost::filesystem::is_directory( *i ) &&
-                    fileName.length() > 2 && fileName.substr( 0, 3 ) == "tmp" )
+                fileName.length() && fileName[ 0 ] == '$' )
                 boost::filesystem::remove_all( *i );
         }
     }
@@ -443,10 +462,17 @@ namespace mongo {
 
         show_32_warning();
 
-        stringstream ss;
-        ss << "dbpath (" << dbpath << ") does not exist";
-        massert( 10296 ,  ss.str().c_str(), boost::filesystem::exists( dbpath ) );
-
+        {
+            stringstream ss;
+            ss << "dbpath (" << dbpath << ") does not exist";
+            massert( 10296 ,  ss.str().c_str(), boost::filesystem::exists( dbpath ) );
+        }
+        {
+            stringstream ss;
+            ss << "repairpath (" << repairpath << ") does not exist";
+            massert( 12590 ,  ss.str().c_str(), boost::filesystem::exists( repairpath ) );
+        }
+        
         acquirePathLock();
         remove_all( dbpath + "/_tmp/" );
 
@@ -571,9 +597,11 @@ int main(int argc, char* argv[], char *envp[] )
          "local ip address to bind listener - all local ips bound by default")
         ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
         ("dbpath", po::value<string>()->default_value("/data/db/"), "directory for datafiles")
+        ("directoryperdb", "each database will be stored in a separate directory")
         ("quiet", "quieter output")
         ("logpath", po::value<string>() , "file to send all output to instead of stdout" )
         ("logappend" , "appnd to logpath instead of over-writing" )
+        ("repairpath", po::value<string>() , "root directory for repair files - defaults to dbpath" )
 #ifndef _WIN32
         ("fork" , "fork server process" )
 #endif
@@ -721,6 +749,9 @@ int main(int argc, char* argv[], char *envp[] )
             return 0;
         }
         dbpath = params["dbpath"].as<string>();
+        if ( params.count("directoryperdb")) {
+            directoryperdb = true;
+        }
         if (params.count("quiet")) {
             cmdLine.quiet = true;
         }
@@ -774,6 +805,12 @@ int main(int argc, char* argv[], char *envp[] )
             string lp = params["logpath"].as<string>();
             uassert( 10033 ,  "logpath has to be non-zero" , lp.size() );
             initLogging( lp , params.count( "logappend" ) );
+        }
+        if (params.count("repairpath")) {
+            repairpath = params["repairpath"].as<string>();
+            uassert( 12589, "repairpath has to be non-zero", repairpath.size() );
+        } else {
+            repairpath = dbpath;
         }
         if (params.count("nocursors")) {
             useCursors = false;
@@ -830,6 +867,9 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("slave")) {
             slave = SimpleSlave;
         }
+        if (params.count("autoresync")) {
+            autoresync = true;
+        }
         if (params.count("source")) {
             /* specifies what the source in local.sources should be */
             cmdLine.source = params["source"].as<string>().c_str();
@@ -847,9 +887,6 @@ int main(int argc, char* argv[], char *envp[] )
             }
         } else if (params.count("arbiter")) {
             uasserted(10999,"specifying --arbiter without --pairwith");
-        }
-        if (params.count("autoresync")) {
-            autoresync = true;
         }
         if( params.count("nssize") ) {
             int x = params["nssize"].as<int>();

@@ -72,6 +72,15 @@ namespace mongo {
         throw MsgAssertionException(msgid, msg);
     }
 
+    void streamNotGood( int code , string msg , std::ios& myios ){
+        stringstream ss;
+        // errno might not work on all systems for streams
+        // if it doesn't for a system should deal with here
+        ss << msg << " stream invalie: " << OUTPUT_ERRNO;
+        throw UserException( code , ss.str() );
+    }
+    
+    
     boost::mutex *Assertion::_mutex = new boost::mutex();
 
     string Assertion::toString() {
@@ -101,6 +110,7 @@ namespace mongo {
         
         void start( const string& lp , bool append ){
             uassert( 10268 ,  "LoggingManager already started" , ! _enabled );
+            _append = append;
 
             // test path
             FILE * test = fopen( lp.c_str() , _append ? "a" : "w" );
@@ -111,7 +121,6 @@ namespace mongo {
             }
             
             _path = lp;
-            _append = append;
             _enabled = 1;
             rotate();
         }

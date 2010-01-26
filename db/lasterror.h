@@ -34,6 +34,7 @@ namespace mongo {
         int nPrev;
         bool valid;
         bool overridenById;
+        bool disabled;
         void raiseError(int _code , const char *_msg) {
             reset( true );
             code = _code;
@@ -59,6 +60,7 @@ namespace mongo {
             nObjects = 0;
             nPrev = 1;
             valid = _valid;
+            disabled = false;
         }
         void appendSelf( BSONObjBuilder &b );
         static LastError noError;
@@ -66,9 +68,11 @@ namespace mongo {
 
     extern class LastErrorHolder {
     public:
-        LastErrorHolder() : _id( 0 ){}
+        LastErrorHolder() : _id( 0 ) {}
 
         LastError * get( bool create = false );
+
+        LastError * _get( bool create = false ); // may return a disabled LastError
 
         void reset( LastError * le );
         
@@ -84,6 +88,10 @@ namespace mongo {
         /** when db receives a message/request, call this */
         void startRequest( Message& m , LastError * connectionOwned );
         void startRequest( Message& m );
+        
+        // used to disable lastError reporting while processing a killCursors message
+        // disable causes get() to return 0.
+        LastError *disableForCommand(); // only call once per command invocation!
     private:
         ThreadLocalValue<int> _id;
         boost::thread_specific_ptr<LastError> _tl;
@@ -93,16 +101,18 @@ namespace mongo {
             LastError *lerr;
         };
         static boost::mutex _idsmutex;
-        map<int,Status> _ids;        
+        map<int,Status> _ids;    
     } lastError;
     
     inline void raiseError(int code , const char *msg) {
         LastError *le = lastError.get();
         if ( le == 0 ) {
             DEV log() << "warning: lastError==0 can't report:" << msg << '\n';
-            return;
+        } else if ( le->disabled ) {
+            log() << "lastError disabled, can't report: " << msg << endl;
+        } else {
+            le->raiseError(code, msg);
         }
-        le->raiseError(code, msg);
     }
     
     inline void recordUpdate( bool updatedExisting, int nChanged ) {
