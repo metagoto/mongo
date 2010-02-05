@@ -27,14 +27,14 @@ namespace mongo {
        */
     class IndexSpec {
     public:
-        BSONObj keys;
-        BSONObj meta;
+        BSONObj keyPattern; // e.g., { name : 1 }
+        BSONObj info; // this is the same as IndexDetails::info.obj()
         
         IndexSpec(){
         }
 
         IndexSpec( const BSONObj& k , const BSONObj& m = BSONObj() )
-            : keys(k) , meta(m){
+            : keyPattern(k) , info(m){
             _init();
         }
 
@@ -47,12 +47,11 @@ namespace mongo {
         }
         
         void reset( const DiskLoc& loc ){
-            meta = loc.obj();
-            keys = meta["key"].embeddedObjectUserCheck();
-            if ( keys.objsize() == 0 ) {
-                out() << meta.toString() << endl;
+            info = loc.obj();
+            keyPattern = info["key"].embeddedObjectUserCheck();
+            if ( keyPattern.objsize() == 0 ) {
+                out() << info.toString() << endl;
                 assert(false);
-                
             }
             _init();
         }
@@ -119,6 +118,7 @@ namespace mongo {
 
         /* true if the specified key is in the index */
         bool hasKey(const BSONObj& key);
+        bool wouldCreateDup(const BSONObj& key, DiskLoc self);
 
         // returns name of this index's storage area
         // database.table.$index
@@ -186,15 +186,20 @@ namespace mongo {
         vector<BSONObj*> removed; // these keys were removed as part of the change
         vector<BSONObj*> added;   // these keys were added as part of the change
 
-        void dupCheck(IndexDetails& idx) {
+        /** @curObjLoc - the object we want to add's location.  if it is already in the 
+                         index, that is allowed here (for bg indexing case).
+        */
+        void dupCheck(IndexDetails& idx, DiskLoc curObjLoc) {
             if( added.empty() || !idx.unique() )
                 return;
-            for( vector<BSONObj*>::iterator i = added.begin(); i != added.end(); i++ )
-                uassert( 11001 , "E11001 duplicate key on update", !idx.hasKey(**i));
+            for( vector<BSONObj*>::iterator i = added.begin(); i != added.end(); i++ ) {
+                bool dup = idx.wouldCreateDup(**i, curObjLoc);
+                uassert( 11001 , "E11001 duplicate key on update", !dup);
+            }
         }
     };
 
     class NamespaceDetails;
     void getIndexChanges(vector<IndexChanges>& v, NamespaceDetails& d, BSONObj newObj, BSONObj oldObj);
-    void dupCheck(vector<IndexChanges>& v, NamespaceDetails& d);
+    void dupCheck(vector<IndexChanges>& v, NamespaceDetails& d, DiskLoc curObjLoc);
 } // namespace mongo

@@ -574,9 +574,25 @@ namespace mongo {
 
         /** True if this element may contain subobjects. */
         bool mayEncapsulate() const {
-            return type() == Object ||
-                type() == Array ||
-                type() == CodeWScope;
+            switch ( type() ){
+            case Object:
+            case Array:
+            case CodeWScope:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        /** True if this element can be a BSONObj */
+        bool isABSONObj() const {
+            switch( type() ){
+            case Object:
+            case Array:
+                return true;
+            default:
+                return false;
+            }
         }
 
         Date_t timestampTime() const{
@@ -625,7 +641,7 @@ namespace mongo {
         mutable int fieldNameSize_; // cached value
         int fieldNameSize() const {
             if ( fieldNameSize_ == -1 )
-                fieldNameSize_ = strlen( fieldName() ) + 1;
+                fieldNameSize_ = (int)strlen( fieldName() ) + 1;
             return fieldNameSize_;
         }
         mutable int totalSize; /* caches the computed size */
@@ -773,14 +789,14 @@ namespace mongo {
         /** Get the field of the specified name. eoo() is true on the returned 
             element if not found. 
         */
-        BSONElement getField(const string name) const {
-            return getField( name.c_str() );
-        };
+        BSONElement getField(const char *name) const;
 
         /** Get the field of the specified name. eoo() is true on the returned 
             element if not found. 
         */
-        BSONElement getField(const char *name) const; /* return has eoo() true if no match */
+        BSONElement getField(const string name) const {
+            return getField( name.c_str() );
+        };
 
         /** Get the field of the specified name. eoo() is true on the returned 
             element if not found. 
@@ -907,13 +923,9 @@ namespace mongo {
             return BSONElement(objdata() + 4);
         }
 
-		/** @return element with fieldname "name".  returnvalue.eoo() is true if not found */
-        BSONElement findElement(const char *name) const;
-
-		/** @return element with fieldname "name".  returnvalue.eoo() is true if not found */
-        BSONElement findElement(string name) const {
-            return findElement(name.c_str());
-        }
+		/** use getField() instead. */
+        //BSONElement getField(const char *name) const;
+        //BSONElement getField(string name) const {
 
 		/** @return true if field exists in the object */
         bool hasElement(const char *name) const;
@@ -1193,6 +1205,13 @@ namespace mongo {
             b.append((char) (val?1:0));
         }
 
+        /** Append a boolean element */
+        void append(const char *fieldName, bool val) {
+            b.append((char) Bool);
+            b.append(fieldName);
+            b.append((char) (val?1:0));            
+        }
+        
         /** Append a 32 bit integer element */
         void append(const char *fieldName, int n) {
             b.append((char) NumberInt);
@@ -1219,7 +1238,17 @@ namespace mongo {
             append( fieldName.c_str() , n );
         }
 
-
+        /** appends a number.  if n < max(int)/2 then uses int, otherwise long long */
+        void appendIntOrLL( const string& fieldName , long long n ){
+            long long x = n;
+            if ( x < 0 )
+                x = x * -1;
+            if ( x < ( numeric_limits<int>::max() / 2 ) )
+                append( fieldName.c_str() , (int)n );
+            else
+                append( fieldName.c_str() , n );
+        }
+        
         /** Append a double element */
         BSONObjBuilder& append(const char *fieldName, double n) {
             b.append((char) NumberDouble);
@@ -1456,6 +1485,16 @@ namespace mongo {
             return BSONObj(_done());
         }
 
+        /** Peek at what is in the builder, but leave the builder ready for more appends.
+            The returned object is only valid until the next modification or destruction of the builder.
+            Intended use case: append a field if not already there.
+        */
+        BSONObj asTempObj() {
+            BSONObj temp(_done());
+            b.setlen(b.len()-1); //next append should overwrite the EOO
+            return temp;
+        }
+
         /* assume ownership of the buffer - you must then free it (with free()) */
         char* decouple(int& l) {
             char *x = _done();
@@ -1589,8 +1628,8 @@ namespace mongo {
         /** @return the next element in the object. For the final element, element.eoo() will be true. */
         BSONElement next( bool checkEnd = false ) {
             assert( pos < theend );
-            BSONElement e( pos, checkEnd ? theend - pos : -1 );
-            pos += e.size( checkEnd ? theend - pos : -1 );
+            BSONElement e( pos, checkEnd ? (int)(theend - pos) : -1 );
+            pos += e.size( checkEnd ? (int)(theend - pos) : -1 );
             return e;
         }
     private:
@@ -1659,12 +1698,12 @@ namespace mongo {
 #endif
 
     inline BSONObj BSONElement::embeddedObjectUserCheck() {
-        uassert( 10065 ,  "invalid parameter: expected an object", type()==Object || type()==Array );
+        uassert( 10065 ,  "invalid parameter: expected an object", isABSONObj() );
         return BSONObj(value());
     }
 
     inline BSONObj BSONElement::embeddedObject() const {
-        assert( type()==Object || type()==Array );
+        assert( isABSONObj() );
         return BSONObj(value());
     }
 
@@ -1706,14 +1745,12 @@ namespace mongo {
         return false;
     }
 
-    inline BSONElement BSONObj::findElement(const char *name) const {
-        if ( !isEmpty() ) {
-            BSONObjIterator it(*this);
-            while ( it.moreWithEOO() ) {
-                BSONElement e = it.next();
-                if ( strcmp(name, e.fieldName()) == 0 )
-                    return e;
-            }
+    inline BSONElement BSONObj::getField(const char *name) const {
+        BSONObjIterator i(*this);
+        while ( i.more() ) {
+            BSONElement e = i.next();
+            if ( strcmp(e.fieldName(), name) == 0 )
+                return e;
         }
         return BSONElement();
     }
@@ -1734,7 +1771,7 @@ namespace mongo {
     }
 
     inline bool BSONObj::getObjectID(BSONElement& e) const { 
-        BSONElement f = findElement("_id");
+        BSONElement f = getField("_id");
         if( !f.eoo() ) { 
             e = f;
             return true;

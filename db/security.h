@@ -22,14 +22,14 @@
 #undef assert
 #define assert xassert
 
-#include "db.h"
-#include "dbhelpers.h"
 #include "nonce.h"
+#include "concurrency.h"
 
 namespace mongo {
 
     // --noauth cmd line option
     extern bool noauth;
+    extern bool authWriteOnly;
 
     /* for a particular db */
     struct Auth {
@@ -43,35 +43,37 @@ namespace mongo {
     public:
 		bool isLocalHost;
         AuthenticationInfo() { isLocalHost = false; }
-        virtual ~AuthenticationInfo() {
+        ~AuthenticationInfo() {
         }
-        void logout(const char *dbname) { 
-			assertInWriteLock();
+        void logout(const string& dbname ) { 
+			assertInWriteLock(); // TODO: can we get rid of this?  only 1 thread should be looking at an AuthenticationInfo
 			m.erase(dbname); 
 		}
-        void authorize(const char *dbname) { 
+        void authorize(const string& dbname ) { 
 			assertInWriteLock();
             m[dbname].level = 2;
         }
-        virtual bool isAuthorized(const char *dbname) { 
-            if( m[dbname].level == 2 ) return true;
-			if( noauth ) return true;
-			if( m["admin"].level == 2 ) return true;
-			if( m["local"].level == 2 ) return true;
-			if( isLocalHost ) { 
-                readlock l(""); 
-                Client::Context c("admin.system.users");
-				BSONObj result;
-				if( Helpers::getSingleton("admin.system.users", result) )
-					return false;
-				if( warned == 0 ) {
-					warned++;
-					log() << "warning: no users configured in admin.system.users, allowing localhost access" << endl;
-				}
-				return true;
-			}
-			return false;
+        void authorizeReadOnly(const string& dbname) {
+			assertInWriteLock();
+            m[dbname].level = 1;            
         }
+        bool isAuthorized(const string& dbname) { return _isAuthorized( dbname, 2 ); }
+        bool isAuthorizedReads(const string& dbname) { return _isAuthorized( dbname, 1 ); }
+        bool isAuthorizedForLock(const string& dbname, int lockType ) { return _isAuthorized( dbname , lockType > 0 ? 2 : 1 ); }
+        
+        void print();
+
+    protected:
+        bool _isAuthorized(const string& dbname, int level) { 
+            if( m[dbname].level >= level ) return true;
+			if( noauth ) return true;
+            if( authWriteOnly && ( 1 >= level ) ) return true;
+			if( m["admin"].level >= level ) return true;
+			if( m["local"].level >= level ) return true;
+            return _isAuthorizedSpecialChecks( dbname );
+        }
+
+        bool _isAuthorizedSpecialChecks( const string& dbname );
     };
 
 } // namespace mongo

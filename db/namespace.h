@@ -21,7 +21,7 @@
 #include "../stdafx.h"
 #include "jsobj.h"
 #include "queryutil.h"
-#include "storage.h"
+#include "diskloc.h"
 #include "../util/hashtab.h"
 #include "../util/mmap.h"
 
@@ -265,7 +265,7 @@ namespace mongo {
         /* when a background index build is in progress, we don't count the index in nIndexes until 
            complete, yet need to still use it in _indexRecord() - thus we use this function for that.
         */
-        int nIndexesBeingBuilt() const { 
+        int nIndexesBeingBuilt() const {
             return nIndexes + backgroundIndexBuildInProgress;
         }
 
@@ -281,6 +281,10 @@ namespace mongo {
             if( idxNo < NIndexesBase ) 
                 return _indexes[idxNo];
             return extra()->details[idxNo-NIndexesBase];
+        }
+        IndexDetails& backgroundIdx() { 
+            DEV assert(backgroundIndexBuildInProgress);
+            return idx(nIndexes);
         }
 
         class IndexIterator { 
@@ -506,7 +510,7 @@ namespace mongo {
         const IndexSpec& getIndexSpec( const IndexDetails * details ){
             DEV assertInWriteLock();
             IndexSpec& spec = _indexSpecs[details];
-            if ( spec.meta.isEmpty() ){
+            if ( spec.info.isEmpty() ){
                 spec.reset( details->info );
             }
             return spec;

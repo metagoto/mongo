@@ -62,7 +62,7 @@ namespace mongo {
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             // database->name is the one we are logging out...
             Client& client = cc();
-            AuthenticationInfo *ai = client.ai;
+            AuthenticationInfo *ai = client.getAuthenticationInfo();
             ai->logout(client.database()->name.c_str());
             return true;
         }
@@ -151,8 +151,13 @@ namespace mongo {
                 return false;
             }
 
-            AuthenticationInfo *ai = currentClient.get()->ai;
-            ai->authorize(cc().database()->name.c_str());
+            AuthenticationInfo *ai = cc().getAuthenticationInfo();
+            
+            if ( userObj[ "readOnly" ].isBoolean() && userObj[ "readOnly" ].boolean() ) {
+                ai->authorizeReadOnly( cc().database()->name.c_str() );
+            } else {
+                ai->authorize( cc().database()->name.c_str() );
+            }
             return true;
         }
     } cmdAuthenticate;

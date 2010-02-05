@@ -535,7 +535,10 @@ namespace mongo {
        { $pullAll : { a:[99,1010] } }
        NOTE: MODIFIES source from object!
     */
-    ModSet::ModSet(const BSONObj &from , const set<string>& idxKeys )
+    ModSet::ModSet(
+        const BSONObj &from , 
+        const set<string>& idxKeys,
+        const set<string> *backgroundKeys)
         : _isIndexed(0) {
         
         BSONObjIterator it(from);
@@ -566,8 +569,10 @@ namespace mongo {
                 m.init( op , f );
                 m.setFieldName( f.fieldName() );
                 
-                if ( m.isIndexed( idxKeys ) )
+                if ( m.isIndexed( idxKeys ) ||
+                    (backgroundKeys && m.isIndexed(*backgroundKeys)) ) {
                     _isIndexed++;
+                }
 
                 _mods[m.fieldName] = m;
             }
@@ -627,6 +632,12 @@ namespace mongo {
     UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
         int profile = cc().database()->profile;
         StringBuilder& ss = debug.str;
+
+        /* idea with these here it to make them loop invariant for multi updates, and thus be a bit faster for that case */
+        /* NOTE: when yield() is added herein, these must be refreshed after each call to yield! */
+        NamespaceDetails *d = nsdetails(ns); // can be null if an upsert...
+        NamespaceDetailsTransient *nsdt = &NamespaceDetailsTransient::get_w(ns);
+        /* end note */
         
         uassert( 10155 , "cannot update reserved $ collection", strchr(ns, '$') == 0 );
         if ( strstr(ns, ".system.") ) {
@@ -638,10 +649,16 @@ namespace mongo {
         bool isOperatorUpdate = updateobj.firstElement().fieldName()[0] == '$';
         int modsIsIndexed = false; // really the # of indexes
         if ( isOperatorUpdate ){
-            mods.reset( new ModSet( updateobj , NamespaceDetailsTransient::get_w(ns).indexKeys() ) );
+            if( d && d->backgroundIndexBuildInProgress ) { 
+                set<string> bgKeys;
+                d->backgroundIdx().keyPattern().getFieldNames(bgKeys);
+                mods.reset( new ModSet(updateobj, nsdt->indexKeys(), &bgKeys) );
+            }
+            else {
+                mods.reset( new ModSet(updateobj, nsdt->indexKeys()) );
+            }
             modsIsIndexed = mods->isIndexed();
         }
-
 
         set<DiskLoc> seenObjects;
         
@@ -717,9 +734,9 @@ namespace mongo {
                 } 
                 else {
                     BSONObj newObj = mss->createNewFromMods();
-                    uassert( 12522 , "$ operator made objcet too large" , newObj.isValid() );
-                    DiskLoc newLoc = theDataFileMgr.update(ns, r, loc , newObj.objdata(), newObj.objsize(), debug);
-                    if ( newLoc != loc || modsIsIndexed ){
+                    uassert( 12522 , "$ operator made object too large" , newObj.isValid() );
+                    DiskLoc newLoc = theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , newObj.objdata(), newObj.objsize(), debug);
+                    if ( newLoc != loc || modsIsIndexed ) {
                         // object moved, need to make sure we don' get again
                         seenObjects.insert( newLoc );
                     }
@@ -753,7 +770,7 @@ namespace mongo {
 
             BSONElementManipulator::lookForTimestamps( updateobj );
             checkNoMods( updateobj );
-            theDataFileMgr.update(ns, r, loc , updateobj.objdata(), updateobj.objsize(), debug);
+            theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , updateobj.objdata(), updateobj.objsize(), debug);
             if ( logop )
                 logOp("u", ns, updateobj, &pattern );
             return UpdateResult( 1 , 0 , 1 );

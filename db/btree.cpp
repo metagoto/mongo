@@ -25,6 +25,7 @@
 #include "client.h"
 #include "dbhelpers.h"
 #include "curop.h"
+#include "stats/counters.h"
 
 namespace mongo {
 
@@ -356,9 +357,36 @@ namespace mongo {
         return false;
     }
 
+    /* @param self - don't complain about ourself already being in the index case.
+       @return true = there is a duplicate.
+    */
+    bool BtreeBucket::wouldCreateDup(
+        const IndexDetails& idx, DiskLoc thisLoc, 
+        const BSONObj& key, BSONObj order,
+        DiskLoc self) 
+    { 
+        int pos;
+        bool found;
+        DiskLoc b = locate(idx, thisLoc, key, order, pos, found, minDiskLoc);
+
+        while ( !b.isNull() ) {
+            // we skip unused keys
+            BtreeBucket *bucket = b.btree();
+            _KeyNode& kn = bucket->k(pos);
+            if ( kn.isUsed() ) {
+                if( bucket->keyAt(pos).woEqual(key) )
+                    return kn.recordLoc != self;
+                break;
+            }
+            b = bucket->advance(b, pos, 1, "BtreeBucket::dupCheck");
+        }
+
+        return false;
+    }
+
     string BtreeBucket::dupKeyError( const IndexDetails& idx , const BSONObj& key ){
         stringstream ss;
-        ss << "E11000 duplicate key error";
+        ss << "E11000 duplicate key error ";
         ss << "index: " << idx.indexNamespace() << "  ";
         ss << "dup key: " << key;
         return ss.str();
@@ -391,6 +419,9 @@ namespace mongo {
 			}
 		}
 #endif
+        
+        globalIndexCounters.btree( (char*)this );
+        
         /* binary search for this key */
         bool dupsChecked = false;
         int l=0;
@@ -807,13 +838,16 @@ found:
                 return 0;
             }
 
-            out() << "_insert(): key already exists in index\n";
-            out() << "  " << idx.indexNamespace().c_str() << " thisLoc:" << thisLoc.toString() << '\n';
-            out() << "  " << key.toString() << '\n';
-            out() << "  " << "recordLoc:" << recordLoc.toString() << " pos:" << pos << endl;
-            out() << "  old l r: " << childForPos(pos).toString() << ' ' << childForPos(pos+1).toString() << endl;
-            out() << "  new l r: " << lChild.toString() << ' ' << rChild.toString() << endl;
-            massert( 10287 , "btree: key+recloc already in index", false);
+            DEV { 
+                out() << "_insert(): key already exists in index (ok for background:true)\n";
+                out() << "  " << idx.indexNamespace().c_str() << " thisLoc:" << thisLoc.toString() << '\n';
+                out() << "  " << key.toString() << '\n';
+                out() << "  " << "recordLoc:" << recordLoc.toString() << " pos:" << pos << endl;
+                out() << "  old l r: " << childForPos(pos).toString() << ' ' << childForPos(pos+1).toString() << endl;
+                out() << "  new l r: " << lChild.toString() << ' ' << rChild.toString() << endl;
+            }
+            // we don't use massert() here as that does logging and this is 'benign' - see catches in indexRecord()
+            throw MsgAssertionException(10287, "btree: key+recloc already in index");
         }
 
         DEBUGGING out() << "TEMP: key: " << key.toString() << endl;

@@ -36,7 +36,7 @@
 #include "security.h"
 #include "queryoptimizer.h"
 #include "../scripting/engine.h"
-#include "dbstats.h"
+#include "stats/counters.h"
 #include "background.h"
 
 namespace mongo {
@@ -227,7 +227,7 @@ namespace mongo {
         }
         CmdDropDatabase() : Command("dropDatabase") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            BSONElement e = cmdObj.findElement(name);
+            BSONElement e = cmdObj.getField(name);
             log() << "dropDatabase " << ns << endl;
             int p = (int) e.number();
             if ( p != 1 )
@@ -251,14 +251,14 @@ namespace mongo {
         }
         CmdRepairDatabase() : Command("repairDatabase") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            BSONElement e = cmdObj.findElement(name);
+            BSONElement e = cmdObj.getField(name);
             log() << "repairDatabase " << ns << endl;
             int p = (int) e.number();
             if ( p != 1 )
                 return false;
-            e = cmdObj.findElement( "preserveClonedFilesOnFailure" );
+            e = cmdObj.getField( "preserveClonedFilesOnFailure" );
             bool preserveClonedFilesOnFailure = e.isBoolean() && e.boolean();
-            e = cmdObj.findElement( "backupOriginalFiles" );
+            e = cmdObj.getField( "backupOriginalFiles" );
             bool backupOriginalFiles = e.isBoolean() && e.boolean();
             return repairDatabase( ns, errmsg, preserveClonedFilesOnFailure, backupOriginalFiles );
         }
@@ -278,7 +278,7 @@ namespace mongo {
         }
         CmdProfile() : Command("profile") {}
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            BSONElement e = cmdObj.findElement(name);
+            BSONElement e = cmdObj.getField(name);
             result.append("was", (double) cc().database()->profile);
             int p = (int) e.number();
             bool ok = false;
@@ -329,8 +329,8 @@ namespace mongo {
                 
                 ProcessInfo p;
                 if ( p.supported() ){
-                    t.append( "resident" , p.getResidentSize() );
-                    t.append( "virtual" , p.getVirtualMemorySize() );
+                    t.appendIntOrLL( "resident" , p.getResidentSize() );
+                    t.appendIntOrLL( "virtual" , p.getVirtualMemorySize() );
                     t.appendBool( "supported" , true );
                 }
                 else {
@@ -338,7 +338,7 @@ namespace mongo {
                     t.appendBool( "supported" , false );
                 }
                     
-                t.append( "mapped" , MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) );
+                t.appendIntOrLL( "mapped" , MemoryMappedFile::totalMappedLength() / ( 1024 * 1024 ) );
 
                 t.done();
                     
@@ -350,6 +350,7 @@ namespace mongo {
                 bb.append( "available" , connTicketHolder.available() );
                 bb.done();
             }
+
             {
                 BSONObjBuilder bb( result.subobjStart( "extra_info" ) );
                 bb.append("note", "fields vary by platform");
@@ -358,6 +359,13 @@ namespace mongo {
                 bb.done();
             }
 
+
+            {
+                BSONObjBuilder bb( result.subobjStart( "indexCounters" ) );
+                globalIndexCounters.append( bb );
+                bb.done();
+            }
+            
             result.append( "opcounters" , globalOpCounters.getObj() );
             
             return true;
@@ -487,7 +495,9 @@ namespace mongo {
             /* assuming here that id index is not multikey: */
             d->multiKeyIndexBits = 0;
             assureSysIndexesEmptied(ns, idIndex);
-            anObjBuilder.append("msg", "non-_id indexes dropped for collection");
+            anObjBuilder.append("msg", mayDeleteIdIndex ? 
+                "indexes dropped for collection" : 
+                "non-_id indexes dropped for collection");
         }
         else {
             // delete just one index
@@ -537,7 +547,7 @@ namespace mongo {
             return false;
         }
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
-            string nsToDrop = cc().database()->name + '.' + cmdObj.findElement(name).valuestr();
+            string nsToDrop = cc().database()->name + '.' + cmdObj.getField(name).valuestr();
             NamespaceDetails *d = nsdetails(nsToDrop.c_str());
             if ( !cmdLine.quiet )
                 log() << "CMD: drop " << nsToDrop << endl;
@@ -570,7 +580,7 @@ namespace mongo {
             return false;
         }
         virtual bool run(const char *_ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
-            string ns = cc().database()->name + '.' + cmdObj.findElement(name).valuestr();
+            string ns = cc().database()->name + '.' + cmdObj.getField(name).valuestr();
             string err;
             long long n = runCount(ns.c_str(), cmdObj, err);
             long long nn = n;
@@ -607,7 +617,7 @@ namespace mongo {
             help << "create a collection";
         }
         virtual bool run(const char *_ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
-            string ns = cc().database()->name + '.' + cmdObj.findElement(name).valuestr();
+            string ns = cc().database()->name + '.' + cmdObj.getField(name).valuestr();
             string err;
             bool ok = userCreateNS(ns.c_str(), cmdObj, err, true);
             if ( !ok && !err.empty() )
@@ -630,15 +640,28 @@ namespace mongo {
         }
         CmdDropIndexes(const char *cmdname = "dropIndexes") : Command(cmdname) { }
         bool run(const char *ns, BSONObj& jsobj, string& errmsg, BSONObjBuilder& anObjBuilder, bool /*fromRepl*/) {
-            BSONElement e = jsobj.findElement(name.c_str());
+            BSONElement e = jsobj.getField(name.c_str());
             string toDeleteNs = cc().database()->name + '.' + e.valuestr();
             NamespaceDetails *d = nsdetails(toDeleteNs.c_str());
             if ( !cmdLine.quiet )
                 log() << "CMD: dropIndexes " << toDeleteNs << endl;
             if ( d ) {
-                BSONElement f = jsobj.findElement("index");
+                BSONElement f = jsobj.getField("index");
                 if ( f.type() == String ) {
                     return dropIndexes( d, toDeleteNs.c_str(), f.valuestr(), errmsg, anObjBuilder, false );
+                }
+                else if ( f.type() == Object ){
+                    int idxId = d->findIndexByKeyPattern( f.embeddedObject() );
+                    if ( idxId < 0 ){
+                        errmsg = "can't find index with key:";
+                        errmsg += f.embeddedObject();
+                        return false;
+                    }
+                    else {
+                        IndexDetails& ii = d->idx( idxId );
+                        string iName = ii.indexName();
+                        return dropIndexes( d, toDeleteNs.c_str(), iName.c_str() , errmsg, anObjBuilder, false );
+                    }
                 }
                 else {
                     errmsg = "invalid index name spec";
@@ -673,7 +696,7 @@ namespace mongo {
 
             static DBDirectClient db;
 
-            BSONElement e = jsobj.findElement(name.c_str());
+            BSONElement e = jsobj.getField(name.c_str());
             string toDeleteNs = cc().database()->name + '.' + e.valuestr();
             NamespaceDetails *d = nsdetails(toDeleteNs.c_str());
             log() << "CMD: reIndex " << toDeleteNs << endl;
@@ -738,8 +761,8 @@ namespace mongo {
                 b.append( "name", i->c_str() );
                 boost::intmax_t size = dbSize( i->c_str() );
                 b.append( "sizeOnDisk", (double) size );
-                setClient( i->c_str() );
-                b.appendBool( "empty", cc().database()->isEmpty() );
+                Client::Context ctx( *i );
+                b.appendBool( "empty", ctx.db()->isEmpty() );
                 totalSize += size;
                 dbInfos.push_back( b.obj() );
 
@@ -757,8 +780,8 @@ namespace mongo {
 
                 BSONObjBuilder b;
                 b << "name" << name << "sizeOnDisk" << double( 1 );
-                setClient( name.c_str() );
-                b.appendBool( "empty", cc().database()->isEmpty() );
+                Client::Context ctx( name );
+                b.appendBool( "empty", ctx.db()->isEmpty() );
 
                 dbInfos.push_back( b.obj() );
             }
@@ -859,6 +882,8 @@ namespace mongo {
             BSONObj min = jsobj.getObjectField( "min" );
             BSONObj max = jsobj.getObjectField( "max" );
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
+            
+            Client::Context ctx( ns );
 
             IndexDetails *id = cmdIndexDetailsForRange( ns, errmsg, min, max, keyPattern );
             if ( id == 0 )
@@ -904,9 +929,10 @@ namespace mongo {
             BSONObj max = jsobj.getObjectField( "max" );
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
 
+            Client::Context ctx( ns );
+            
             auto_ptr< Cursor > c;
             if ( min.isEmpty() && max.isEmpty() ) {
-                setClient( ns );
                 c = theDataFileMgr.findAll( ns );
             } else if ( min.isEmpty() || max.isEmpty() ) {
                 errmsg = "only one of min or max specified";
@@ -1016,7 +1042,6 @@ namespace mongo {
 
             string fromNs = string( realDbName ) + "." + from;
             string toNs = string( realDbName ) + "." + to;
-            massert( 10300 ,  "source collection " + fromNs + " does not exist", !setClient( fromNs.c_str() ) );
             NamespaceDetails *nsd = nsdetails( fromNs.c_str() );
             massert( 10301 ,  "source collection " + fromNs + " does not exist", nsd );
             long long excessSize = nsd->datasize - size * 2;
@@ -1038,7 +1063,7 @@ namespace mongo {
             }
 
             DBDirectClient client;
-            setClient( toNs.c_str() );
+            Client::Context ctx( toNs );
             BSONObjBuilder spec;
             spec.appendBool( "capped", true );
             spec.append( "size", double( size ) );
@@ -1111,6 +1136,7 @@ namespace mongo {
     class GroupCommand : public Command {
     public:
         GroupCommand() : Command("group"){}
+        virtual bool readOnly() { return true; }
         virtual bool slaveOk() { return true; }
         virtual void help( stringstream &help ) const {
             help << "see http://www.mongodb.org/display/DOCS/Aggregation";
@@ -1293,7 +1319,7 @@ namespace mongo {
         bool run(const char *dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             static DBDirectClient db;
 
-            string ns = cc().database()->name + '.' + cmdObj.findElement(name).valuestr();
+            string ns = cc().database()->name + '.' + cmdObj.getField(name).valuestr();
             string key = cmdObj["key"].valuestrsafe();
 
             BSONObj keyPattern = BSON( key << 1 );
@@ -1405,9 +1431,11 @@ namespace mongo {
        returns true if ran a cmd
     */
     bool _runCommands(const char *ns, BSONObj& _cmdobj, BufBuilder &b, BSONObjBuilder& anObjBuilder, bool fromRepl, int queryOptions) {
+        string dbname = nsToDatabase( ns );
+
         if( logLevel >= 1 ) 
             log() << "run command " << ns << ' ' << _cmdobj << endl;
-
+        
         const char *p = strchr(ns, '.');
         if ( !p ) return false;
         if ( strcmp(p, ".$cmd") != 0 ) return false;
@@ -1423,15 +1451,28 @@ namespace mongo {
             }
         }
 
+        Client& client = cc();
         bool ok = false;
 
         BSONElement e = jsobj.firstElement();
-
+        
         Command * c = e.type() ? Command::findCommand( e.fieldName() ) : 0;
         if ( c ){
             string errmsg;
-            AuthenticationInfo *ai = currentClient.get()->ai;
-            uassert( 10045 , "unauthorized", ai->isAuthorized(cc().database()->name.c_str()) || !c->requiresAuth());
+            AuthenticationInfo *ai = client.getAuthenticationInfo();
+            
+            bool needWriteLock = ! c->readOnly();
+            
+            if ( ! c->requiresAuth() && 
+                 ( ai->isAuthorizedReads( dbname ) && 
+                   ! ai->isAuthorized( dbname ) ) ){
+                // this means that they can read, but not write
+                // so only get a read lock
+                needWriteLock = false;
+            }
+            
+            mongolock lk( needWriteLock );
+            Client::Context ctx( ns , dbpath , &lk , c->requiresAuth() );
 
             bool admin = c->adminOnly();
 

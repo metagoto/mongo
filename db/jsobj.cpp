@@ -768,9 +768,18 @@ namespace mongo {
             if ( r.eoo() )
                 return 1;
 
-            int x = l.woCompare( r, considerFieldName );
-            if ( ordered && o.number() < 0 )
-                x = -x;
+            int x;
+/*
+            if( ordered && o.type() == String && strcmp(o.valuestr(), "ascii-proto") == 0 && 
+                l.type() == String && r.type() == String ) { 
+                // note: no negative support yet, as this is just sort of a POC
+                x = _stricmp(l.valuestr(), r.valuestr());
+            }
+            else*/ {
+                x = l.woCompare( r, considerFieldName );
+                if ( ordered && o.number() < 0 )
+                    x = -x;
+            }
             if ( x != 0 )
                 return x;
         }
@@ -810,18 +819,6 @@ namespace mongo {
         return -1;
     }
 
-
-    BSONElement BSONObj::getField(const char *name) const {
-        BSONObjIterator i(*this);
-        while ( i.moreWithEOO() ) {
-            BSONElement e = i.next();
-            if ( e.eoo() )
-                break;
-            if ( strcmp(e.fieldName(), name) == 0 )
-                return e;
-        }
-        return nullElement;
-    }
 
     /* return has eoo() true if no match
        supports "." notation to reach into embedded objects

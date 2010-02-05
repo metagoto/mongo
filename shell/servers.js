@@ -322,6 +322,7 @@ MongodRunner.prototype.start = function( reuseData ) {
     if ( this.extraArgs_ ) {
         args = args.concat( this.extraArgs_ );
     }
+    removeFile( this.dbpath_ + "/mongod.lock" );
     if ( reuseData ) {
         return startMongoProgram.apply( null, args );
     } else {
@@ -591,6 +592,8 @@ ReplTest.prototype.getOptions = function( master , extra , putBinaryFirst ){
 }
 
 ReplTest.prototype.start = function( master , options , restart ){
+    var lockFile = this.getPath( master ) + "/mongod.lock";
+    removeFile( lockFile );
     var o = this.getOptions( master , options , restart );
     if ( restart )
         return startMongoProgram.apply( null , o );
@@ -605,4 +608,11 @@ ReplTest.prototype.stop = function( master , signal ){
         return;
     }
     stopMongod( this.getPort( master ) , signal || 15 );
+}
+
+allocatePorts = function( n ) {
+    var ret = [];
+    for( var i = 35000; i < 35000 + n; ++i )
+        ret.push( i );
+    return ret;
 }

@@ -3,9 +3,9 @@
 #pragma once
 
 #include "namespace.h"
-#include "security.h"
 #include "client.h"
 #include "../util/atomic_int.h"
+#include "db.h"
 
 namespace mongo { 
 
@@ -23,14 +23,22 @@ namespace mongo {
     class CurOp : boost::noncopyable {
         static AtomicUInt _nextOpNum;
         static BSONObj _tooBig; // { $msg : "query not recording (too large)" }
+        
+        Client * _client;
+        CurOp * _wrapped;
+
+        unsigned long long _start;
+        unsigned long long _checkpoint;
+        unsigned long long _end;
 
         bool _active;
-        Timer _timer;
         int _op;
+        int _lockType; // see concurrency.h for values
+        int _dbprofile; // 0=off, 1=slow, 2=all
         AtomicUInt _opNum;
         char _ns[Namespace::MaxNsLen+2];
-        struct sockaddr_in client;
-
+        struct sockaddr_in _remote;
+        
         char _queryBuf[256];
         bool haveQuery() const { return *((int *) _queryBuf) != 0; }
         void resetQuery(int x=0) { *((int *)_queryBuf) = x; }
@@ -41,38 +49,107 @@ namespace mongo {
             BSONObj o(_queryBuf);
             return o;
         }
-
+        
         OpDebug _debug;
+
+        void _reset(){
+            _lockType = 0;
+            _dbprofile = 0;
+            _end = 0;
+        }
+
+        void setNS(const char *ns) {
+            strncpy(_ns, ns, Namespace::MaxNsLen);
+        }
+
     public:
-        void reset( const sockaddr_in &_client) { 
+        void ensureStarted(){
+            if ( _start == 0 )
+                _start = _checkpoint = curTimeMicros64();            
+        }
+        void enter( Client::Context * context ){
+            ensureStarted();
+            setNS( context->ns() );
+            if ( context->_db && context->_db->profile > _dbprofile )
+                _dbprofile = context->_db->profile;
+        }
+
+        void leave( Client::Context * context ){
+            unsigned long long now = curTimeMicros64();
+            Top::global.record( _ns , _op , _lockType , now - _checkpoint );
+            _checkpoint = now;
+        }
+        
+        void reset( const sockaddr_in & remote, int op ) { 
+            _reset();
+            _start = _checkpoint = 0;
             _active = true;
             _opNum = _nextOpNum++;
-            _timer.reset();
             _ns[0] = '?'; // just in case not set later
             _debug.reset();
             resetQuery();
-            client = _client;
+            _remote = remote;
+            _op = op;
+        }
+
+        void setRead(){
+            _lockType = -1;
+        }
+        void setWrite(){
+            _lockType = 1;
         }
 
         OpDebug& debug(){
             return _debug;
         }
+        
+        int profileLevel() const {
+            return _dbprofile;
+        }
 
+        const char * getNS() const {
+            return _ns;
+        }
+
+        bool shouldDBProfile( int ms ) const {
+            if ( _dbprofile <= 0 )
+                return false;
+            
+            return _dbprofile >= 2 || ms >= cmdLine.slowMS;
+        }
+        
         AtomicUInt opNum() const { return _opNum; }
         bool active() const { return _active; }
 
-        int elapsedMillis(){ return _timer.millis(); }
-        
         /** micros */
-        unsigned long long startTime(){
-            return _timer.startTime();
+        unsigned long long startTime() const {
+            assert(_start);
+            return _start;
         }
 
-        void setActive(bool active) { _active = active; }
-        void setNS(const char *ns) {
-            strncpy(_ns, ns, Namespace::MaxNsLen);
+        void done() {
+            _active = false;
+            _end = curTimeMicros64();
         }
-        void setOp(int op) { _op = op; }
+        
+        unsigned long long totalTimeMicros() const {
+            massert( 12601 , "CurOp not marked done yet" , ! _active );
+            return _end - startTime();
+        }
+
+        int totalTimeMillis() const {
+            return (int) (totalTimeMicros() / 1000);
+        }
+
+        int elapsedMillis() const {
+            unsigned long long total = curTimeMicros64() - startTime();
+            return (int) (total / 1000);
+        }
+
+        int elapsedSeconds() const {
+            return elapsedMillis() / 1000;
+        }
+
         void setQuery(const BSONObj& query) { 
             if( query.objsize() > (int) sizeof(_queryBuf) ) { 
                 resetQuery(1); // flag as too big and return
@@ -81,9 +158,15 @@ namespace mongo {
             memcpy(_queryBuf, query.objdata(), query.objsize());
         }
 
-        CurOp() { 
+        CurOp( Client * client , CurOp * wrapped = 0 ) { 
+            _client = client;
+            _wrapped = wrapped;
+            if ( _wrapped ){
+                _client->_curOp = this;
+            }
+            _start = _checkpoint = 0;
             _active = false;
-//            opNum = 0; 
+            _reset();
             _op = 0;
             // These addresses should never be written to again.  The zeroes are
             // placed here as a precaution because currentOp may be accessed
@@ -91,10 +174,14 @@ namespace mongo {
             memset(_ns, 0, sizeof(_ns));
             memset(_queryBuf, 0, sizeof(_queryBuf));
         }
+        
+        ~CurOp(){
+            if ( _wrapped )
+                _client->_curOp = _wrapped;
+        }
 
         BSONObj info() { 
-            AuthenticationInfo *ai = currentClient.get()->ai;
-            if( !ai->isAuthorized("admin") ) { 
+            if( ! cc().getAuthenticationInfo()->isAuthorized("admin") ) { 
                 BSONObjBuilder b;
                 b.append("err", "unauthorized");
                 return b.obj();
@@ -107,7 +194,7 @@ namespace mongo {
             b.append("opid", _opNum);
             b.append("active", _active);
             if( _active ) 
-                b.append("secs_running", _timer.seconds() );
+                b.append("secs_running", elapsedSeconds() );
             if( _op == 2004 ) 
                 b.append("op", "query");
             else if( _op == 2005 )
@@ -127,10 +214,12 @@ namespace mongo {
             }
             // b.append("inLock",  ??
             stringstream clientStr;
-            clientStr << inet_ntoa( client.sin_addr ) << ":" << ntohs( client.sin_port );
+            clientStr << inet_ntoa( _remote.sin_addr ) << ":" << ntohs( _remote.sin_port );
             b.append("client", clientStr.str());
             return b.obj();
         }
+
+        friend class Client;
     };
 
     /* 0 = ok

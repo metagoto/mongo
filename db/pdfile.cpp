@@ -104,10 +104,13 @@ namespace mongo {
         stringstream ss;
         Client * c = currentClient.get();
         if ( c ){
-            Database *database = c->database();
-            if ( database ) {
-                ss << database->name << ' ';
-                ss << cc().ns() << ' ';
+            Client::Context * cx = c->getContext();
+            if ( cx ){
+                Database *database = cx->db();
+                if ( database ) {
+                    ss << database->name << ' ';
+                    ss << cx->ns() << ' ';
+                }
             }
         }
         return ss.str();
@@ -146,7 +149,7 @@ namespace mongo {
             addNewNamespaceToCatalog(ns, j.isEmpty() ? 0 : &j);
 
         long long size = initialExtentSize(128);
-        BSONElement e = j.findElement("size");
+        BSONElement e = j.getField("size");
         if ( e.isNumber() ) {
             size = (long long) e.number();
             size += 256;
@@ -157,10 +160,10 @@ namespace mongo {
 
         bool newCapped = false;
         int mx = 0;
-        e = j.findElement("capped");
+        e = j.getField("capped");
         if ( e.type() == Bool && e.boolean() ) {
             newCapped = true;
-            e = j.findElement("max");
+            e = j.getField("max");
             if ( e.isNumber() ) {
                 mx = (int) e.number();
             }
@@ -168,7 +171,7 @@ namespace mongo {
 
         // $nExtents just for debug/testing.  We create '$nExtents' extents,
         // each of size 'size'.
-        e = j.findElement( "$nExtents" );
+        e = j.getField( "$nExtents" );
         int nExtents = int( e.number() );
         Database *database = cc().database();
         if ( nExtents > 0 ) {
@@ -578,7 +581,7 @@ namespace mongo {
        order.$natural - if set, > 0 means forward (asc), < 0 backward (desc).
     */
     auto_ptr<Cursor> findTableScan(const char *ns, const BSONObj& order, const DiskLoc &startLoc) {
-        BSONElement el = order.findElement("$natural"); // e.g., { $natural : -1 }
+        BSONElement el = order.getField("$natural"); // e.g., { $natural : -1 }
 
         if ( el.number() >= 0 )
             return DataFileMgr::findAll(ns, startLoc);
@@ -730,9 +733,12 @@ namespace mongo {
     /* unindex all keys in all indexes for this record. */
     static void unindexRecord(NamespaceDetails *d, Record *todelete, const DiskLoc& dl, bool noWarn = false) {
         BSONObj obj(todelete);
-        int n = d->nIndexesBeingBuilt();
-        for ( int i = 0; i < n; i++ ) {
+        int n = d->nIndexes;
+        for ( int i = 0; i < n; i++ )
             _unindexRecord(d->idx(i), obj, dl, !noWarn);
+        if( d->backgroundIndexBuildInProgress ) {
+            // always pass nowarn here, as this one may be missing for valid reasons as we are concurrently building it
+            _unindexRecord(d->idx(n), obj, dl, false); 
         }
     }
 
@@ -808,19 +814,20 @@ namespace mongo {
 
     /** Note: if the object shrinks a lot, we don't free up space, we leave extra at end of the record.
      */
-    const DiskLoc DataFileMgr::update(const char *ns,
-                                       Record *toupdate, const DiskLoc& dl,
-                                       const char *_buf, int _len, OpDebug& debug)
+    const DiskLoc DataFileMgr::updateRecord(
+        const char *ns,
+        NamespaceDetails *d,
+        NamespaceDetailsTransient *nsdt,
+        Record *toupdate, const DiskLoc& dl,
+        const char *_buf, int _len, OpDebug& debug)
     {
         StringBuilder& ss = debug.str;
         dassert( toupdate == dl.rec() );
 
-        NamespaceDetails *d = nsdetails(ns);
-
         BSONObj objOld(toupdate);
         BSONObj objNew(_buf);
-        assert( objNew.objsize() == _len );
-        assert( objNew.objdata() == _buf );
+        DEV assert( objNew.objsize() == _len );
+        DEV assert( objNew.objdata() == _buf );
 
         if( !objNew.hasElement("_id") && objOld.hasElement("_id") ) {
             /* add back the old _id value if the update removes it.  Note this implementation is slow 
@@ -840,7 +847,7 @@ namespace mongo {
         */
         vector<IndexChanges> changes;
         getIndexChanges(changes, *d, objNew, objOld);
-        dupCheck(changes, *d);
+        dupCheck(changes, *d, dl);
 
         if ( toupdate->netLength() < objNew.objsize() ) {
             // doesn't fit.  reallocate -----------------------------------------------------
@@ -852,13 +859,14 @@ namespace mongo {
             return insert(ns, objNew.objdata(), objNew.objsize(), false);
         }
 
-        NamespaceDetailsTransient::get_w( ns ).notifyOfWriteOp();
+        nsdt->notifyOfWriteOp();
         d->paddingFits();
 
         /* have any index keys changed? */
         {
             unsigned keyUpdates = 0;
-            for ( int x = 0; x < d->nIndexes; x++ ) {
+            int z = d->nIndexesBeingBuilt();
+            for ( int x = 0; x < z; x++ ) {
                 IndexDetails& idx = d->idx(x);
                 for ( unsigned i = 0; i < changes[x].removed.size(); i++ ) {
                     try {
@@ -920,7 +928,11 @@ namespace mongo {
                 idx.head.btree()->bt_insert(idx.head, recordLoc,
                                             *i, order, dupsAllowed, idx);
             }
-            catch (AssertionException& ) {
+            catch (AssertionException& e) {
+                if( e.code == 10287 && idxNo == d->nIndexes ) { 
+                    DEV log() << "info: caught key already in index on bg indexing (ok)" << endl;
+                    continue;
+                }
                 if( !dupsAllowed ) {
                     // dup key exception, presumably.
                     throw;
@@ -957,7 +969,8 @@ namespace mongo {
 
     // throws DBException
     unsigned long long fastBuildIndex(const char *ns, NamespaceDetails *d, IndexDetails& idx, int idxNo) {
-        //        testSorting();
+        assert( d->backgroundIndexBuildInProgress == 0 );
+
         Timer t;
 
         log() << "Buildindex " << ns << " idxNo:" << idxNo << ' ' << idx.info.obj().toString() << endl;
@@ -1012,12 +1025,15 @@ namespace mongo {
                 try { 
                     btBuilder.addKey(d.first, d.second);
                 }
-                catch( AssertionException& ) { 
+                catch( AssertionException& e ) { 
                     if ( dupsAllowed ){
                         // unknow exception??
                         throw;
                     }
                     
+                    if( e.interrupted() )
+                        throw;
+
                     if ( ! dropDups )
                         throw;
 
@@ -1061,14 +1077,22 @@ namespace mongo {
                     _indexRecord(d, idxNo, js, cc->c->currLoc(), dupsAllowed);
                     cc->c->advance();
                 } catch( AssertionException& e ) { 
+                    if( e.interrupted() )
+                        throw;
+
                     if ( dropDups ) {
                         DiskLoc toDelete = cc->c->currLoc();
-                        cc->c->advance();
+                        bool ok = cc->c->advance();
                         cc->updateLocation();
                         theDataFileMgr.deleteRecord( ns, toDelete.rec(), toDelete, false, true );
                         if( ClientCursor::find(id, false) == 0 ) {
                             cc.release();
-                            uasserted(12585, "cursor gone during bg index; dropDups");
+                            if( !ok ) { 
+                                /* we were already at the end. normal. */
+                            }
+                            else {
+                                uasserted(12585, "cursor gone during bg index; dropDups");
+                            }
                             break;
                         }
                     } else {
@@ -1139,17 +1163,16 @@ namespace mongo {
 
         BSONObj info = idx.info.obj();
         bool background = info["background"].trueValue();
-        if( background ) { 
-            log() << "WARNING: background index build not yet implemented" << endl;
-            assert(false);
+        if( background ) {
+            log(2) << "buildAnIndex: background=true\n";
         }
 
+        assert( !BackgroundOperation::inProgForNs(ns.c_str()) ); // should have been checked earlier, better not be...
         if( !background ) {
 			n = fastBuildIndex(ns.c_str(), d, idx, idxNo);
 			assert( !idx.head.isNull() );
 		}
 		else {
-            assert( !BackgroundOperation::inProgForNs(ns.c_str()) ); // should have been checked earlier, better not be...
             BackgroundIndexBuildJob j(ns.c_str());
             n = j.go(ns, d, idx, idxNo);
 		}
@@ -1157,14 +1180,12 @@ namespace mongo {
     }
 
     /* add keys to indexes for a new record */
-    static void indexRecord(NamespaceDetails *d, const void *buf, int len, DiskLoc newRecordLoc) {
-        BSONObj obj((const char *)buf);
-
+    static void indexRecord(NamespaceDetails *d, BSONObj obj, DiskLoc loc) {
         int n = d->nIndexesBeingBuilt();
         for ( int i = 0; i < n; i++ ) {
             try { 
                 bool unique = d->idx(i).unique();
-                _indexRecord(d, i, obj, newRecordLoc, /*dupsAllowed*/!unique);
+                _indexRecord(d, i, obj, loc, /*dupsAllowed*/!unique);
             }
             catch( DBException& ) { 
                 /* try to roll back previously added index entries
@@ -1173,7 +1194,7 @@ namespace mongo {
                 */
                 for( int j = 0; j <= i; j++ ) { 
                     try {
-                        _unindexRecord(d->idx(j), obj, newRecordLoc, false);
+                        _unindexRecord(d->idx(j), obj, loc, false);
                     }
                     catch(...) { 
                         log(3) << "unindex fails on rollback after unique failure\n";
@@ -1308,11 +1329,6 @@ namespace mongo {
 
         string tabletoidxns;
         if ( addIndex ) {
-            /* we can't build a new index for the ns if a build is already in progress in the background - 
-               EVEN IF this is a foreground build.
-               */
-            uassert(12588, "cannot add index with a background operation in progress", 
-                !BackgroundOperation::inProgForNs(tabletoidxns.c_str()));
             BSONObj io((const char *) obuf);
             if( !prepareToBuildIndex(io, god, tabletoidxns, tableToIndex) )
                 return DiskLoc();
@@ -1443,7 +1459,8 @@ namespace mongo {
         /* add this record to our indexes */
         if ( d->nIndexes ) {
             try { 
-                indexRecord(d, r->data/*buf*/, len, loc);
+                BSONObj obj(r->data);
+                indexRecord(d, obj, loc);
             } 
             catch( AssertionException& e ) { 
                 // should be a dup key error on _id index
@@ -1652,11 +1669,16 @@ namespace mongo {
                                 "backup" : "$tmp" );
         BOOST_CHECK_EXCEPTION( boost::filesystem::create_directory( reservedPath ) );
         string reservedPathString = reservedPath.native_directory_string();
-        assert( setClient( dbName, reservedPathString.c_str() ) );
-
-        bool res = cloneFrom(localhost.c_str(), errmsg, dbName, 
-                             /*logForReplication=*/false, /*slaveok*/false, /*replauth*/false, /*snapshot*/false);
-        closeDatabase( dbName, reservedPathString.c_str() );
+        
+        bool res;
+        { // clone to temp location, which effectively does repair
+            Client::Context ctx( dbName, reservedPathString );
+            assert( ctx.justCreated() );
+            
+            res = cloneFrom(localhost.c_str(), errmsg, dbName, 
+                                 /*logForReplication=*/false, /*slaveok*/false, /*replauth*/false, /*snapshot*/false);
+            closeDatabase( dbName, reservedPathString.c_str() );
+        }
 
         if ( !res ) {
             problem() << "clone failed for " << dbName << " with error: " << errmsg << endl;
@@ -1665,7 +1687,7 @@ namespace mongo {
             return false;
         }
 
-        assert( !setClient( dbName ) );
+        Client::Context ctx( dbName );
         closeDatabase( dbName );
 
         if ( backupOriginalFiles ) {
@@ -1720,7 +1742,7 @@ namespace mongo {
     NamespaceDetails* nsdetails_notinline(const char *ns) { return nsdetails(ns); }
     
     bool DatabaseHolder::closeAll( const string& path , BSONObjBuilder& result , bool force ){
-        log(2) << "DatabaseHolder::closeAll path:" << path << endl;
+        log() << "DatabaseHolder::closeAll path:" << path << endl;
         dbMutex.assertWriteLocked();
         
         map<string,Database*>& m = _paths[path];
@@ -1736,7 +1758,7 @@ namespace mongo {
         for( set< string >::iterator i = dbs.begin(); i != dbs.end(); ++i ) {
             string name = *i;
             log(2) << "DatabaseHolder::closeAll path:" << path << " name:" << name << endl;
-            setClient( name.c_str() , path );
+            Client::Context ctx( name , path );
             if( !force && BackgroundOperation::inProgForDb(name.c_str()) )
                 log() << "WARNING: can't close database " << name << "because a bg job is in progress - try killOp command" << endl;
             else

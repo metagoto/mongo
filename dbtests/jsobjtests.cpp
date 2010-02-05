@@ -251,6 +251,113 @@ namespace JsobjTests {
             }
         };
 
+        class AsTempObj{
+        public:
+            void run(){
+                {
+                    BSONObjBuilder bb;
+                    bb << "a" << 1;
+                    BSONObj tmp = bb.asTempObj();
+                    ASSERT(tmp.objsize() == 4+(1+2+4)+1);
+                    ASSERT(tmp.valid());
+                    ASSERT(tmp.hasField("a"));
+                    ASSERT(!tmp.hasField("b"));
+                    ASSERT(tmp == BSON("a" << 1));
+                    
+                    bb << "b" << 2;
+                    BSONObj obj = bb.obj();
+                    ASSERT(obj.objsize() == 4+(1+2+4)+(1+2+4)+1);
+                    ASSERT(obj.valid());
+                    ASSERT(obj.hasField("a"));
+                    ASSERT(obj.hasField("b"));
+                    ASSERT(obj == BSON("a" << 1 << "b" << 2));
+                }
+                {
+                    BSONObjBuilder bb;
+                    bb << "a" << GT << 1;
+                    BSONObj tmp = bb.asTempObj();
+                    ASSERT(tmp.objsize() == 4+(1+2+(4+1+4+4+1))+1);
+                    ASSERT(tmp.valid());
+                    ASSERT(tmp.hasField("a"));
+                    ASSERT(!tmp.hasField("b"));
+                    ASSERT(tmp == BSON("a" << BSON("$gt" << 1)));
+                    
+                    bb << "b" << LT << 2;
+                    BSONObj obj = bb.obj();
+                    ASSERT(obj.objsize() == 4+(1+2+(4+1+4+4+1))+(1+2+(4+1+4+4+1))+1);
+                    ASSERT(obj.valid());
+                    ASSERT(obj.hasField("a"));
+                    ASSERT(obj.hasField("b"));
+                    ASSERT(obj == BSON("a" << BSON("$gt" << 1)
+                                    << "b" << BSON("$lt" << 2)));
+                }
+                {
+                    BSONObjBuilder bb(32);
+                    bb << "a" << 1;
+                    BSONObj tmp = bb.asTempObj();
+                    ASSERT(tmp.objsize() == 4+(1+2+4)+1);
+                    ASSERT(tmp.valid());
+                    ASSERT(tmp.hasField("a"));
+                    ASSERT(!tmp.hasField("b"));
+                    ASSERT(tmp == BSON("a" << 1));
+
+                    //force a realloc
+                    BSONArrayBuilder arr;
+                    for (int i=0; i < 10000; i++){
+                        arr << i;
+                    }
+                    bb << "b" << arr.arr();
+                    BSONObj obj = bb.obj();
+                    ASSERT(obj.valid());
+                    ASSERT(obj.hasField("a"));
+                    ASSERT(obj.hasField("b"));
+                    ASSERT(obj.objdata() != tmp.objdata());
+                }
+            }
+        };
+
+        struct AppendIntOrLL{
+            void run(){
+                const long long billion = 1000*1000*1000;
+                BSONObjBuilder b;
+                b.appendIntOrLL("i1",  1);
+                b.appendIntOrLL("i2", -1);
+                b.appendIntOrLL("i3",  1*billion);
+                b.appendIntOrLL("i4", -1*billion);
+
+                b.appendIntOrLL("L1",  2*billion);
+                b.appendIntOrLL("L2", -2*billion);
+                b.appendIntOrLL("L3",  4*billion);
+                b.appendIntOrLL("L4", -4*billion);
+                b.appendIntOrLL("L5",  16*billion);
+                b.appendIntOrLL("L6", -16*billion);
+
+                BSONObj o = b.obj();
+
+                ASSERT(o["i1"].type() == NumberInt);
+                ASSERT(o["i1"].number() == 1);
+                ASSERT(o["i2"].type() == NumberInt);
+                ASSERT(o["i2"].number() == -1);
+                ASSERT(o["i3"].type() == NumberInt);
+                ASSERT(o["i3"].number() == 1*billion);
+                ASSERT(o["i4"].type() == NumberInt);
+                ASSERT(o["i4"].number() == -1*billion);
+
+                ASSERT(o["L1"].type() == NumberLong);
+                ASSERT(o["L1"].number() == 2*billion);
+                ASSERT(o["L2"].type() == NumberLong);
+                ASSERT(o["L2"].number() == -2*billion);
+                ASSERT(o["L3"].type() == NumberLong);
+                ASSERT(o["L3"].number() == 4*billion);
+                ASSERT(o["L4"].type() == NumberLong);
+                ASSERT(o["L4"].number() == -4*billion);
+                ASSERT(o["L5"].type() == NumberLong);
+                ASSERT(o["L5"].number() == 16*billion);
+                ASSERT(o["L6"].type() == NumberLong);
+                ASSERT(o["L6"].number() == -16*billion);
+            }
+        };
+
         namespace Validation {
 
             class Base {
@@ -1298,6 +1405,8 @@ namespace JsobjTests {
             add< BSONObjTests::MultiKeySortOrder > ();
             add< BSONObjTests::TimestampTest >();
             add< BSONObjTests::Nan >();
+            add< BSONObjTests::AsTempObj >();
+            add< BSONObjTests::AppendIntOrLL >();
             add< BSONObjTests::Validation::BadType >();
             add< BSONObjTests::Validation::EooBeforeEnd >();
             add< BSONObjTests::Validation::Undefined >();

@@ -224,6 +224,7 @@ namespace mongo {
                 db.dropCollection( setup.incLong );
                 
                 writelock l( setup.incLong );
+                Client::Context ctx( setup.incLong );
                 string err;
                 assert( userCreateNS( setup.incLong.c_str() , BSON( "autoIndexId" << 0 ) , err , false ) );
 
@@ -237,6 +238,7 @@ namespace mongo {
                 BSONObj res = reduceValues( values , scope.get() , reduce , 1 , finalize );
                 
                 writelock l( setup.tempLong );
+                Client::Context ctx( setup.incLong );
                 theDataFileMgr.insertAndLog( setup.tempLong.c_str() , res , false );
             }
 
@@ -291,6 +293,7 @@ namespace mongo {
 
             void dump(){
                 writelock l(_state.setup.incLong);
+                Client::Context ctx(_state.setup.incLong);
                     
                 for ( InMemory::iterator i=_temp->begin(); i!=_temp->end(); i++ ){
                     list<BSONObj>& all = i->second;
@@ -495,9 +498,9 @@ namespace mongo {
             virtual bool slaveOk() { return true; }
 
             bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
-                dbtemprelease temprlease; // we don't touch the db directly
-                                    
-                string dbname = cc().database()->name;
+                string dbname = cc().database()->name; // this has to come before dbtemprelease
+                dbtemprelease temprelease; // we don't touch the db directly
+
                 string shardedOutputCollection = cmdObj["shardedOutputCollection"].valuestrsafe();
 
                 MRSetup mr( dbname , cmdObj.firstElement().embeddedObjectUserCheck() , false );
@@ -547,7 +550,7 @@ namespace mongo {
                 DBDirectClient db;
                 
                 while ( cursor.more() ){
-                    BSONObj t = cursor.next();
+                    BSONObj t = cursor.next().getOwned();
                                         
                     if ( values.size() == 0 ){
                         values.push_back( t );

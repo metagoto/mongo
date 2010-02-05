@@ -18,6 +18,7 @@
 #pragma once
 
 #include <string.h>
+#include <errno.h>
 
 namespace mongo {
 
@@ -243,5 +244,7 @@ namespace mongo {
 
 #define OUTPUT_ERRNOX(x) "errno:" << x << " " << strerror(x) 
 #define OUTPUT_ERRNO OUTPUT_ERRNOX(errno)
+
+    string errnostring( const char * prefix = 0 );
 
 } // namespace mongo

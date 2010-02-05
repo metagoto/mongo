@@ -578,7 +578,7 @@ namespace mongo {
         for ( int i = 0; i < nIndexes; i++ ) {
             IndexDetails& idx = indexes[i];
             BSONObj idxKey = idx.info.obj().getObjectField("key"); // e.g., { ts : -1 }
-            if ( !idxKey.findElement(fieldName).eoo() )
+            if ( !idxKey.getField(fieldName).eoo() )
                 return i;
         }*/
         return -1;
@@ -636,7 +636,7 @@ namespace mongo {
         while( i.more() )
             i.next().keyPattern().getFieldNames(_indexKeys);
     }
-    
+
     void NamespaceDetailsTransient::cllStart( int logSizeMb ) {
         assertInWriteLock();
         _cll_ns = "local.temp.oplog." + _ns;
@@ -644,7 +644,7 @@ namespace mongo {
         stringstream spec;
         // 128MB
         spec << "{size:" << logSizeMb * 1024 * 1024 << ",capped:true,autoIndexId:false}";
-        setClient( _cll_ns.c_str() );
+        Client::Context ct( _cll_ns );
         string err;
         massert( 10347 ,  "Could not create log ns", userCreateNS( _cll_ns.c_str(), fromjson( spec.str() ), err, false ) );
         NamespaceDetails *d = nsdetails( _cll_ns.c_str() );
@@ -670,7 +670,7 @@ namespace mongo {
         assertInWriteLock();
         if ( !_cll_enabled )
             return;
-        setClient( _cll_ns.c_str() );
+        Client::Context ctx( _cll_ns );
         dropNS( _cll_ns );
     }
 

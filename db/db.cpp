@@ -40,6 +40,7 @@
 #include "../scripting/engine.h"
 #include "module.h"
 #include "cmdline.h"
+#include "stats/snapshots.h"
 
 namespace mongo {
 
@@ -69,7 +70,10 @@ namespace mongo {
 
     const char *ourgetns() { 
         Client *c = currentClient.get();
-        return c ? c->ns() : "";
+        if ( ! c )
+            return "";
+        Client::Context* cc = c->getContext();
+        return cc ? cc->ns() : "";
     }
 
     struct MyStartupTests {
@@ -82,7 +86,7 @@ namespace mongo {
 
     void testTheDb() {
         OpDebug debug;
-        setClient("sys.unittest.pdfile");
+        Client::Context ctx("sys.unittest.pdfile");
 
         /* this is not validly formatted, if you query this namespace bad things will happen */
         theDataFileMgr.insert("sys.unittest.pdfile", (void *) "hello worldx", 13);
@@ -101,8 +105,6 @@ namespace mongo {
             c->advance();
         }
         out() << endl;
-
-        cc().clearns();
     }
 
     MessagingPort *connGrab = 0;
@@ -193,7 +195,7 @@ namespace mongo {
 
         try {
 
-            c.ai->isLocalHost = dbMsgPort.farEnd.isLocalHost();
+            c.getAuthenticationInfo()->isLocalHost = dbMsgPort.farEnd.isLocalHost();
 
             Message m;
             while ( 1 ) {
@@ -335,8 +337,9 @@ namespace mongo {
     extern bool checkNsFilesOnLoad;
 
     void repairDatabases() {
+        Client::GodScope gs;
         log(1) << "enter repairDatabases" << endl;
-
+        
         assert(checkNsFilesOnLoad);
         checkNsFilesOnLoad = false; // we are mainly just checking the header - don't scan the whole .ns file for every db here.
 
@@ -346,7 +349,7 @@ namespace mongo {
         for ( vector< string >::iterator i = dbNames.begin(); i != dbNames.end(); ++i ) {
             string dbName = *i;
             log(1) << "\t" << dbName << endl;
-            assert( !setClient( dbName.c_str() ) );
+            Client::Context ctx( dbName );
             MongoDataFile *p = cc().database()->getFile( 0 );
             MDFHeader *h = p->getHeader();
             if ( !h->currentVersion() || forceRepair ) {
@@ -394,8 +397,9 @@ namespace mongo {
                 boost::filesystem::remove_all( *i );
         }
     }
-
+    
     void clearTmpCollections() {
+        Client::GodScope gs;
         vector< string > toDelete;
         DBDirectClient cli;
         auto_ptr< DBClientCursor > c = cli.query( "local.system.namespaces", Query( fromjson( "{name:/^local.temp./}" ) ) );
@@ -408,7 +412,7 @@ namespace mongo {
             cli.dropCollection( *i );
         }
     }
-
+    
     /**
      * does background async flushes of mmapped files
      */
@@ -513,6 +517,7 @@ namespace mongo {
         /* this is for security on certain platforms (nonce generation) */
         srand((unsigned) (curTimeMicros() ^ startupSrandTimer.micros()));
 
+        snapshotThread.go();
         listen(listenPort);
 
         // listen() will return when exit code closes its socket.
@@ -608,6 +613,7 @@ int main(int argc, char* argv[], char *envp[] )
         ("cpu", "periodically show cpu and iowait utilization")
         ("noauth", "run without security")
         ("auth", "run with security")
+        ("authWriteOnly", "run with security for writes only")
         ("objcheck", "inspect client data for validity on receipt")
         ("quota", "enable db quota management")
         ("quotaFiles", po::value<int>(), "number of files allower per db, requires --quota")
@@ -766,10 +772,15 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("cpu")) {
             cmdLine.cpu = true;
         }
+        if (params.count("authWriteOnly")) {
+            noauth = false;
+            authWriteOnly = true;
+        }
         if (params.count("noauth")) {
             noauth = true;
         }
         if (params.count("auth")) {
+            authWriteOnly = false;
             noauth = false;
         }
         if (params.count("quota")) {
@@ -1060,6 +1071,14 @@ namespace mongo {
         exitCleanly();
     }
 
+    // this will be called in certain c++ error cases, for example if there are two active
+    // exceptions
+    void myterminate() {
+        rawOut( "terminate() called, printing stack:\n" );
+        printStackTrace();
+        abort();
+    }
+    
     void setupSignals() {
         assert( signal(SIGSEGV, abruptQuit) != SIG_ERR );
         assert( signal(SIGFPE, abruptQuit) != SIG_ERR );
@@ -1075,6 +1094,8 @@ namespace mongo {
         sigaddset( &asyncSignals, SIGTERM );
         assert( pthread_sigmask( SIG_SETMASK, &asyncSignals, 0 ) == 0 );
         boost::thread it( interruptThread );
+        
+        set_terminate( myterminate );
     }
 
 #else

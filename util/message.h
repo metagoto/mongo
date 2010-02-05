@@ -100,6 +100,20 @@ namespace mongo {
 
     bool doesOpGetAResponse( int op );
 
+    inline const char * opToString( int op ){
+        switch ( op ){
+        case opReply: return "reply";
+        case dbMsg: return "msg";
+        case dbUpdate: return "update";
+        case dbInsert: return "insert";
+        case dbQuery: return "query";
+        case dbGetMore: return "getmore";
+        case dbDelete: return "remove";
+        case dbKillCursors: return "killcursors";
+        default: assert(0); return "";
+        }
+    }
+
     struct MsgData {
         int len; /* len of the msg, including this field */
         MSGID id; /* request/reply id's match... */
@@ -176,9 +190,9 @@ namespace mongo {
         void setData(int operation, const char *msgtxt) {
             setData(operation, msgtxt, strlen(msgtxt)+1);
         }
-        void setData(int operation, const char *msgdata, int len) {
+        void setData(int operation, const char *msgdata, size_t len) {
             assert(data == 0);
-            int dataLen = len + sizeof(MsgData) - 4;
+            size_t dataLen = len + sizeof(MsgData) - 4;
             MsgData *d = (MsgData *) malloc(dataLen);
             memcpy(d->_data, msgdata, len);
             d->len = fixEndian(dataLen);
