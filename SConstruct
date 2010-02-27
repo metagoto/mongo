@@ -20,6 +20,7 @@ import urllib
 import urllib2
 import buildscripts
 import buildscripts.bb
+from buildscripts import utils
 
 buildscripts.bb.checkOk()
 
@@ -162,6 +163,13 @@ AddOption( "--noshell",
            action="store",
            help="don't build shell" )
 
+AddOption( "--safeshell",
+           dest="safeshell",
+           type="string",
+           nargs=0,
+           action="store",
+           help="don't let shell scripts run programs (still, don't run untrusted scripts)" )
+
 AddOption( "--extrapath",
            dest="extrapath",
            type="string",
@@ -236,6 +244,16 @@ AddOption( "--gdbserver",
            nargs=0,
            action="store" )
 
+AddOption("--nostrip",
+          dest="nostrip",
+          action="store_true",
+          help="do not strip installed binaries")
+
+AddOption("--sharedclient",
+          dest="sharedclient",
+          action="store",
+          help="build a libmongoclient.so/.dll")
+
 # --- environment setup ---
 
 def removeIfInList( lst , thing ):
@@ -295,6 +313,8 @@ env.Append( CPPDEFINES=[ "_SCONS" ] )
 env.Append( CPPPATH=[ "." ] )
 
 
+if GetOption( "safeshell" ) != None:
+    env.Append( CPPDEFINES=[ "MONGO_SAFE_SHELL" ] )
 
 boostCompiler = GetOption( "boostCompiler" )
 if boostCompiler is None:
@@ -337,7 +357,7 @@ if GetOption( "extralib" ) is not None:
 
 # ------    SOURCE FILE SETUP -----------
 
-commonFiles = Split( "stdafx.cpp buildinfo.cpp db/jsobj.cpp db/json.cpp db/commands.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp shell/mongo.cpp" )
+commonFiles = Split( "stdafx.cpp buildinfo.cpp db/common.cpp db/jsobj.cpp db/json.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp shell/mongo.cpp" )
 commonFiles += [ "util/background.cpp" , "util/mmap.cpp" ,  "util/sock.cpp" ,  "util/util.cpp" , "util/message.cpp" , 
                  "util/assert_util.cpp" , "util/httpclient.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/debug_util.cpp",
                  "util/thread_pool.cpp" ]
@@ -359,10 +379,11 @@ if os.path.exists( "util/processinfo_" + os.sys.platform + ".cpp" ):
 else:
     commonFiles += [ "util/processinfo_none.cpp" ]
 
-coreDbFiles = []
+coreDbFiles = [ "db/commands.cpp" ]
 coreServerFiles = [ "util/message_server_port.cpp" , "util/message_server_asio.cpp" ]
 
-serverOnlyFiles = Split( "db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/matcher.cpp db/dbeval.cpp db/dbwebserver.cpp db/dbhelpers.cpp db/instance.cpp db/database.cpp db/pdfile.cpp db/index.cpp db/cursor.cpp db/security_commands.cpp db/client.cpp db/security.cpp util/miniwebserver.cpp db/storage.cpp db/reccache.cpp db/queryoptimizer.cpp db/extsort.cpp db/mr.cpp s/d_util.cpp" )
+serverOnlyFiles = Split( "db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/matcher.cpp db/dbeval.cpp db/dbwebserver.cpp db/dbhelpers.cpp db/instance.cpp db/database.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/client.cpp db/security.cpp util/miniwebserver.cpp db/storage.cpp db/reccache.cpp db/queryoptimizer.cpp db/extsort.cpp db/mr.cpp s/d_util.cpp" )
+serverOnlyFiles += [ "db/index.cpp" ] + Glob( "db/index_*.cpp" )
 
 serverOnlyFiles += Glob( "db/dbcommands*.cpp" )
 serverOnlyFiles += Glob( "db/stats/*.cpp" )
@@ -526,12 +547,13 @@ elif "win32" == os.sys.platform:
 	env['ENV'] = dict(os.environ)
 
     def find_boost():
-	for bv in reversed( range(33,50) ):
-	    for extra in ('', '_0', '_1'):
-		boostDir = "C:/Program Files/Boost/boost_1_" + str(bv) + extra
-		if os.path.exists( boostDir ):
-		    return boostDir
-	return None
+        for x in ('', ' (x86)'):	
+            for bv in reversed( range(33,50) ):
+	            for extra in ('', '_0', '_1'):
+		            boostDir = "C:/Program Files" + x + "/Boost/boost_1_" + str(bv) + extra
+		            if os.path.exists( boostDir ):
+		                return boostDir
+        return None
 
     boostDir = find_boost()
     if boostDir is None:
@@ -641,7 +663,7 @@ if nix:
     env.Append( LIBS=[] )
 
     if debugBuild:
-        env.Append( CPPFLAGS=" -O0 -fstack-protector -fstack-check" );
+        env.Append( CPPFLAGS=" -O0 -fstack-protector " );
     else:
         env.Append( CPPFLAGS=" -O3" )
 
@@ -1059,13 +1081,10 @@ Default( mongod )
 
 # tools
 allToolFiles = commonFiles + coreDbFiles + serverOnlyFiles + [ "client/gridfs.cpp", "tools/tool.cpp" ]
-env.Program( "mongodump" , allToolFiles + [ "tools/dump.cpp" ] )
-env.Program( "mongorestore" , allToolFiles + [ "tools/restore.cpp" ] )
-
-env.Program( "mongoexport" , allToolFiles + [ "tools/export.cpp" ] )
-env.Program( "mongoimport" , allToolFiles + [ "tools/import.cpp" ] )
-
-env.Program( "mongofiles" , allToolFiles + [ "tools/files.cpp" ] )
+normalTools = [ "dump" , "restore" , "export" , "import" , "files" , "stat" ]
+env.Alias( "tools" , [ "mongo" + x for x in normalTools ] )
+for x in normalTools:
+    env.Program( "mongo" + x , allToolFiles + [ "tools/" + x + ".cpp" ] )
 
 env.Program( "mongobridge" , allToolFiles + [ "tools/bridge.cpp" ] )
 
@@ -1074,6 +1093,8 @@ mongos = env.Program( "mongos" , commonFiles + coreDbFiles + coreServerFiles + s
 
 # c++ library
 clientLibName = str( env.Library( "mongoclient" , allClientFiles )[0] )
+if GetOption( "sharedclient" ):
+    sharedClientLibName = str( env.SharedLibrary( "mongoclient" , allClientFiles )[0] )
 env.Library( "mongotestfiles" , commonFiles + coreDbFiles + serverOnlyFiles + ["client/gridfs.cpp"])
 
 clientTests = []
@@ -1083,6 +1104,7 @@ clientTests += [ clientEnv.Program( "firstExample" , [ "client/examples/first.cp
 clientTests += [ clientEnv.Program( "secondExample" , [ "client/examples/second.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "whereExample" , [ "client/examples/whereExample.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "authTest" , [ "client/examples/authTest.cpp" ] ) ]
+clientTests += [ clientEnv.Program( "httpClientTest" , [ "client/examples/httpClientTest.cpp" ] ) ]
 
 # testing
 test = testEnv.Program( "test" , Glob( "dbtests/*.cpp" ) )
@@ -1192,13 +1214,8 @@ def ensureTestDirs():
     ensureDir( "/data/" )
     ensureDir( "/data/db/" )
 
-def netstat():
-    from subprocess import call
-    call( [ "netstat", "-apvne" ] )
-
 def testSetup( env , target , source ):
     ensureTestDirs()
-    netstat()
 
 if len( COMMAND_LINE_TARGETS ) == 1 and str( COMMAND_LINE_TARGETS[0] ) == "test":
     ensureDir( "/tmp/unittest/" );
@@ -1276,21 +1293,19 @@ def startMongodForTests( env, target, source ):
     global mongod
     if mongodForTests:
         return
-    mongodForTestsPort = "40000"
+    mongodForTestsPort = "32000"
     import os
     ensureTestDirs()
     dirName = "/data/db/sconsTests/"
     ensureDir( dirName )
     from subprocess import Popen
-    mongodForTests = Popen( [ mongod[0].abspath, "--port", mongodForTestsPort, "--dbpath", dirName, "--nohttpinterface" ] )
-    # Wait for mongod to start
-    import time
-    time.sleep( 5 )
-    if mongodForTests.poll() is not None:
+    mongodForTests = Popen( [ mongod[0].abspath, "--port", mongodForTestsPort, "--dbpath", dirName ] )
+
+    if not utils.didMongodStart( 32000 ):
         print( "Failed to start mongod" )
         mongodForTests = None
         Exit( 1 )
-
+        
 def stopMongodForTests():
     global mongodForTests
     if not mongodForTests:
@@ -1462,7 +1477,7 @@ def installBinary( e , name ):
     fullInstallName = installDir + "/bin/" + name
 
     allBinaries += [ name ]
-    if solaris or linux:
+    if (solaris or linux) and (not GetOption("nostrip")):
         e.AddPostAction( inst, e.Action( 'strip ' + fullInstallName ) )
 
     if linux and len( COMMAND_LINE_TARGETS ) == 1 and str( COMMAND_LINE_TARGETS[0] ) == "s3dist":
@@ -1471,13 +1486,8 @@ def installBinary( e , name ):
     if nix:
         e.AddPostAction( inst , e.Action( 'chmod 755 ' + fullInstallName ) )
 
-installBinary( env , "mongodump" )
-installBinary( env , "mongorestore" )
-
-installBinary( env , "mongoexport" )
-installBinary( env , "mongoimport" )
-
-installBinary( env , "mongofiles" )
+for x in normalTools:
+    installBinary( env , "mongo" + x )
 
 if mongosniff_built:
     installBinary(env, "mongosniff")

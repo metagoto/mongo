@@ -633,6 +633,9 @@ namespace mongo {
         int profile = cc().database()->profile;
         StringBuilder& ss = debug.str;
 
+        if ( logLevel > 2 )
+            ss << " update: " << updateobj;
+        
         /* idea with these here it to make them loop invariant for multi updates, and thus be a bit faster for that case */
         /* NOTE: when yield() is added herein, these must be refreshed after each call to yield! */
         NamespaceDetails *d = nsdetails(ns); // can be null if an upsert...
@@ -734,7 +737,7 @@ namespace mongo {
                 } 
                 else {
                     BSONObj newObj = mss->createNewFromMods();
-                    uassert( 12522 , "$ operator made object too large" , newObj.isValid() );
+                    uassert( 12522 , "$ operator made object too large" , newObj.objsize() <= ( 4 * 1024 * 1024 ) );
                     DiskLoc newLoc = theDataFileMgr.updateRecord(ns, d, nsdt, r, loc , newObj.objdata(), newObj.objsize(), debug);
                     if ( newLoc != loc || modsIsIndexed ) {
                         // object moved, need to make sure we don' get again
@@ -786,10 +789,7 @@ namespace mongo {
         if ( upsert ) {
             if ( updateobj.firstElement().fieldName()[0] == '$' ) {
                 /* upsert of an $inc. build a default */
-                ModSet mods(updateobj);
-                 
-                BSONObj newObj = mods.createNewFromQuery( patternOrig );
-
+                BSONObj newObj = mods->createNewFromQuery( patternOrig );
                 if ( profile )
                     ss << " fastmodinsert ";
                 theDataFileMgr.insert(ns, newObj);

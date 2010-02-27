@@ -53,10 +53,10 @@ namespace mongo {
             */
             recordLoc.GETOFS() |= 1;
         }
-        int isUnused() {
+        int isUnused() const {
             return recordLoc.getOfs() & 1;
         }
-        int isUsed() {
+        int isUsed() const {
             return !isUnused();
         }
     };
@@ -85,12 +85,17 @@ namespace mongo {
         bool isHead() { return parent.isNull(); }
         void assertValid(const BSONObj &order, bool force = false);
         int fullValidate(const DiskLoc& thisLoc, const BSONObj &order); /* traverses everything */
-    protected:
-        void modified(const DiskLoc& thisLoc);
+
         KeyNode keyNode(int i) const {
-            assert( i < n );
+            if ( i >= n ){
+                massert( 13000 , (string)"invalid keyNode: " +  BSON( "i" << i << "n" << n ).jsonString() , i < n );
+            }
             return KeyNode(*this, k(i));
         }
+
+    protected:
+
+        void modified(const DiskLoc& thisLoc);
 
         char * dataAt(short ofs) {
             return data + ofs;
@@ -151,6 +156,10 @@ namespace mongo {
             ss << "    emptySize: " << emptySize << " topSize: " << topSize << endl;
             return ss.str();
         }
+        
+        bool isUsed( int i ) const {
+            return k(i).isUsed();
+        }
 
     protected:
         void _shape(int level, stringstream&);
@@ -190,6 +199,7 @@ namespace mongo {
             DiskLoc self); 
 
         static DiskLoc addBucket(IndexDetails&); /* start a new index off, empty */
+        void deallocBucket(const DiskLoc &thisLoc); // clear bucket memory, placeholder for deallocation
         
         static void renameIndexNamespace(const char *oldNs, const char *newNs);
 
@@ -331,7 +341,8 @@ namespace mongo {
         }
         
         void forgetEndKey() { endKey = BSONObj(); }
-        
+
+        virtual bool useMatcher();
     private:
         /* Our btrees may (rarely) have "unused" keys when items are deleted.
            Skip past them.
@@ -367,6 +378,7 @@ namespace mongo {
         DiskLoc locAtKeyOfs;
         BoundList bounds_;
         unsigned boundIndex_;
+        const IndexSpec& _spec;
     };
 
 #pragma pack()

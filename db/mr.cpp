@@ -123,8 +123,10 @@ namespace mongo {
                     if ( cmdObj["finalize"].type() ){
                         finalizeCode = cmdObj["finalize"].ascode();
                     }
+                    checkCodeWScope( "map" , cmdObj );
+                    checkCodeWScope( "reduce" , cmdObj );
+                    checkCodeWScope( "finalize" , cmdObj );
                     
-
                     if ( cmdObj["mapparams"].type() == Array ){
                         mapparams = cmdObj["mapparams"].embeddedObjectUserCheck();
                     }
@@ -151,6 +153,14 @@ namespace mongo {
                 }
             }
             
+            void checkCodeWScope( const char * field , const BSONObj& o ){
+                BSONElement e = o[field];
+                if ( e.type() != CodeWScope )
+                    return;
+                BSONObj x = e.codeWScopeObject();
+                uassert( 13035 , (string)"can't use CodeWScope with map/reduce function: " + field , x.isEmpty() );
+            }
+
             /**
                @return number objects in collection
              */
@@ -360,7 +370,7 @@ namespace mongo {
             virtual void help( stringstream &help ) const {
                 help << "see http://www.mongodb.org/display/DOCS/MapReduce";
             }
-        
+            virtual LockType locktype(){ return WRITE; } // TODO, READ?
             bool run(const char *dbname, BSONObj& cmd, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
                 Timer t;
                 Client::GodScope cg;
@@ -496,7 +506,8 @@ namespace mongo {
         public:
             MapReduceFinishCommand() : Command( "mapreduce.shardedfinish" ){}
             virtual bool slaveOk() { return true; }
-
+            
+            virtual LockType locktype(){ return WRITE; } 
             bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
                 string dbname = cc().database()->name; // this has to come before dbtemprelease
                 dbtemprelease temprelease; // we don't touch the db directly

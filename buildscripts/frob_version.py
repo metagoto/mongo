@@ -1,12 +1,18 @@
 #!/usr/bin/python
 
+from __future__ import with_statement
 import tempfile
 import sys
 import re
 import os
 
 def opentemp(basename):
-    return tempfile.NamedTemporaryFile('w', -1, ".XXXXXX", basename, '.', False)
+    # The following doesn't work in python before 2.6
+#    return tempfile.NamedTemporaryFile('w', -1, ".XXXXXX", basename, '.', False)
+    fname = basename +".TMP"
+    if os.path.exists(fname):
+        raise "not clobbering file %s" % fname
+    return open(fname, 'w')
 
 def frob_debian_changelog(version):
     fname = 'debian/changelog'

@@ -87,7 +87,7 @@ startMongoProgram = function(){
         } catch( e ) {
         }
         return false;
-    }, "unable to connect to mongo program on port " + port, 30000 );
+    }, "unable to connect to mongo program on port " + port, 60000 );
 
     return m;
 }
@@ -107,13 +107,15 @@ myPort = function() {
         return 27017;
 }
 
-ShardingTest = function( testName , numServers , verboseLevel , numMongos ){
+ShardingTest = function( testName , numServers , verboseLevel , numMongos , otherParams ){
+    if ( ! otherParams )
+        otherParams = {}
     this._connections = [];
     this._serverNames = [];
 
     for ( var i=0; i<numServers; i++){
         var conn = startMongod( { port : 30000 + i , dbpath : "/data/db/" + testName + i , 
-            noprealloc : "" , smallfiles : "" , oplogSize : "2" } );
+            noprealloc : "" , smallfiles : "" , oplogSize : "2" , "nohttpinterface" : ""} );
         conn.name = "localhost:" + ( 30000 + i );
 
         this._connections.push( conn );
@@ -121,10 +123,11 @@ ShardingTest = function( testName , numServers , verboseLevel , numMongos ){
     }
 
     this._configDB = "localhost:30000";
-
+    this._connections[0].getDB( "config" ).settings.insert( { _id : "chunksize" , value : otherParams.chunksize || 50 } );
+    
 
     this._mongos = [];
-    var startMongosPort = 39999;
+    var startMongosPort = 31000;
     for ( var i=0; i<(numMongos||1); i++ ){
         var myPort =  startMongosPort - i;
         var conn = startMongos( { port : startMongosPort - i , v : verboseLevel || 0 , configdb : this._configDB }  );
@@ -173,7 +176,7 @@ ShardingTest.prototype.getOther = function( one ){
 
 ShardingTest.prototype.stop = function(){
     for ( var i=0; i<this._mongos.length; i++ ){
-        stopMongoProgram( 39999 - i );
+        stopMongoProgram( 31000 - i );
     }
     for ( var i=0; i<this._connections.length; i++){
         stopMongod( 30000 + i );
@@ -612,7 +615,7 @@ ReplTest.prototype.stop = function( master , signal ){
 
 allocatePorts = function( n ) {
     var ret = [];
-    for( var i = 35000; i < 35000 + n; ++i )
+    for( var i = 31000; i < 31000 + n; ++i )
         ret.push( i );
     return ret;
 }

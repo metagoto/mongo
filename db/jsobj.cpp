@@ -51,12 +51,6 @@ namespace mongo {
     }
 
     IDLabeler GENOID;
-    BSONObjBuilder& operator<<(BSONObjBuilder& b, IDLabeler& id) {
-        OID oid;
-        oid.init();
-        b.appendOID("_id", &oid);
-        return b;
-    }
 
     DateNowLabeler DATENOW;
 
@@ -436,8 +430,12 @@ namespace mongo {
                     else if ( fn[3] == 'e' && fn[4] == 0 ) return BSONObj::LTE;
                 }
             }
-            else if ( fn[1] == 'n' && fn[2] == 'e' && fn[3] == 0)
-                return BSONObj::NE;
+            else if ( fn[1] == 'n' && fn[2] == 'e' ){
+                if ( fn[3] == 0 )
+                    return BSONObj::NE;
+                if ( fn[3] == 'a' && fn[4] == 'r' && fn[5] == 0 )
+                    return BSONObj::opNEAR;
+            }
             else if ( fn[1] == 'm' && fn[2] == 'o' && fn[3] == 'd' && fn[4] == 0 )
                 return BSONObj::opMOD;
             else if ( fn[1] == 't' && fn[2] == 'y' && fn[3] == 'p' && fn[4] == 'e' && fn[5] == 0 )
@@ -1140,7 +1138,10 @@ namespace mongo {
             
             if ( strchr( name , '.' ) ||
                  strchr( name , '$' ) ){
-                return false;
+                return 
+                    strcmp( name , "$ref" ) == 0 ||
+                    strcmp( name , "$id" ) == 0
+                    ;
             }
             
             if ( e.mayEncapsulate() ){
@@ -1609,6 +1610,17 @@ namespace mongo {
 
     }
 
+    void BSONObjBuilder::appendKeys( const BSONObj& keyPattern , const BSONObj& values ){
+        BSONObjIterator i(keyPattern);
+        BSONObjIterator j(values);
+        
+        while ( i.more() && j.more() ){
+            appendAs( j.next() , i.next().fieldName() );
+        }
+        
+        assert( ! i.more() );
+        assert( ! j.more() );
+    }
 
     int BSONElementFieldSorter( const void * a , const void * b ){
         const char * x = *((const char**)a);

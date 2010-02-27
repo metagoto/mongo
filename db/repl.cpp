@@ -39,6 +39,7 @@
 #include "repl.h"
 #include "../util/message.h"
 #include "../client/dbclient.h"
+#include "../client/connpool.h"
 #include "pdfile.h"
 #include "query.h"
 #include "db.h"
@@ -47,6 +48,8 @@
 #include "cmdline.h"
 
 namespace mongo {
+
+    ReplSettings replSettings;
 
     void ensureHaveIdIndex(const char *ns);
 
@@ -63,7 +66,6 @@ namespace mongo {
     */
     const char *replAllDead = 0;
 
-    extern bool autoresync;
     time_t lastForcedResync = 0;
     
     IdTracker &idTracker = *( new IdTracker() );
@@ -137,6 +139,7 @@ namespace mongo {
         virtual bool logTheOp() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdReplacePeer() : Command("replacepeer") { }
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if ( replPair == 0 ) {
@@ -196,6 +199,7 @@ namespace mongo {
         virtual bool logTheOp() {
             return false;   
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdForceDead() : Command("forcedead") { }
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             replAllDead = "forced by command";
@@ -215,6 +219,7 @@ namespace mongo {
         virtual bool logTheOp() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdResync() : Command("resync") { }
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if ( cmdObj.getBoolField( "force" ) ) {
@@ -253,12 +258,84 @@ namespace mongo {
         }
     } cmdResync;
     
+    bool anyReplEnabled(){
+        return replPair || replSettings.slave || replSettings.master;
+    }
+
+    void appendReplicationInfo( BSONObjBuilder& result , bool authed , int level ){
+        
+        if ( replAllDead ) {
+            result.append("ismaster", 0.0);
+            if( authed ) { 
+                if ( replPair )
+                    result.append("remote", replPair->remote);
+                result.append("info", replAllDead);
+            }
+        }
+        else if ( replPair ) {
+            result.append("ismaster", replPair->state);
+            if( authed ) {
+                result.append("remote", replPair->remote);
+                if ( !replPair->info.empty() )
+                    result.append("info", replPair->info);
+            }
+        }
+        else {
+            result.append("ismaster", replSettings.slave ? 0 : 1);
+            result.append("msg", "not paired");
+        }
+        
+        if ( level ){
+            BSONObjBuilder sources( result.subarrayStart( "sources" ) );
+            
+            readlock lk( "local.sources" );
+            Client::Context ctx( "local.sources" );
+            auto_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
+            int n = 0;
+            while ( c->ok() ){
+                BSONObj s = c->current();
+                
+                BSONObjBuilder bb;
+                bb.append( s["host"] );
+                string sourcename = s["source"].valuestr();
+                if ( sourcename != "main" )
+                    bb.append( s["source"] );
+                
+                {
+                    BSONElement e = s["syncedTo"];
+                    BSONObjBuilder t( bb.subobjStart( "syncedTo" ) );
+                    t.appendDate( "time" , e.timestampTime() );
+                    t.append( "inc" , e.timestampInc() );
+                    t.done();
+                }
+                
+                if ( level > 1 ){
+                    dbtemprelease unlock;
+                    ScopedDbConnection conn( s["host"].valuestr() );
+                    BSONObj first = conn->findOne( (string)"local.oplog.$" + sourcename , Query().sort( BSON( "$natural" << 1 ) ) );
+                    BSONObj last = conn->findOne( (string)"local.oplog.$" + sourcename , Query().sort( BSON( "$natural" << -1 ) ) );
+                    bb.appendDate( "masterFirst" , first["ts"].timestampTime() );
+                    bb.appendDate( "masterLast" , last["ts"].timestampTime() );
+                    double lag = (double) (last["ts"].timestampTime() - s["syncedTo"].timestampTime());
+                    bb.append( "lagSeconds" , lag / 1000 );
+                    conn.done();
+                }
+
+                sources.append( BSONObjBuilder::numStr( n++ ) , bb.obj() );
+                c->advance();
+            }
+            
+            sources.done();
+        }
+    }
+
     class CmdIsMaster : public Command {
     public:
         virtual bool requiresAuth() { return false; }
         virtual bool slaveOk() {
             return true;
         }
+        virtual LockType locktype(){ return NONE; }
         CmdIsMaster() : Command("ismaster") { }
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
 			/* currently request to arbiter is (somewhat arbitrarily) an ismaster request that is not 
@@ -266,29 +343,9 @@ namespace mongo {
 			   we allow unauthenticated ismaster but we aren't as verbose informationally if 
 			   one is not authenticated for admin db to be safe.
 			*/
-			bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
-
-            if ( replAllDead ) {
-                result.append("ismaster", 0.0);
-				if( authed ) { 
-					if ( replPair )
-						result.append("remote", replPair->remote);
-					result.append("info", replAllDead);
-				}
-            }
-            else if ( replPair ) {
-                result.append("ismaster", replPair->state);
-				if( authed ) {
-					result.append("remote", replPair->remote);
-					if ( !replPair->info.empty() )
-						result.append("info", replPair->info);
-				}
-			}
-            else {
-                result.append("ismaster", slave ? 0 : 1);
-				result.append("msg", "not paired");
-            }
             
+			bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
+            appendReplicationInfo( result , authed );
             return true;
         }
     } cmdismaster;
@@ -299,6 +356,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return true;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdIsInitialSyncComplete() : Command( "isinitialsynccomplete" ) {}
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
             result.appendBool( "initialsynccomplete", getInitialSyncCompleted() );
@@ -332,7 +390,7 @@ namespace mongo {
         virtual bool adminOnly() {
             return true;
         }
-
+        virtual LockType locktype(){ return WRITE; }
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
             if ( replPair == 0 ) {
                 massert( 10383 ,  "Another mongod instance believes incorrectly that this node is its peer", !cmdObj.getBoolField( "fromArbiter" ) );
@@ -594,8 +652,8 @@ namespace mongo {
                 n++;
                 ReplSource tmp(c->current());
                 if ( tmp.hostName != cmdLine.source ) {
-                    log() << "--source " << cmdLine.source << " != " << tmp.hostName << " from local.sources collection" << endl;
-                    log() << "terminating after 30 seconds" << endl;
+                    log() << "repl: --source " << cmdLine.source << " != " << tmp.hostName << " from local.sources collection" << endl;
+                    log() << "repl: terminating mongod after 30 seconds" << endl;
                     sleepsecs(30);
                     dbexit( EXIT_REPLICATION_ERROR );
                 }
@@ -627,6 +685,9 @@ namespace mongo {
         if ( replPair ) {
             const string &remote = replPair->remote;
             // --pairwith host specified.
+            if ( replSettings.fastsync ) {
+                Helpers::emptyCollection( "local.sources" );  // ignore saved sources
+            }
             // check that no items are in sources other than that
             // add if missing
             auto_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
@@ -661,6 +722,17 @@ namespace mongo {
                     // peer was replaced -- start back at the beginning.
                     tmp.syncedTo = OpTime();
                     tmp.replacing = true;
+                }
+            } 
+            if ( ( !replPair && tmp.syncedTo.isNull() ) ||
+                ( replPair && replSettings.fastsync ) ) {
+                DBDirectClient c;
+                if ( c.exists( "local.oplog.$main" ) ) {
+                    BSONObj op = c.findOne( "local.oplog.$main", Query().sort( BSON( "$natural" << -1 ) ) );
+                    if ( !op.isEmpty() ) {
+                        tmp.syncedTo = op[ "ts" ].date();
+                        tmp._lastSavedLocalTs = op[ "ts" ].date();
+                    }
                 }
             }
             addSourceToList(v, tmp, c->current(), old);
@@ -740,7 +812,7 @@ namespace mongo {
         string dummyNs = resyncDrop( db.c_str(), "internal" );
         Client::Context ctx( dummyNs );
         {
-            log() << "resync: cloning database " << db << endl;
+            log() << "resync: cloning database " << db << " to get an initial copy" << endl;
             ReplInfo r("resync: cloning a database");
             string errmsg;
             bool ok = cloneFrom(hostName.c_str(), errmsg, cc().database()->name, false, /*slaveok*/ true, /*replauth*/ true, /*snapshot*/false);
@@ -750,7 +822,7 @@ namespace mongo {
             }
         }
 
-        log() << "resync: done " << db << endl;
+        log() << "resync: done with initial clone for db: " << db << endl;
 
         return true;
     }
@@ -969,7 +1041,11 @@ namespace mongo {
     
     void ReplSource::syncToTailOfRemoteLog() {
         string _ns = ns();
-        BSONObj last = conn->findOne( _ns.c_str(), Query().sort( BSON( "$natural" << -1 ) ) );
+        BSONObjBuilder b;
+        if ( !only.empty() ) {
+            b.appendRegex("ns", string("^") + only);
+        }        
+        BSONObj last = conn->findOne( _ns.c_str(), Query( b.done() ).sort( BSON( "$natural" << -1 ) ) );
         if ( !last.isEmpty() ) {
             BSONElement ts = last.getField( "ts" );
             massert( 10386 ,  "non Date ts found", ts.type() == Date || ts.type() == Timestamp );
@@ -1311,7 +1387,7 @@ namespace mongo {
             ReplInfo r("trying to connect to sync source");
             if ( !conn->connect(hostName.c_str(), errmsg) || !replAuthenticate(conn.get()) ) {
                 resetConnection();
-                log() << "repl: " << errmsg << endl;
+                log() << "repl:  " << errmsg << endl;
                 return false;
             }
         }
@@ -1335,7 +1411,7 @@ namespace mongo {
         }
 
         if ( !connect() ) {
-			log() << "repl:   can't connect to sync source" << endl;
+			log(4) << "repl:  can't connect to sync source" << endl;
             if ( replPair && paired ) {
                 assert( startsWith(hostName.c_str(), replPair->remoteHost.c_str()) );
                 replPair->arbitrate();
@@ -1375,7 +1451,7 @@ namespace mongo {
     Database *localOplogDB = 0;
 
     void logOp(const char *opstr, const char *ns, const BSONObj& obj, BSONObj *patt, bool *b) {
-        if ( master ) {
+        if ( replSettings.master ) {
             _logOp(opstr, ns, "local.oplog.$main", obj, patt, b, OpTime::now());
             char cl[ 256 ];
             nsToDatabase( ns, cl );
@@ -1545,7 +1621,7 @@ namespace mongo {
             {
                 dblock lk;
                 if ( replAllDead ) {
-                    if ( !autoresync || !ReplSource::throttledForceResyncDead( "auto" ) )
+                    if ( !replSettings.autoresync || !ReplSource::throttledForceResyncDead( "auto" ) )
                         break;
                 }
                 assert( syncing == 0 ); // i.e., there is only one sync thread running. we will want to change/fix this.
@@ -1573,9 +1649,10 @@ namespace mongo {
             }
             if ( s ) {
                 stringstream ss;
-                ss << "repl: sleep " << s << "sec before next pass";
+                ss << "repl:  sleep " << s << "sec before next pass";
                 string msg = ss.str();
-                log() << msg << endl;
+                if ( ! cmdLine.quiet )
+                    log() << msg << endl;
                 ReplInfo r(msg.c_str());
                 sleepsecs(s);
             }
@@ -1586,11 +1663,10 @@ namespace mongo {
 
     void replSlaveThread() {
         sleepsecs(1);
-
+        Client::initThread("replslave");
+            
         {
             dblock lk;
-
-            Client::initThread("replslave");
             cc().getAuthenticationInfo()->authorize("admin");
         
             BSONObj obj;
@@ -1668,7 +1744,7 @@ namespace mongo {
            */
         //boost::thread tempt(tempThread);
 
-        if ( !slave && !master && !replPair )
+        if ( !replSettings.slave && !replSettings.master && !replPair )
             return;
 
         {
@@ -1676,20 +1752,20 @@ namespace mongo {
             pairSync->init();
         }
 
-        if ( slave || replPair ) {
-            if ( slave ) {
-				assert( slave == SimpleSlave );
+        if ( replSettings.slave || replPair ) {
+            if ( replSettings.slave ) {
+				assert( replSettings.slave == SimpleSlave );
                 log(1) << "slave=true" << endl;
 			}
 			else
-				slave = ReplPairSlave;
+				replSettings.slave = ReplPairSlave;
             boost::thread repl_thread(replSlaveThread);
         }
 
-        if ( master || replPair ) {
-            if ( master  )
+        if ( replSettings.master || replPair ) {
+            if ( replSettings.master )
                 log(1) << "master=true" << endl;
-            master = true;
+            replSettings.master = true;
             createOplog();
         }
     }
@@ -1704,6 +1780,7 @@ namespace mongo {
         virtual bool slaveOk() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdLogCollection() : Command( "logCollection" ) {}
         virtual void help( stringstream &help ) const {
             help << "examples: { logCollection: <collection ns>, start: 1 }, "

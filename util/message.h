@@ -74,6 +74,9 @@ namespace mongo {
         void piggyBack( Message& toSend , int responseTo = -1 );
 
         virtual unsigned remotePort();
+
+        int send( const char * data , const int len );
+        int recv( char * data , int max );
     private:
         int sock;
         PiggyBackData * piggyBackData;
@@ -102,6 +105,7 @@ namespace mongo {
 
     inline const char * opToString( int op ){
         switch ( op ){
+        case 0: return "none";
         case opReply: return "reply";
         case dbMsg: return "msg";
         case dbUpdate: return "update";
@@ -110,7 +114,10 @@ namespace mongo {
         case dbGetMore: return "getmore";
         case dbDelete: return "remove";
         case dbKillCursors: return "killcursors";
-        default: assert(0); return "";
+        default: 
+            PRINT(op);
+            assert(0); 
+            return "";
         }
     }
 

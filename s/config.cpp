@@ -448,7 +448,7 @@ namespace mongo {
         
         if ( cur == 0 ){
             ScopedDbConnection conn( _primary );
-            conn->insert( "config.version" , BSON( "version" << VERSION ) );
+            conn->insert( "config.version" , BSON( "_id" << 1 << "version" << VERSION ) );
             pool.flush();
             assert( VERSION == dbConfigVersion( conn.conn() ) );
             conn.done();
@@ -457,6 +457,32 @@ namespace mongo {
 
         log() << "don't know how to upgrade " << cur << " to " << VERSION << endl;
         return -8;
+    }
+
+    void ConfigServer::reloadSettings(){
+        set<string> got;
+        
+        ScopedDbConnection conn( _primary );
+        auto_ptr<DBClientCursor> c = conn->query( "config.settings" , BSONObj() );
+        while ( c->more() ){
+            BSONObj o = c->next();
+            string name = o["_id"].valuestrsafe();
+            got.insert( name );
+            if ( name == "chunksize" ){
+                log(1) << "MaxChunkSize: " << o["value"] << endl;
+                Chunk::MaxChunkSize = o["value"].numberInt() * 1024 * 1024;
+            }
+            else {
+                log() << "warning: unknown setting [" << name << "]" << endl;
+            }
+        }
+
+        if ( ! got.count( "chunksize" ) ){
+            conn->insert( "config.settings" , BSON( "_id" << "chunksize"  <<
+                                                    "value" << (Chunk::MaxChunkSize / ( 1024 * 1024 ) ) ) );
+        }
+
+        conn.done();
     }
 
     string ConfigServer::getHost( string name , bool withPort ){

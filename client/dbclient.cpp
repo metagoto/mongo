@@ -448,7 +448,13 @@ namespace mongo {
             port = CmdLine::DefaultDBPort;
             ip = hostbyname( serverAddress.c_str() );
         }
-        massert( 10277 ,  "Unable to parse hostname", !ip.empty() );
+        if( ip.empty() ) {
+            stringstream ss;
+            ss << "client connect: couldn't parse/resolve hostname: " << _serverAddress;
+            errmsg = ss.str();
+            failed = true;
+            return false;
+        }
 
         // we keep around SockAddr for connection life -- maybe MessagingPort
         // requires that?
@@ -761,6 +767,10 @@ namespace mongo {
     void DBClientCursor::requestMore() {
         assert( cursorId && pos == nReturned );
 
+        if (haveLimit){
+            nToReturn -= nReturned;
+            assert(nToReturn > 0);
+        }
         BufBuilder b;
         b.append(opts);
         b.append(ns.c_str());
@@ -802,6 +812,9 @@ namespace mongo {
 
     /** If true, safe to call next().  Requests more from server if necessary. */
     bool DBClientCursor::more() {
+        if (haveLimit && pos >= nToReturn)
+            return false;
+
         if ( pos < nReturned )
             return true;
 

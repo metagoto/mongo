@@ -497,5 +497,64 @@ namespace mongo {
     private:
         TicketHolder * _holder;
     };
+
+
+    /**
+     * this is a thread safe string
+     * you will never get a bad pointer, though data may be mungedd
+     */
+    class ThreadSafeString {
+    public:
+        ThreadSafeString( size_t size=256 )
+            : _size( 256 ) , _buf( new char[256] ){
+            memset( _buf , 0 , _size );
+        }
+
+        ThreadSafeString( const ThreadSafeString& other )
+            : _size( other._size ) , _buf( new char[_size] ){
+            strncpy( _buf , other._buf , _size );
+        }
+
+        ~ThreadSafeString(){
+            delete[] _buf;
+            _buf = 0;
+        }
+        
+        operator string() const {
+            string s = _buf;
+            return s;
+        }
+
+        ThreadSafeString& operator=( const char * str ){
+            size_t s = strlen(str);
+            if ( s >= _size - 2 )
+                s = _size - 2;
+            strncpy( _buf , str , s );
+            _buf[s] = 0;
+            return *this;
+        }
+        
+        bool operator==( const ThreadSafeString& other ) const {
+            return strcmp( _buf , other._buf ) == 0;
+        }
+
+        bool operator==( const char * str ) const {
+            return strcmp( _buf , str ) == 0;
+        }
+
+        bool operator!=( const char * str ) const {
+            return strcmp( _buf , str );
+        }
+
+        bool empty() const {
+            return _buf[0] == 0;
+        }
+
+    private:
+        size_t _size;
+        char * _buf;  
+    };
+
+    ostream& operator<<( ostream &s, const ThreadSafeString &o );
     
 } // namespace mongo

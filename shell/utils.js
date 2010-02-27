@@ -132,6 +132,13 @@ assert.gt = function( a , b , msg ){
     doassert( a + " is not greater than " + b + " : " + msg );
 }
 
+assert.close = function( a , b , msg ){
+    var diff = Math.abs( (a-b)/((a+b)/2) );
+    if ( diff < .001 )
+        return;
+    doassert( a + " is not close to " + b + " diff: " + diff + " : " + msg );
+}
+
 Object.extend = function( dst , src , deep ){
     for ( var k in src ){
         var v = src[k];
@@ -477,7 +484,8 @@ if ( typeof _threadInject != "undefined" ){
                                    "jstests/extent.js",
                                    "jstests/indexb.js",
                                    "jstests/profile1.js",
-                                   "jstests/mr3.js"] );
+                                   "jstests/mr3.js",
+                                   "jstests/apitest_db.js"] );
         
         // some tests can't be run in parallel with each other
         var serialTestsArr = [ "jstests/fsync.js",
@@ -904,4 +912,15 @@ Random.setRandomSeed = function( s ) {
 // generate a random value from the exponential distribution with the specified mean
 Random.genExp = function( mean ) {
     return -Math.log( Random.rand() ) * mean;
+}
+
+killWithUris = function( uris ) {
+    var inprog = db.currentOp().inprog;
+    for( var u in uris ) {
+        for ( var i in inprog ) {
+            if ( uris[ u ] == inprog[ i ].client ) {
+                db.killOp( inprog[ i ].opid );
+            }
+        }
+    }
 }

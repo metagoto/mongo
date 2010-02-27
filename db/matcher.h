@@ -32,9 +32,8 @@ namespace mongo {
     public:
         const char *fieldName;
         pcrecpp::RE *re;
-        RegexMatcher() {
-            re = 0;
-        }
+        bool isNot;
+        RegexMatcher() : re( 0 ), isNot() {}
         ~RegexMatcher() {
             delete re;
         }
@@ -58,23 +57,15 @@ namespace mongo {
         ElementMatcher() {
         }
         
-        ElementMatcher( BSONElement _e , int _op );
+        ElementMatcher( BSONElement _e , int _op, bool _isNot );
         
-        ElementMatcher( BSONElement _e , int _op , const BSONObj& array ) : toMatch( _e ) , compareOp( _op ) {
-            
-            myset.reset( new set<BSONElement,element_lt>() );
-            
-            BSONObjIterator i( array );
-            while ( i.more() ) {
-                BSONElement ie = i.next();
-                myset->insert(ie);
-            }
-        }
+        ElementMatcher( BSONElement _e , int _op , const BSONObj& array, bool _isNot );
         
         ~ElementMatcher() { }
 
         BSONElement toMatch;
         int compareOp;
+        bool isNot;
         shared_ptr< set<BSONElement,element_lt> > myset;
         
         // these are for specific operators
@@ -83,6 +74,8 @@ namespace mongo {
         BSONType type;
 
         shared_ptr<Matcher> subMatcher;
+
+        vector< shared_ptr<Matcher> > allMatchers;
     };
 
     class Where; // used for $where javascript eval
@@ -126,18 +119,21 @@ namespace mongo {
 
         bool matches(const BSONObj& j);
         
-        bool keyMatch() const { return !all && !haveSize && !hasArray; }
+        bool keyMatch() const { return !all && !haveSize && !hasArray && !haveNot; }
 
         bool atomic() const { return _atomic; }
 
     private:
-        void addBasic(const BSONElement &e, int c) {
+        void addBasic(const BSONElement &e, int c, bool isNot) {
             // TODO May want to selectively ignore these element types based on op type.
             if ( e.type() == MinKey || e.type() == MaxKey )
                 return;
-            basics.push_back( ElementMatcher( e , c ) );
+            basics.push_back( ElementMatcher( e , c, isNot ) );
         }
 
+        void addRegex(const BSONElement &e, const char *fieldName = 0, bool isNot = false);
+        bool addOp( const BSONElement &e, const BSONElement &fe, bool isNot, const char *& regex, const char *&flags );
+        
         int valuesMatch(const BSONElement& l, const BSONElement& r, int op, const ElementMatcher& bm);
 
         Where *where;                    // set if query uses $where
@@ -147,6 +143,7 @@ namespace mongo {
         bool haveSize;
         bool all;
         bool hasArray;
+        bool haveNot;
 
         /* $atomic - if true, a multi document operation (some removes, updates)
                      should be done atomically.  in that case, we do not yield - 
@@ -169,7 +166,7 @@ namespace mongo {
     public:
         CoveredIndexMatcher(const BSONObj &pattern, const BSONObj &indexKeyPattern);
         bool matches(const BSONObj &o){ return _docMatcher.matches( o ); }
-        bool matches(const BSONObj &key, const DiskLoc &recLoc);
+        bool matches(const BSONObj &key, const DiskLoc &recLoc , bool * loaded = 0 );
         bool needRecord(){ return _needRecord; }
 
         Matcher& docMatcher() { return _docMatcher; }

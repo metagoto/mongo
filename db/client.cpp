@@ -51,12 +51,13 @@ namespace mongo {
         if ( _context )
             cout << "ERROR: Client::~Client _context should be NULL" << endl;
         if ( !_shutdown ) 
-            cout << "ERROR: Client::shutdown not called!" << endl;
+            cout << "ERROR: Client::shutdown not called: " << _desc << endl;
     }
 
     bool Client::shutdown(){
         _shutdown = true;
-
+        if ( inShutdown() )
+            return false;
         {
             boostlock bl(clientsMutex);
             clients.erase(this);
@@ -108,13 +109,40 @@ namespace mongo {
         if ( _db ){
             _justCreated = false;
         }
-        else {
-            // we need to be in a write lock since we're going to create the DB object
-            if ( _lock )
-                _lock->releaseAndWriteLock();
-            assertInWriteLock();
-            
+        else if ( dbMutex.getState() > 0 ){
+            // already in a write lock
             _db = dbHolder.getOrCreate( _ns , _path , _justCreated );
+            assert( _db );
+        }
+        else if ( dbMutex.getState() < -1 ){
+            // nested read lock :(
+            assert( _lock );
+            _lock->releaseAndWriteLock();
+            _db = dbHolder.getOrCreate( _ns , _path , _justCreated );
+            assert( _db );
+        }
+        else {
+            // we have a read lock, but need to get a write lock for a bit
+            // we need to be in a write lock since we're going to create the DB object
+            // to do that, we're going to unlock, then get a write lock
+            // this is so that if this is the first query and its long doesn't block db
+            // we just have to check that the db wasn't closed in the interim where we unlock
+            for ( int x=0; x<2; x++ ){
+                {                     
+                    dbtemprelease unlock;
+                    writelock lk( _ns );
+                    dbHolder.getOrCreate( _ns , _path , _justCreated );
+                }
+                
+                _db = dbHolder.get( _ns , _path );
+                
+                if ( _db )
+                    break;
+                
+                log() << "db was closed on us right after we opened it: " << _ns << endl;
+            }
+            
+            uassert( 13005 , "can't create db, keeps getting closed" , _db );
         }
         
         _client->_context = this;
@@ -139,6 +167,68 @@ namespace mongo {
         DEV assert( _client == currentClient.get() );
         _client->_curOp->leave( this );
         _client->_context = _oldContext; // note: _oldContext may be null
+    }
+
+    string Client::toString() const {
+        stringstream ss;
+        if ( _curOp )
+            ss << _curOp->infoNoauth().jsonString();
+        return ss.str();
+    }
+
+    string sayClientState(){
+        Client* c = currentClient.get();
+        if ( ! c )
+            return "no client";
+        return c->toString();
+    }
+    
+    void curopWaitingForLock( int type ){
+        Client * c = currentClient.get();
+        assert( c );
+        CurOp * co = c->curop();
+        if ( co ){
+            co->waitingForLock( type );
+        }
+    }
+    void curopGotLock(){
+        Client * c = currentClient.get();
+        assert(c);
+        CurOp * co = c->curop();
+        if ( co ){
+            co->gotLock();
+        }
+    }
+
+    BSONObj CurOp::infoNoauth() {
+        BSONObjBuilder b;
+        b.append("opid", _opNum);
+        bool a = _active && _start;
+        b.append("active", a);
+        if ( _lockType )
+            b.append("lockType" , _lockType > 0 ? "write" : "read"  );
+        b.append("waitingForLock" , _waitingForLock );
+        
+        if( a ){
+            b.append("secs_running", elapsedSeconds() );
+        }
+        
+        b.append( "op" , opToString( _op ) );
+        
+        b.append("ns", _ns);
+        
+        if( haveQuery() ) {
+            b.append("query", query());
+        }
+        // b.append("inLock",  ??
+        stringstream clientStr;
+        clientStr << inet_ntoa( _remote.sin_addr ) << ":" << ntohs( _remote.sin_port );
+        b.append("client", clientStr.str());
+
+        if ( _client )
+            b.append( "desc" , _client->desc() );
+        
+        return b.obj();
     }
 
 }

@@ -1,4 +1,20 @@
 // top.cpp
+/*
+ *    Copyright (C) 2010 10gen Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 
 #include "stdafx.h"
 #include "top.h"
@@ -22,21 +38,22 @@ namespace mongo {
           getmore( older.getmore , newer.getmore ) ,
           insert( older.insert , newer.insert ) ,
           update( older.update , newer.update ) ,
-          remove( older.remove , newer.remove )
+          remove( older.remove , newer.remove ),
+          commands( older.commands , newer.commands ) 
     {
         
     }
 
 
-    void Top::record( const string& ns , int op , int lockType , long long micros ){
+    void Top::record( const string& ns , int op , int lockType , long long micros , bool command ){
         boostlock lk(_lock);
 
         CollectionData& coll = _usage[ns];
-        _record( coll , op , lockType , micros );
-        _record( _global , op , lockType , micros );
+        _record( coll , op , lockType , micros , command );
+        _record( _global , op , lockType , micros , command );
     }
     
-    void Top::_record( CollectionData& c , int op , int lockType , long long micros ){
+    void Top::_record( CollectionData& c , int op , int lockType , long long micros , bool command ){
         c.total.inc( micros );
         
         if ( lockType > 0 )
@@ -55,7 +72,10 @@ namespace mongo {
             c.insert.inc( micros );
             break;
         case dbQuery:
-            c.queries.inc( micros );
+            if ( command )
+                c.commands.inc( micros );
+            else
+                c.queries.inc( micros );
             break;
         case dbGetMore:
             c.getmore.inc( micros );
@@ -108,7 +128,8 @@ namespace mongo {
             append( b , "insert" , coll.insert );
             append( b , "update" , coll.update );
             append( b , "remove" , coll.remove );
-
+            append( b , "commands" , coll.commands );
+            
             bb.done();
         }
     }
@@ -118,8 +139,8 @@ namespace mongo {
         TopCmd() : Command( "top" ){}
 
         virtual bool slaveOk(){ return true; }
-        virtual bool readOnly(){ return true; }
         virtual bool adminOnly(){ return true; }
+        virtual LockType locktype(){ return READ; } 
         virtual void help( stringstream& help ) const { help << "usage by collection"; }
 
         virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){

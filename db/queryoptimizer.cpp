@@ -39,6 +39,21 @@ namespace mongo {
 
         uassert( 10111 ,  (string)"table scans not allowed:" + ns , ! cmdLine.notablescan );
     }
+
+    bool anyElementNamesMatch( const BSONObj& a , const BSONObj& b ){
+        BSONObjIterator x(a);
+        while ( x.more() ){
+            BSONElement e = x.next();
+            BSONObjIterator y(b);
+            while ( y.more() ){
+                BSONElement f = y.next();
+                FieldCompareResult res = compareDottedFieldNames( e.fieldName() , f.fieldName() );
+                if ( res == SAME || res == LEFT_SUBFIELD || res == RIGHT_SUBFIELD )
+                    return true;
+            }
+        }
+        return false;
+    }
     
     double elementDirection( const BSONElement &e ) {
         if ( e.isNumber() )
@@ -48,7 +63,7 @@ namespace mongo {
     
     QueryPlan::QueryPlan( 
         NamespaceDetails *_d, int _idxNo,
-        const FieldRangeSet &fbs, const BSONObj &order, const BSONObj &startKey, const BSONObj &endKey ) :
+        const FieldRangeSet &fbs, const BSONObj &order, const BSONObj &startKey, const BSONObj &endKey , string special ) :
     d(_d), idxNo(_idxNo),
     fbs_( fbs ),
     order_( order ),
@@ -58,7 +73,8 @@ namespace mongo {
     exactKeyMatch_( false ),
     direction_( 0 ),
     endKeyInclusive_( endKey.isEmpty() ),
-    unhelpful_( false ) {
+    unhelpful_( false ),
+    _special( special ){
 
         if ( !fbs_.matchPossible() ) {
             unhelpful_ = true;
@@ -72,6 +88,12 @@ namespace mongo {
             // full table scan case
             if ( order_.isEmpty() || !strcmp( order_.firstElement().fieldName(), "$natural" ) )
                 scanAndOrderRequired_ = false;
+            return;
+        }
+
+        if ( _special.size() ){
+            optimal_ = true;
+            scanAndOrderRequired_ = false; // TODO: maybe part of key spec?
             return;
         }
 
@@ -163,7 +185,14 @@ namespace mongo {
             unhelpful_ = true;
     }
     
-    auto_ptr< Cursor > QueryPlan::newCursor( const DiskLoc &startLoc ) const {
+    auto_ptr< Cursor > QueryPlan::newCursor( const DiskLoc &startLoc , int numWanted ) const {
+
+        if ( _special.size() ){
+            IndexType * type = index_->getSpec().getType();
+            massert( 13040 , (string)"no type for special: " + _special , type );
+            return type->newCursor( fbs_.query() , order_ , numWanted );
+        }
+        
         if ( !fbs_.matchPossible() ){
             if ( fbs_.nNontrivialRanges() )
                 checkTableScanAllowed( fbs_.ns() );
@@ -213,6 +242,7 @@ namespace mongo {
     
     QueryPlanSet::QueryPlanSet( const char *_ns, const BSONObj &query, const BSONObj &order, const BSONElement *hint, bool honorRecordedPlan, const BSONObj &min, const BSONObj &max ) :
     ns(_ns),
+    query_( query.getOwned() ),
     fbs_( _ns, query ),
     mayRecordPlan_( true ),
     usingPrerecordedPlan_( false ),
@@ -223,9 +253,7 @@ namespace mongo {
     min_( min.getOwned() ),
     max_( max.getOwned() ) {
         if ( hint && !hint->eoo() ) {
-            BSONObjBuilder b;
-            b.append( *hint );
-            hint_ = b.obj();
+            hint_ = hint->wrap();
         }
         init();
     }
@@ -297,7 +325,34 @@ namespace mongo {
             plans_.push_back( PlanPtr( new QueryPlan( d, d->idxNo(*idx), fbs_, order_, min_, max_ ) ) );
             return;
         }
+
+        if ( isSimpleIdQuery( query_ ) ){
+            int idx = d->findIdIndex();
+            if ( idx >= 0 ){
+                usingPrerecordedPlan_ = true;
+                mayRecordPlan_ = false;
+                plans_.push_back( PlanPtr( new QueryPlan( d , idx , fbs_ , order_ ) ) );
+                return;
+            }
+        }
         
+        if ( fbs_.getSpecial().size() ){
+            string special = fbs_.getSpecial();
+            NamespaceDetails::IndexIterator i = d->ii();
+            while( i.more() ) {
+                int j = i.pos();
+                IndexDetails& ii = i.next();
+                if ( ii.getSpec().getTypeName() == special ){
+                    usingPrerecordedPlan_ = true;
+                    mayRecordPlan_ = true;
+                    plans_.push_back( PlanPtr( new QueryPlan( d , j , fbs_ , order_ , 
+                                                              BSONObj() , BSONObj() , special ) ) );
+                    return;
+                }
+            }
+            uassert( 13038 , (string)"can't find special index: " + special , 0 );
+        }
+
         if ( honorRecordedPlan_ ) {
             boostlock lk(NamespaceDetailsTransient::_qcMutex);
             NamespaceDetailsTransient& nsd = NamespaceDetailsTransient::get_inlock( ns );
@@ -342,8 +397,18 @@ namespace mongo {
             return;
         }
         
+        bool normalQuery = hint_.isEmpty() && min_.isEmpty() && max_.isEmpty();
+
         PlanSet plans;
         for( int i = 0; i < d->nIndexes; ++i ) {
+            IndexDetails& id = d->idx(i);
+            const IndexSpec& spec = id.getSpec();
+            if ( normalQuery ){
+                if ( anyElementNamesMatch( spec.keyPattern , query_ ) == 0 && 
+                     anyElementNamesMatch( spec.keyPattern , order_ ) == 0 )
+                    continue;
+            }
+
             PlanPtr p( new QueryPlan( d, i, fbs_, order_ ) );
             if ( p->optimal() ) {
                 addPlan( p, checkFirst );
@@ -576,9 +641,11 @@ namespace mongo {
             while( i.more() ) {
                 IndexDetails& ii = i.next();
                 if ( indexWorks( ii.keyPattern(), min.isEmpty() ? max : min, ret.first, ret.second ) ) {
-                    id = &ii;
-                    keyPattern = ii.keyPattern();
-                    break;
+                    if ( ii.getSpec().getType() == 0 ){
+                        id = &ii;
+                        keyPattern = ii.keyPattern();
+                        break;
+                    }
                 }
             }
             

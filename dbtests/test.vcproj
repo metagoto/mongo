@@ -144,7 +144,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="ws2_32.lib"
+				AdditionalDependencies="ws2_32.lib psapi.lib"
 				LinkIncremental="1"
 				AdditionalLibraryDirectories="&quot;c:\program files\boost\boost_1_35_0\lib&quot;"
 				GenerateDebugInformation="true"
@@ -350,36 +350,8 @@
 				>
 			</File>
 			<File
-				RelativePath="..\..\js\js\Debug\js.lib"
+				RelativePath="..\..\js\src\js.lib"
 				>
-				<FileConfiguration
-					Name="Release|Win32"
-					ExcludedFromBuild="true"
-					>
-					<Tool
-						Name="VCCustomBuildTool"
-					/>
-				</FileConfiguration>
-			</File>
-			<File
-				RelativePath="..\..\js\js\Release\js.lib"
-				>
-				<FileConfiguration
-					Name="Debug|Win32"
-					ExcludedFromBuild="true"
-					>
-					<Tool
-						Name="VCCustomBuildTool"
-					/>
-				</FileConfiguration>
-				<FileConfiguration
-					Name="Debug Recstore|Win32"
-					ExcludedFromBuild="true"
-					>
-					<Tool
-						Name="VCCustomBuildTool"
-					/>
-				</FileConfiguration>
 			</File>
 			<File
 				RelativePath="..\pcre-7.4\pcrecpp.cc"
@@ -1499,6 +1471,10 @@
 					>
 				</File>
 				<File
+					RelativePath="..\db\common.cpp"
+					>
+				</File>
+				<File
 					RelativePath="..\db\cursor.cpp"
 					>
 				</File>
@@ -1528,6 +1504,10 @@
 				</File>
 				<File
 					RelativePath="..\db\index.cpp"
+					>
+				</File>
+				<File
+					RelativePath="..\db\index_geo2d.cpp"
 					>
 				</File>
 				<File

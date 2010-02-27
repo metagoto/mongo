@@ -189,6 +189,31 @@ namespace QueryTests {
         }
     };
 
+    class PositiveLimit : public ClientBase {
+    public:
+        const char* ns;
+        PositiveLimit() : ns("unittests.querytests.PositiveLimit") {}
+        ~PositiveLimit() {
+            client().dropCollection( ns );
+        }
+
+        void testLimit(int limit){
+            ASSERT_EQUALS(client().query( ns, BSONObj(), limit )->itcount(), limit);
+        }
+        void run() {
+            for(int i=0; i<1000; i++)
+                insert( ns, BSON( GENOID << "i" << i ) );
+
+            ASSERT_EQUALS( client().query(ns, BSONObj(),    1 )->itcount(), 1);
+            ASSERT_EQUALS( client().query(ns, BSONObj(),   10 )->itcount(), 10);
+            ASSERT_EQUALS( client().query(ns, BSONObj(),  101 )->itcount(), 101);
+            ASSERT_EQUALS( client().query(ns, BSONObj(),  999 )->itcount(), 999);
+            ASSERT_EQUALS( client().query(ns, BSONObj(), 1000 )->itcount(), 1000);
+            ASSERT_EQUALS( client().query(ns, BSONObj(), 1001 )->itcount(), 1000);
+            ASSERT_EQUALS( client().query(ns, BSONObj(),    0 )->itcount(), 1000);
+        }
+    };
+
     class ReturnOneOfManyAndTail : public ClientBase {
     public:
         ~ReturnOneOfManyAndTail() {
@@ -285,6 +310,35 @@ namespace QueryTests {
         }
     };
 
+    class TailableQueryOnId : public ClientBase {
+    public:
+        ~TailableQueryOnId() {
+            client().dropCollection( "unittests.querytests.TailableQueryOnId" );
+        }
+        void run() {
+            const char *ns = "unittests.querytests.TailableQueryOnId";
+            insert( ns, BSON( "a" << 0 ) );
+            insert( ns, BSON( "a" << 1 ) );
+            auto_ptr< DBClientCursor > c1 = client().query( ns, QUERY( "a" << GT << -1 ), 0, 0, 0, QueryOption_CursorTailable );
+            OID id;
+            id.init("000000000000000000000000");
+            auto_ptr< DBClientCursor > c2 = client().query( ns, QUERY( "_id" << GT << id ), 0, 0, 0, QueryOption_CursorTailable );
+            c1->next();
+            c1->next();
+            ASSERT( !c1->more() );
+            c2->next();
+            c2->next();
+            ASSERT( !c2->more() );
+            insert( ns, BSON( "a" << 2 ) );
+            ASSERT( c1->more() );
+            ASSERT_EQUALS( 2, c1->next().getIntField( "a" ) );
+            ASSERT( !c1->more() );
+            // ASSERT( c2->more() ); // SERVER-645
+            // ASSERT_EQUALS( 2, c2->next().getIntField( "a" ) );  // SERVER-645
+            ASSERT( !c2->more() );
+        }
+    };
+
     class OplogReplayMode : public ClientBase {
     public:
         ~OplogReplayMode() {
@@ -292,13 +346,13 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.OplogReplayMode";
-            insert( ns, BSON( "a" << 3 ) );
-            insert( ns, BSON( "a" << 0 ) );
-            insert( ns, BSON( "a" << 1 ) );
-            insert( ns, BSON( "a" << 2 ) );
-            auto_ptr< DBClientCursor > c = client().query( ns, QUERY( "a" << GT << 1 ).hint( BSON( "$natural" << 1 ) ), 0, 0, 0, QueryOption_OplogReplay );
+            insert( ns, BSON( "ts" << 3 ) );
+            insert( ns, BSON( "ts" << 0 ) );
+            insert( ns, BSON( "ts" << 1 ) );
+            insert( ns, BSON( "ts" << 2 ) );
+            auto_ptr< DBClientCursor > c = client().query( ns, QUERY( "ts" << GT << 1 ).hint( BSON( "$natural" << 1 ) ), 0, 0, 0, QueryOption_OplogReplay );
             ASSERT( c->more() );
-            ASSERT_EQUALS( 2, c->next().getIntField( "a" ) );
+            ASSERT_EQUALS( 2, c->next().getIntField( "ts" ) );
             ASSERT( !c->more() );
         }
     };
@@ -890,15 +944,15 @@ namespace QueryTests {
             int i = 0;
             for( int oldCount = -1;
                 count() != oldCount;
-                oldCount = count(), client().insert( ns(), BSON( "i" << i++ ) ) );
+                oldCount = count(), client().insert( ns(), BSON( "ts" << i++ ) ) );
 
             for( int k = 0; k < 5; ++k ) {
-                client().insert( ns(), BSON( "i" << i++ ) );
-                int min = client().query( ns(), Query().sort( BSON( "$natural" << 1 ) ) )->next()[ "i" ].numberInt();            
+                client().insert( ns(), BSON( "ts" << i++ ) );
+                int min = client().query( ns(), Query().sort( BSON( "$natural" << 1 ) ) )->next()[ "ts" ].numberInt();            
                 for( int j = -1; j < i; ++j ) {
-                    auto_ptr< DBClientCursor > c = client().query( ns(), QUERY( "i" << GTE << j ), 0, 0, 0, QueryOption_OplogReplay );
+                    auto_ptr< DBClientCursor > c = client().query( ns(), QUERY( "ts" << GTE << j ), 0, 0, 0, QueryOption_OplogReplay );
                     ASSERT( c->more() );
-                    ASSERT_EQUALS( ( j > min ? j : min ), c->next()[ "i" ].numberInt() );
+                    ASSERT_EQUALS( ( j > min ? j : min ), c->next()[ "ts" ].numberInt() );
                 }
             }
         }
@@ -906,7 +960,43 @@ namespace QueryTests {
     private:
         int _old;
     };
+
+    class WhatsMyUri : public CollectionBase {
+    public:
+        WhatsMyUri() : CollectionBase( "whatsmyuri" ) {}
+        void run() {
+            BSONObj result;
+            client().runCommand( "admin", BSON( "whatsmyuri" << 1 ), result );
+            ASSERT_EQUALS( unknownAddress.toString(), result[ "you" ].str() );
+        }
+    };
     
+    namespace parsedtests {
+        class basic1 {
+        public:
+            void _test( const BSONObj& in ){
+                ParsedQuery q( "a.b" , 5 , 6 , 9 , in , BSONObj() );
+                ASSERT_EQUALS( BSON( "x" << 5 ) , q.getFilter() );
+            }
+            void run(){
+                _test( BSON( "x" << 5 ) );
+                _test( BSON( "query" << BSON( "x" << 5 ) ) );
+                _test( BSON( "$query" << BSON( "x" << 5 ) ) );
+
+                {
+                    ParsedQuery q( "a.b" , 5 , 6 , 9 , BSON( "x" << 5 ) , BSONObj() );
+                    ASSERT_EQUALS( 6 , q.getNumToReturn() );
+                    ASSERT( q.wantMore() );
+                }
+                {
+                    ParsedQuery q( "a.b" , 5 , -6 , 9 , BSON( "x" << 5 ) , BSONObj() );
+                    ASSERT_EQUALS( 6 , q.getNumToReturn() );
+                    ASSERT( ! q.wantMore() );
+                }
+            }
+        };
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "query" ) {
@@ -920,11 +1010,13 @@ namespace QueryTests {
             add< CountIndexedRegex >();
             add< BoundedKey >();
             add< GetMore >();
+            add< PositiveLimit >();
             add< ReturnOneOfManyAndTail >();
             add< TailNotAtEnd >();
             add< EmptyTail >();
             add< TailableDelete >();
             add< TailableInsertDelete >();
+            add< TailableQueryOnId >();
             add< OplogReplayMode >();
             add< ArrayId >();
             add< UnderscoreNs >();
@@ -950,6 +1042,9 @@ namespace QueryTests {
             add< HelperTest >();
             add< HelperByIdTest >();
             add< FindingStart >();
+            add< WhatsMyUri >();
+
+            add< parsedtests::basic1 >();
         }
     } myall;
     

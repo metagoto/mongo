@@ -116,10 +116,11 @@ namespace mongo {
         virtual bool requiresAuth() {
             return false;
         }
+        virtual LockType locktype(){ return WRITE; }
         CmdEval() : Command("$eval") { }
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             AuthenticationInfo *ai = cc().getAuthenticationInfo();
-            uassert( 12598 , "$eval readOnly unauthorized", ai->isAuthorizedReads(cc().database()->name.c_str()));
+            uassert( 12598 , "$eval reads unauthorized", ai->isAuthorizedReads(cc().database()->name.c_str()));
             return dbEval(ns, cmdObj, result, errmsg);
         }
     } cmdeval;

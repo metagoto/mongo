@@ -27,7 +27,6 @@
 namespace mongo {
 
     bool noauth = true;
-    bool authWriteOnly = false;
     
 	int AuthenticationInfo::warned = 0;
 
@@ -46,7 +45,7 @@ namespace mongo {
         }
         
         if ( isLocalHost ){
-            readlock l(""); 
+            atleastreadlock l(""); 
             Client::GodScope gs;
             Client::Context c("admin.system.users");
             BSONObj result;

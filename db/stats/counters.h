@@ -1,4 +1,20 @@
 // counters.h
+/*
+ *    Copyright (C) 2010 10gen Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 
 #include "../../stdafx.h"
 #include "../jsobj.h"
@@ -20,15 +36,17 @@ namespace mongo {
         int * getQuery(){ return _query; }
         int * getUpdate(){ return _update; }
         int * getDelete(){ return _delete; }
-        int * getGetGore(){ return _getmore; }
-
+        int * getGetMore(){ return _getmore; }
+        int * getCommand(){ return _command; }
+        
         void gotInsert(){ _insert[0]++; }
         void gotQuery(){ _query[0]++; }
         void gotUpdate(){ _update[0]++; }
         void gotDelete(){ _delete[0]++; }
         void gotGetMore(){ _getmore[0]++; }
+        void gotCommand(){ _command[0]++; }
 
-        void gotOp( int op );
+        void gotOp( int op , bool isCommand );
 
         BSONObj& getObj(){ return _obj; }
     private:
@@ -38,6 +56,7 @@ namespace mongo {
         int * _update;
         int * _delete;
         int * _getmore;
+        int * _command;
     };
     
     extern OpCounters globalOpCounters;

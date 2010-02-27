@@ -480,7 +480,7 @@ namespace mongo {
         BSONObj embeddedObject() const;
 
         /* uasserts if not an object */
-        BSONObj embeddedObjectUserCheck();
+        BSONObj embeddedObjectUserCheck() const;
 
         BSONObj codeWScopeObject() const;
 
@@ -993,7 +993,8 @@ namespace mongo {
             opTYPE = 0x0F,
             opREGEX = 0x10,
             opOPTIONS = 0x11,
-            opELEM_MATCH = 0x12
+            opELEM_MATCH = 0x12,
+            opNEAR = 0x13
         };        
     };
     ostream& operator<<( ostream &s, const BSONObj &o );
@@ -1045,7 +1046,7 @@ namespace mongo {
     BSON( "a" << GT << 23.4 << NE << 30 << "b" << 2 ) produces the object
     { a: { \$gt: 23.4, \$ne: 30 }, b: 2 }.
 */
-#define BSON(x) (( mongo::BSONObjBuilder() << x ).obj())
+#define BSON(x) (( mongo::BSONObjBuilder(64) << x ).obj())
 
 /** Use BSON_ARRAY macro like BSON macro, but without keys
 
@@ -1059,7 +1060,6 @@ namespace mongo {
          cout << BSON( GENOID << "z" << 3 ); // { _id : ..., z : 3 }
     */
     extern struct IDLabeler { } GENOID;
-    BSONObjBuilder& operator<<(BSONObjBuilder& b, IDLabeler& id);
 
     /* Utility class to add a Date element with the current time
        Example: 
@@ -1124,20 +1124,63 @@ namespace mongo {
     };
     
     /**
+       used in conjuction with BSONObjBuilder, allows for proper buffer size to prevent crazy memory usage
+     */
+    class BSONSizeTracker {
+    public:
+#define BSONSizeTrackerSize 10
+
+        BSONSizeTracker(){
+            _pos = 0;
+            for ( int i=0; i<BSONSizeTrackerSize; i++ )
+                _sizes[i] = 512; // this is the default, so just be consistent
+        }
+        
+        ~BSONSizeTracker(){
+        }
+        
+        void got( int size ){
+            _sizes[_pos++] = size;
+            if ( _pos >= BSONSizeTrackerSize )
+                _pos = 0;
+        }
+        
+        /**
+         * right now choosing largest size
+         */
+        int getSize() const {
+            int x = 16; // sane min
+            for ( int i=0; i<BSONSizeTrackerSize; i++ ){
+                if ( _sizes[i] > x )
+                    x = _sizes[i];
+            }
+            return x;
+        }
+        
+    private:
+        int _pos;
+        int _sizes[BSONSizeTrackerSize];
+    };
+    
+    /**
        utility for creating a BSONObj
      */
     class BSONObjBuilder : boost::noncopyable {
     public:
         /** @param initsize this is just a hint as to the final size of the object */
-        BSONObjBuilder(int initsize=512) : b(buf_), buf_(initsize), offset_( 0 ), s_( this ) {
+        BSONObjBuilder(int initsize=512) : b(buf_), buf_(initsize), offset_( 0 ), s_( this ) , _tracker(0) {
             b.skip(4); /*leave room for size field*/
         }
 
         /** @param baseBuilder construct a BSONObjBuilder using an existing BufBuilder */
-        BSONObjBuilder( BufBuilder &baseBuilder ) : b( baseBuilder ), buf_( 0 ), offset_( baseBuilder.len() ), s_( this ) {
+        BSONObjBuilder( BufBuilder &baseBuilder ) : b( baseBuilder ), buf_( 0 ), offset_( baseBuilder.len() ), s_( this ) , _tracker(0) {
             b.skip( 4 );
         }
         
+        BSONObjBuilder( const BSONSizeTracker & tracker ) : b(buf_) , buf_(tracker.getSize() ), offset_(0), s_( this ) , _tracker( (BSONSizeTracker*)(&tracker) ){
+            b.skip( 4 );
+        }
+
         /** add all the fields from the object specified to this object */
         BSONObjBuilder& appendElements(BSONObj x);
 
@@ -1507,6 +1550,7 @@ namespace mongo {
             b.decouple();    // post done() call version.  be sure jsobj frees...
         }
 
+        void appendKeys( const BSONObj& keyPattern , const BSONObj& values );
 
     private:
         static const string numStrs[100]; // cache of 0 to 99 inclusive
@@ -1524,6 +1568,14 @@ namespace mongo {
         BSONObjBuilderValueStream &operator<<(const char * name ) {
             s_.endField( name );
             return s_;
+        }
+
+        /** Stream oriented way to add field names and values. */
+        BSONObjBuilder& operator<<( IDLabeler ) {
+            OID oid;
+            oid.init();
+            appendOID("_id", &oid);
+            return *this;
         }
 
         // prevent implicit string conversions which would allow bad things like BSON( BSON( "foo" << 1 ) << 2 )
@@ -1553,12 +1605,15 @@ namespace mongo {
             b.append( fieldName );
             b.append( (void *) arr.objdata(), arr.objsize() );
         }
-
+        
         char* _done() {
             s_.endField();
             b.append((char) EOO);
             char *data = b.buf() + offset_;
-            *((int*)data) = b.len() - offset_;
+            int size = b.len() - offset_;
+            *((int*)data) = size;
+            if ( _tracker )
+                _tracker->got( size );
             return data;
         }
 
@@ -1566,6 +1621,7 @@ namespace mongo {
         BufBuilder buf_;
         int offset_;
         BSONObjBuilderValueStream s_;
+        BSONSizeTracker * _tracker;
     };
 
     class BSONArrayBuilder : boost::noncopyable{
@@ -1697,7 +1753,7 @@ namespace mongo {
 #define CHECK_OBJECT( o , msg )
 #endif
 
-    inline BSONObj BSONElement::embeddedObjectUserCheck() {
+    inline BSONObj BSONElement::embeddedObjectUserCheck() const {
         uassert( 10065 ,  "invalid parameter: expected an object", isABSONObj() );
         return BSONObj(value());
     }

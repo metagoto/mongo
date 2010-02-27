@@ -432,7 +432,7 @@ namespace mongo {
 
         void checkMigrate();
 
-        long long storageSize();
+        long long storageSize( int * numExtents = 0 );
 
     private:
         bool cappedMayDelete() const {
@@ -472,7 +472,7 @@ namespace mongo {
         static std::map< string, shared_ptr< NamespaceDetailsTransient > > _map;
     public:
         NamespaceDetailsTransient(const char *ns) : _ns(ns), _keysComputed(false), _qcWriteCount(), _cll_enabled() { }
-        /* _get() is not threadsafe */
+        /* _get() is not threadsafe -- see get_inlock() comments */
         static NamespaceDetailsTransient& _get(const char *ns);
         /* use get_w() when doing write operations */
         static NamespaceDetailsTransient& get_w(const char *ns) { 
@@ -506,12 +506,16 @@ namespace mongo {
         /* IndexSpec caching */
     private:
         map<const IndexDetails*,IndexSpec> _indexSpecs;
+        static boost::mutex _isMutex;
     public:
         const IndexSpec& getIndexSpec( const IndexDetails * details ){
-            DEV assertInWriteLock();
             IndexSpec& spec = _indexSpecs[details];
-            if ( spec.info.isEmpty() ){
-                spec.reset( details->info );
+            if ( ! spec._finishedInit ){
+                boostlock lk(_isMutex);
+                if ( ! spec._finishedInit ){
+                    spec.reset( details );
+                    assert( spec._finishedInit );
+                }
             }
             return spec;
         }

@@ -51,14 +51,6 @@ namespace mongo {
     int nloggedsome = 0;
 #define LOGSOME if( ++nloggedsome < 1000 || nloggedsome % 100 == 0 )
 
-    SlaveTypes slave = NotSlave;
-    bool master = false; // true means keep an op log
-    bool autoresync = false;
-    
-    /* we use new here so we don't have to worry about destructor orders at program shutdown */
-    MongoMutex &dbMutex( *(new MongoMutex) );
-//    MutexInfo dbMutexInfo;
-
     string dbExecCommand;
 
     string bind_ip = "";
@@ -66,8 +58,6 @@ namespace mongo {
     char *appsrvPath = null;
 
     DiagLog _diaglog;
-
-    int opIdMem = 100000000;
 
     bool useCursors = true;
     bool useHints = true;
@@ -99,13 +89,19 @@ namespace mongo {
             b.append("err", "unauthorized");
         }
         else {
+            DbMessage d(m);
+            QueryMessage q(d);
+            bool all = q.query["$all"].trueValue();
             vector<BSONObj> vals;
             {
+                Client& me = cc();
                 boostlock bl(Client::clientsMutex);
                 for( set<Client*>::iterator i = Client::clients.begin(); i != Client::clients.end(); i++ ) { 
                     Client *c = *i;
+                    if ( c == &me )
+                        continue;
                     CurOp& co = *(c->curop());
-                    if( co.active() )
+                    if( all || co.active() )
                         vals.push_back( co.infoNoauth() );
                 }
             }
@@ -116,7 +112,7 @@ namespace mongo {
                 b.append("info", "use command {unlock:0} to terminate the fsync write/snapshot lock");
             }
         }
-
+        
         replyToQuery(0, m, dbresponse, b.obj());
     }
     
@@ -172,10 +168,6 @@ namespace mongo {
         CurOp& op = *(c.curop());
         
         try {
-            if (q.fields.get() && q.fields->errmsg)
-                uassert( 10053 , q.fields->errmsg, false);
-
-            c.curop()->setRead();
             msgdata = runQuery(m, q, op ).release();
         }
         catch ( AssertionException& e ) {
@@ -220,19 +212,17 @@ namespace mongo {
         return ok;
     }
 
-    bool commandIsReadOnly(BSONObj& _cmdobj);
-
     // Returns false when request includes 'end'
     bool assembleResponse( Message &m, DbResponse &dbresponse, const sockaddr_in &client ) {
 
-        bool writeLock = true;
-
         // before we lock...
         int op = m.data->operation();
-        globalOpCounters.gotOp( op );
+        bool isCommand = false;
         const char *ns = m.data->_data + 4;
         if ( op == dbQuery ) {
             if( strstr(ns, ".$cmd") ) {
+                isCommand = true;
+                OPWRITE;
                 if( strstr(ns, ".$cmd.sys.") ) { 
                     if( strstr(ns, "$cmd.sys.inprog") ) {
                         inProgCmd(m, dbresponse);
@@ -247,29 +237,26 @@ namespace mongo {
                         return true;
                     }
                 }
-                DbMessage d( m );
-                QueryMessage q( d );
-                writeLock = !commandIsReadOnly(q.query);
+
             }
-            else
-                writeLock = false;
+            else {
+                OPREAD;
+            }
         }
         else if( op == dbGetMore ) {
-            writeLock = false;
+            OPREAD;
         }
+        else {
+            OPWRITE;
+        }
+        
+        globalOpCounters.gotOp( op , isCommand );
         
         if ( handlePossibleShardedMessage( m , dbresponse ) ){
             /* important to do this before we lock
                so if a message has to be forwarded, doesn't block for that
             */
             return true;
-        }
-
-        if ( writeLock ){
-            OPWRITE;
-        }
-        else {
-            OPREAD;
         }
 
         Client& c = cc();
@@ -300,22 +287,22 @@ namespace mongo {
                 log = true;
         }
         else if ( op == dbMsg ) {
-            mongolock lk(writeLock);
-			/* deprecated / rarely used.  intended for connection diagnostics. */
+            // deprecated - replaced by commands
             char *p = m.data->_data;
             int len = strlen(p);
             if ( len > 400 )
                 out() << curTimeMillis() % 10000 <<
-                     " long msg received, len:" << len <<
-                     " ends with: " << p + len - 10 << endl;
-            bool end = false; //strcmp("end", p) == 0;
+                    " long msg received, len:" << len <<
+                    " ends with: " << p + len - 10 << endl;
+
             Message *resp = new Message();
-            resp->setData(opReply, "i am fine");
+            if ( strcmp( "end" , p ) == 0 )
+                resp->setData( opReply , "dbMsg end no longer supported" );
+            else
+                resp->setData( opReply , "i am fine - dbMsg deprecated");
+
             dbresponse.response = resp;
             dbresponse.responseTo = m.data->id;
-            //dbMsgPort.reply(m, resp);
-            if ( end )
-                return false;
         }
         else {
             const char *ns = m.data->_data + 4;
@@ -327,18 +314,15 @@ namespace mongo {
             else {
                 try {
                     if ( op == dbInsert ) {
-                        mongolock lk(writeLock);
                         receivedInsert(m, currentOp);
                     }
                     else if ( op == dbUpdate ) {
                         receivedUpdate(m, currentOp);
                     }
                     else if ( op == dbDelete ) {
-                        mongolock lk(writeLock);
                         receivedDelete(m, currentOp);
                     }
                     else if ( op == dbKillCursors ) {
-                        mongolock lk(writeLock);
                         currentOp.ensureStarted();
                         logThreshold = 10;
                         ss << "killcursors ";
@@ -370,13 +354,18 @@ namespace mongo {
         
         if ( currentOp.shouldDBProfile( ms ) ){
             // performance profiling is on
-            if ( dbMutex.getState() > 1 || dbMutex.getState() < -1 ){
-                mongo::log(1) << "warning: not profiling because recursive lock" << endl;
+            if ( dbMutex.getState() < 0 ){
+                mongo::log(1) << "note: not profiling because recursive read lock" << endl;
             }
             else {
                 mongolock lk(true);
-                Client::Context c( currentOp.getNS() );
-                profile(ss.str().c_str(), ms);
+                if ( dbHolder.isLoaded( nsToDatabase( currentOp.getNS() ) , dbpath ) ){
+                    Client::Context c( currentOp.getNS() );
+                    profile(ss.str().c_str(), ms);
+                }
+                else {
+                    mongo::log() << "note: not profiling because db went away - probably a close on: " << currentOp.getNS() << endl;
+                }
             }
         }
 
@@ -388,7 +377,7 @@ namespace mongo {
         int *x = (int *) m.data->_data;
         x++; // reserved
         int n = *x++;
-        assert( n >= 1 );
+        uassert( 13004 , "sent 0 cursors to kill" , n >= 1 );
         if ( n > 2000 ) {
             problem() << "Assertion failure, receivedKillCursors, n=" << n << endl;
             assert( n < 30000 );
@@ -453,7 +442,6 @@ namespace mongo {
 
         mongolock lk(1);
         Client::Context ctx( ns );
-        op.setWrite();
 
         UpdateResult res = updateObjects(ns, toupdate, query, upsert, multi, true, op.debug() );
         recordUpdate( res.existing , (int) res.num ); // for getlasterror
@@ -464,8 +452,6 @@ namespace mongo {
         const char *ns = d.getns();
         assert(*ns);
         uassert( 10056 ,  "not master", isMasterNs( ns ) );
-        Client::Context ctx(ns);
-        op.setWrite();
         int flags = d.pullInt();
         bool justOne = flags & 1;
         assert( d.moreJSObjs() );
@@ -475,6 +461,10 @@ namespace mongo {
             op.debug().str << " query: " << s;
             op.setQuery(pattern);
         }        
+
+        writelock lk(ns);
+        Client::Context ctx(ns);
+
         long long n = deleteObjects(ns, pattern, justOne, true);
         recordDelete( (int) n );
     }
@@ -482,24 +472,25 @@ namespace mongo {
     QueryResult* emptyMoreResult(long long);
 
     bool receivedGetMore(DbResponse& dbresponse, Message& m, CurOp& curop ) {
-        bool ok = true;
-        DbMessage d(m);
-        const char *ns = d.getns();
         StringBuilder& ss = curop.debug().str;
-        ss << ns;
-        mongolock lk(false);
-        Client::Context ctx(ns);
-        curop.setRead();
+        bool ok = true;
+        
+        DbMessage d(m);
+
+        const char *ns = d.getns();
         int ntoreturn = d.pullInt();
         long long cursorid = d.pullInt64();
-        ss << " cid:" << cursorid;
-        ss << " ntoreturn:" << ntoreturn;
+        
+        ss << ns << " cid:" << cursorid << " ntoreturn:" << ntoreturn;;
+
         QueryResult* msgdata;
         try {
+            mongolock lk(false);
+            Client::Context ctx(ns);
             msgdata = getMore(ns, ntoreturn, cursorid, curop);
         }
         catch ( AssertionException& e ) {
-            ss << " exception " + e.toString();
+            ss << " exception " << e.toString();
             msgdata = emptyMoreResult(cursorid);
             ok = false;
         }
@@ -509,7 +500,7 @@ namespace mongo {
         ss << " nreturned:" << msgdata->nReturned;
         dbresponse.response = resp;
         dbresponse.responseTo = m.data->id;
-        //dbMsgPort.reply(m, resp);
+
         return ok;
     }
 
@@ -518,10 +509,10 @@ namespace mongo {
 		const char *ns = d.getns();
 		assert(*ns);
         uassert( 10058 ,  "not master", isMasterNs( ns ) );
-        Client::Context ctx(ns);
-        op.setWrite();
         op.debug().str << ns;
-		
+
+        writelock lk(ns);
+        Client::Context ctx(ns);		
         while ( d.moreJSObjs() ) {
             BSONObj js = d.nextJsObj();
             uassert( 10059 , "object to insert too large", js.objsize() <= MaxBSONObjectSize);
@@ -623,6 +614,7 @@ namespace mongo {
 
     /* not using log() herein in case we are already locked */
     void dbexit( ExitCode rc, const char *why) {        
+        Client * c = currentClient.get();
         {
             boostlock lk( exitMutex );
             if ( numExitCalls++ > 0 ) {
@@ -633,6 +625,7 @@ namespace mongo {
                 stringstream ss;
                 ss << "dbexit: " << why << "; exiting immediately" << endl;
                 tryToOutputFatal( ss.str() );
+                if ( c ) c->shutdown();
                 ::exit( rc );                
             }
         }
@@ -649,11 +642,11 @@ namespace mongo {
         }
         
         tryToOutputFatal( "dbexit: really exiting now\n" );
+        if ( c ) c->shutdown();
         ::exit(rc);
     }
     
     void shutdown() {
-
 
         log() << "\t shutdown: going to close listening sockets..." << endl;        
         ListeningSockets::get()->closeAll();
@@ -695,7 +688,19 @@ namespace mongo {
 #if !defined(_WIN32) && !defined(__sunos__)
         string name = ( boost::filesystem::path( dbpath ) / "mongod.lock" ).native_file_string();
 
+        bool oldFile = false;
+
         if ( boost::filesystem::exists( name ) && boost::filesystem::file_size( name ) > 0 ){
+            oldFile = true;
+        }
+        
+        lockFile = open( name.c_str(), O_RDWR | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG | S_IRWXO );
+        massert( 10309 ,  "Unable to create / open lock file for dbpath: " + name, lockFile > 0 );
+        massert( 10310 ,  "Unable to acquire lock for dbpath: " + name, flock( lockFile, LOCK_EX | LOCK_NB ) == 0 );
+
+        if ( oldFile ){
+            // we check this here because we want to see if we can get the lock
+            // if we can't, then its probably just another mongod running
             cout << "************** \n" 
                  << "old lock file: " << name << ".  probably means unclean shutdown\n"
                  << "reccomend removing file and running --repair\n" 
@@ -703,11 +708,8 @@ namespace mongo {
                  << "*************" << endl;
             uassert( 12596 , "old lock file" , 0 );
         }
-        
-        lockFile = open( name.c_str(), O_RDWR | O_CREAT | O_TRUNC, S_IRWXU | S_IRWXG | S_IRWXO );
-        massert( 10309 ,  "Unable to create / open lock file for dbpath: " + name, lockFile > 0 );
-        massert( 10310 ,  "Unable to acquire lock for dbpath: " + name, flock( lockFile, LOCK_EX | LOCK_NB ) == 0 );
-        
+
+
         stringstream ss;
         ss << getpid() << endl;
         string s = ss.str();

@@ -704,6 +704,25 @@ namespace JSTests {
         const char * _b;
     };
     
+    class InformalDBRef {
+    public:
+        void run() {
+            client.insert( ns(), BSON( "i" << 1 ) );
+            BSONObj obj = client.findOne( ns(), BSONObj() );
+            client.remove( ns(), BSONObj() );
+            client.insert( ns(), BSON( "r" << BSON( "$ref" << "jstests.informaldbref" << "$id" << obj["_id"].__oid() << "foo" << "bar" ) ) );
+            obj = client.findOne( ns(), BSONObj() );
+            ASSERT_EQUALS( "bar", obj[ "r" ].embeddedObject()[ "foo" ].str() );
+            
+            ASSERT( client.eval( "unittest", "x = db.jstests.informaldbref.findOne(); y = { r:x.r }; db.jstests.informaldbref.drop(); y.r[ \"a\" ] = \"b\"; db.jstests.informaldbref.save( y );" ) );
+            obj = client.findOne( ns(), BSONObj() );
+            ASSERT_EQUALS( "bar", obj[ "r" ].embeddedObject()[ "foo" ].str() );            
+            ASSERT_EQUALS( "b", obj[ "r" ].embeddedObject()[ "a" ].str() );            
+        }
+    private:
+        static const char *ns() { return "unittest.jstests.informaldbref"; }
+    };
+    
     class BinDataType {
     public:
         
@@ -780,6 +799,28 @@ namespace JSTests {
         }
     };
 
+    class Speed1 {
+    public:
+        void run(){
+            BSONObj start = BSON( "x" << 5 );
+            BSONObj empty;
+
+            auto_ptr<Scope> s;
+            s.reset( globalScriptEngine->newScope() );
+            
+            ScriptingFunction f = s->createFunction( "return this.x + 6;" );
+            s->setThis( &start );
+            
+            Timer t;
+            double n = 0;
+            for ( ; n < 100000; n++ ){
+                s->invoke( f , empty );
+                ASSERT_EQUALS( 11 , s->getNumber( "return" ) );
+            }
+            cout << "speed1: " << ( n / t.millis() ) << " ops/ms" << endl;
+        }
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "js" ) {
@@ -807,9 +848,12 @@ namespace JSTests {
             add< LongUtf8String >();
             add< CodeTests >();
             add< DBRefTest >();
+            add< InformalDBRef >();
             add< BinDataType >();
-
+            
             add< VarTests >();
+            
+            add< Speed1 >();
         }
     } myall;
     

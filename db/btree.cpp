@@ -42,6 +42,11 @@ namespace mongo {
     const int split_debug = 0;
     const int insert_debug = 0;
 
+    static void alreadyInIndex() { 
+        // we don't use massert() here as that does logging and this is 'benign' - see catches in _indexRecord()
+        throw MsgAssertionException(10287, "btree: key+recloc already in index");
+    }
+
     /* BucketBasics --------------------------------------------------- */
 
     inline void BucketBasics::modified(const DiskLoc& thisLoc) {
@@ -438,12 +443,19 @@ namespace mongo {
                         // coding effort in here to make this particularly fast
                         if( !dupsChecked ) { 
                             dupsChecked = true;
-                            if( idx.head.btree()->exists(idx, idx.head, key, order) )
-                                uasserted( ASSERT_ID_DUPKEY , dupKeyError( idx , key ) );
+                            if( idx.head.btree()->exists(idx, idx.head, key, order) ) {
+                                if( idx.head.btree()->wouldCreateDup(idx, idx.head, key, order, recordLoc) )
+                                    uasserted( ASSERT_ID_DUPKEY , dupKeyError( idx , key ) );
+                                else
+                                    alreadyInIndex();
+                            }
                         }
                     }
-                    else
+                    else {
+                        if( M.recordLoc == recordLoc ) 
+                            alreadyInIndex();
                         uasserted( ASSERT_ID_DUPKEY , dupKeyError( idx , key ) );
+                    }
                 }
 
                 // dup keys allowed.  use recordLoc as if it is part of the key
@@ -475,7 +487,7 @@ namespace mongo {
     }
 
     void BtreeBucket::delBucket(const DiskLoc& thisLoc, IndexDetails& id) {
-        ClientCursor::informAboutToDeleteBucket(thisLoc);
+        ClientCursor::informAboutToDeleteBucket(thisLoc); // slow...
         assert( !isHead() );
 
         BtreeBucket *p = parent.btreemod();
@@ -497,6 +509,10 @@ namespace mongo {
             assert(false);
         }
 found:
+        deallocBucket( thisLoc );
+    }
+    
+    void BtreeBucket::deallocBucket(const DiskLoc &thisLoc) {
 #if 1
         /* as a temporary defensive measure, we zap the whole bucket, AND don't truly delete
            it (meaning it is ineligible for reuse).
@@ -846,8 +862,7 @@ found:
                 out() << "  old l r: " << childForPos(pos).toString() << ' ' << childForPos(pos+1).toString() << endl;
                 out() << "  new l r: " << lChild.toString() << ' ' << rChild.toString() << endl;
             }
-            // we don't use massert() here as that does logging and this is 'benign' - see catches in indexRecord()
-            throw MsgAssertionException(10287, "btree: key+recloc already in index");
+            alreadyInIndex();
         }
 
         DEBUGGING out() << "TEMP: key: " << key.toString() << endl;
@@ -1037,20 +1052,27 @@ namespace mongo {
                 BSONObj k; 
                 DiskLoc r;
                 x->popBack(r,k);
-                if( x->n == 0 )
-                    log() << "warning: empty bucket on BtreeBuild " << k.toString() << endl;
+                bool keepX = ( x->n != 0 );
+                DiskLoc keepLoc = keepX ? xloc : x->nextChild;
 
-                if ( ! up->_pushBack(r, k, order, xloc) ){
+                if ( ! up->_pushBack(r, k, order, keepLoc) ){
                     // current bucket full
                     DiskLoc n = BtreeBucket::addBucket(idx);
                     up->tempNext() = n;
                     upLoc = n; 
                     up = upLoc.btreemod();
-                    up->pushBack(r, k, order, xloc);
+                    up->pushBack(r, k, order, keepLoc);
                 }
 
-                xloc = x->tempNext(); /* get next in chain at current level */
-                x->parent = upLoc;
+                DiskLoc nextLoc = x->tempNext(); /* get next in chain at current level */
+                if ( keepX ) {
+                    x->parent = upLoc;                
+                } else {
+                    if ( !x->nextChild.isNull() )
+                        x->nextChild.btreemod()->parent = upLoc;
+                    x->deallocBucket( xloc );
+                }
+                xloc = nextLoc;
             }
             
             loc = upStart;

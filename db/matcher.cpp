@@ -66,23 +66,48 @@ namespace mongo {
         where = 0;
     }
 
-    ElementMatcher::ElementMatcher( BSONElement _e , int _op ) : toMatch( _e ) , compareOp( _op ) {
+    ElementMatcher::ElementMatcher( BSONElement _e , int _op, bool _isNot ) : toMatch( _e ) , compareOp( _op ), isNot( _isNot ) {
         if ( _op == BSONObj::opMOD ){
-            BSONObj o = _e.embeddedObject().firstElement().embeddedObject();
+            BSONObj o = _e.embeddedObject();
             mod = o["0"].numberInt();
             modm = o["1"].numberInt();
             
             uassert( 10073 ,  "mod can't be 0" , mod );
         }
         else if ( _op == BSONObj::opTYPE ){
-            type = (BSONType)(_e.embeddedObject().firstElement().numberInt());
+            type = (BSONType)(_e.numberInt());
         }
         else if ( _op == BSONObj::opELEM_MATCH ){
-            BSONElement m = toMatch.embeddedObjectUserCheck().firstElement();
+            BSONElement m = _e;
             uassert( 12517 , "$elemMatch needs an Object" , m.type() == Object );
             subMatcher.reset( new Matcher( m.embeddedObject() ) );
         }
     }
+
+    ElementMatcher::ElementMatcher( BSONElement _e , int _op , const BSONObj& array, bool _isNot ) 
+        : toMatch( _e ) , compareOp( _op ), isNot( _isNot ) {
+        
+        myset.reset( new set<BSONElement,element_lt>() );
+        
+        BSONObjIterator i( array );
+        while ( i.more() ) {
+            BSONElement ie = i.next();
+            if ( _op == BSONObj::opALL && ie.type() == Object && ie.embeddedObject().firstElement().getGtLtOp() == BSONObj::opELEM_MATCH ){
+                shared_ptr<Matcher> s;
+                s.reset( new Matcher( ie.embeddedObject().firstElement().embeddedObjectUserCheck() ) );
+                allMatchers.push_back( s );
+            }
+            else {
+                myset->insert(ie);
+            }
+        }
+        
+        if ( allMatchers.size() ){
+            uassert( 13020 , "with $all, can't mix $elemMatch and others" , myset->size() == 0);
+        }
+        
+    }
+    
 
 } // namespace mongo
 
@@ -118,7 +143,10 @@ namespace mongo {
                           );
     }
     
-    bool CoveredIndexMatcher::matches(const BSONObj &key, const DiskLoc &recLoc ) {
+    bool CoveredIndexMatcher::matches(const BSONObj &key, const DiskLoc &recLoc , bool * loaded ) {
+        if ( loaded )
+            *loaded = false;
+        
         if ( _keyMatcher.keyMatch() ) {
             if ( !_keyMatcher.matches(key) ) {
                 return false;
@@ -129,14 +157,132 @@ namespace mongo {
             return true;
         }
 
+        if ( loaded )
+            *loaded = true;
+
         return _docMatcher.matches(recLoc.rec());
     }
     
     
+    void Matcher::addRegex( const BSONElement &e, const char *fieldName, bool isNot ) {
+        if ( fieldName == 0 )
+            fieldName = e.fieldName();
+        const char* regex = e.regex();
+        const char* flags = e.regexFlags();
+
+        if (!isNot){ //TODO something smarter
+            bool purePrefix;
+            string prefix = simpleRegex(regex, flags, &purePrefix);
+            if (purePrefix){
+                {
+                    shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
+                    _builders.push_back( b );
+                    *b << fieldName << prefix;
+                    addBasic(b->done().firstElement(), BSONObj::GTE , isNot);
+                }
+                {
+                    shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
+                    _builders.push_back( b );
+                    *b << fieldName << simpleRegexEnd(prefix);
+                    addBasic(b->done().firstElement(), BSONObj::LT , isNot);
+                }
+                return;
+            }
+        }
+
+        if ( nRegex >= 4 ) {
+            out() << "ERROR: too many regexes in query" << endl;
+        }
+        else {
+            RegexMatcher& rm = regexs[nRegex];
+            rm.re = new pcrecpp::RE(regex, flags2options(flags));
+            rm.fieldName = fieldName;
+            rm.isNot = isNot;
+            nRegex++;
+        }        
+    }
+    
+    bool Matcher::addOp( const BSONElement &e, const BSONElement &fe, bool isNot, const char *& regex, const char *&flags ) {
+        const char *fn = fe.fieldName();
+        int op = fe.getGtLtOp( -1 );
+        if ( op == -1 ){
+            if ( !isNot && fn[1] == 'r' && fn[2] == 'e' && fn[3] == 'f' && fn[4] == 0 ){
+                return false; // { $ref : xxx } - treat as normal object
+            }
+            uassert( 10068 ,  (string)"invalid operator: " + fn , op != -1 );
+        }
+        
+        switch ( op ){
+            case BSONObj::GT:
+            case BSONObj::GTE:
+            case BSONObj::LT:
+            case BSONObj::LTE:{
+                shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
+                _builders.push_back( b );
+                b->appendAs(fe, e.fieldName());
+                addBasic(b->done().firstElement(), op, isNot);
+                break;
+            }
+            case BSONObj::NE:{
+                shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
+                _builders.push_back( b );
+                b->appendAs(fe, e.fieldName());
+                addBasic(b->done().firstElement(), BSONObj::NE, isNot);
+                break;
+            }
+            case BSONObj::opALL:
+                all = true;
+            case BSONObj::opIN:
+            case BSONObj::NIN:
+                basics.push_back( ElementMatcher( e , op , fe.embeddedObject(), isNot ) );
+                break;
+            case BSONObj::opMOD:
+            case BSONObj::opTYPE:
+            case BSONObj::opELEM_MATCH: {
+                shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
+                _builders.push_back( b );
+                b->appendAs(fe, e.fieldName());                                
+                // these are types where ElementMatcher has all the info
+                basics.push_back( ElementMatcher( b->done().firstElement() , op, isNot ) );
+                break;                                
+            }
+            case BSONObj::opSIZE:{
+                shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
+                _builders.push_back( b );
+                b->appendAs(fe, e.fieldName());
+                addBasic(b->done().firstElement(), BSONObj::opSIZE, isNot);    
+                haveSize = true;
+                break;
+            }
+            case BSONObj::opEXISTS:{
+                shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
+                _builders.push_back( b );
+                b->appendAs(fe, e.fieldName());
+                addBasic(b->done().firstElement(), BSONObj::opEXISTS, isNot);
+                break;
+            }
+            case BSONObj::opREGEX:{
+                uassert( 13032, "can't use $not with $regex, use BSON regex type instead", !isNot );
+                regex = fe.valuestrsafe();
+                break;
+            }
+            case BSONObj::opOPTIONS:{
+                uassert( 13029, "can't use $not with $options, use BSON regex type instead", !isNot );
+                flags = fe.valuestrsafe();
+                break;
+            }
+            case BSONObj::opNEAR:
+                break;
+            default:
+                uassert( 10069 ,  (string)"BUG - can't operator for: " + fn , 0 );
+        }        
+        return true;
+    }
+    
     /* _jsobj          - the query pattern
     */
     Matcher::Matcher(const BSONObj &_jsobj, const BSONObj &constrainIndexKey) :
-        where(0), jsobj(_jsobj), haveSize(), all(), hasArray(0), _atomic(false), nRegex(0) {
+        where(0), jsobj(_jsobj), haveSize(), all(), hasArray(0), haveNot(), _atomic(false), nRegex(0) {
 
         BSONObjIterator i(jsobj);
         while ( i.more() ) {
@@ -165,15 +311,7 @@ namespace mongo {
             }
 
             if ( e.type() == RegEx ) {
-                if ( nRegex >= 4 ) {
-                    out() << "ERROR: too many regexes in query" << endl;
-                }
-                else {
-                    RegexMatcher& rm = regexs[nRegex];
-                    rm.re = new pcrecpp::RE(e.regex(), flags2options(e.regexFlags()));
-                    rm.fieldName = e.fieldName();
-                    nRegex++;
-                }
+                addRegex( e );
                 continue;
             }
             
@@ -194,75 +332,31 @@ namespace mongo {
                     const char *fn = fe.fieldName();
                     
                     if ( fn[0] == '$' && fn[1] ) {
-                        int op = fe.getGtLtOp( -1 );
-
-                        if ( op == -1 ){
-                            if ( fn[1] == 'r' && fn[2] == 'e' && fn[3] == 'f' && fn[4] == 0 ){
-                                break; // { $ref : xxx } - treat as normal object
-                            }
-                            uassert( 10068 ,  (string)"invalid operator: " + fn , op != -1 );
-                        }
-
                         isOperator = true;
                         
-                        switch ( op ){
-                        case BSONObj::GT:
-                        case BSONObj::GTE:
-                        case BSONObj::LT:
-                        case BSONObj::LTE:{
-                            shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
-                            _builders.push_back( b );
-                            b->appendAs(fe, e.fieldName());
-                            addBasic(b->done().firstElement(), op);
-                            isOperator = true;
-                            break;
+                        if ( fn[1] == 'n' && fn[2] == 'o' && fn[3] == 't' && fn[4] == 0 ) {
+                            haveNot = true;
+                            switch( fe.type() ) {
+                                case Object: {
+                                    BSONObjIterator k( fe.embeddedObject() );
+                                    uassert( 13030, "$not cannot be empty", k.more() );
+                                    while( k.more() ) {
+                                        addOp( e, k.next(), true, regex, flags );
+                                    }
+                                    break;
+                                }
+                                case RegEx:
+                                    addRegex( fe, e.fieldName(), true );
+                                    break;
+                                default:
+                                    uassert( 13031, "invalid use of $not", false );
+                            }
+                        } else {
+                            if ( !addOp( e, fe, false, regex, flags ) ) {
+                                isOperator = false;
+                                break;
+                            }
                         }
-                        case BSONObj::NE:{
-                            shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
-                            _builders.push_back( b );
-                            b->appendAs(fe, e.fieldName());
-                            addBasic(b->done().firstElement(), BSONObj::NE);
-                            break;
-                        }
-                        case BSONObj::opALL:
-                            all = true;
-                        case BSONObj::opIN:
-                        case BSONObj::NIN:
-                            basics.push_back( ElementMatcher( e , op , fe.embeddedObject() ) );
-                            break;
-                        case BSONObj::opMOD:
-                        case BSONObj::opTYPE:
-                        case BSONObj::opELEM_MATCH:
-                            // these are types where ElementMatcher has all the info
-                            basics.push_back( ElementMatcher( e , op ) );
-                            break;
-                        case BSONObj::opSIZE:{
-                            shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
-                            _builders.push_back( b );
-                            b->appendAs(fe, e.fieldName());
-                            addBasic(b->done().firstElement(), BSONObj::opSIZE);    
-                            haveSize = true;
-                            break;
-                        }
-                        case BSONObj::opEXISTS:{
-                            shared_ptr< BSONObjBuilder > b( new BSONObjBuilder() );
-                            _builders.push_back( b );
-                            b->appendAs(fe, e.fieldName());
-                            addBasic(b->done().firstElement(), BSONObj::opEXISTS);
-                            break;
-                        }
-                        case BSONObj::opREGEX:{
-                            regex = fe.valuestrsafe();
-                            break;
-                        }
-                        case BSONObj::opOPTIONS:{
-                            flags = fe.valuestrsafe();
-                            break;
-                        }
-                        default:
-                            uassert( 10069 ,  (string)"BUG - can't operator for: " + fn , 0 );
-                        }
-                        
                     }
                     else {
                         isOperator = false;
@@ -292,7 +386,7 @@ namespace mongo {
             }
             
             // normal, simple case e.g. { a : "foo" }
-            addBasic(e, BSONObj::Equality);
+            addBasic(e, BSONObj::Equality, false);
         }
         
         constrainIndexKey_ = constrainIndexKey;
@@ -380,12 +474,40 @@ namespace mongo {
     */
     int Matcher::matchesDotted(const char *fieldName, const BSONElement& toMatch, const BSONObj& obj, int compareOp, const ElementMatcher& em , bool isArr) {
         if ( compareOp == BSONObj::opALL ) {
+            
+            if ( em.allMatchers.size() ){
+                BSONElement e = obj.getFieldDotted( fieldName );
+                uassert( 13021 , "$all/$elemMatch needs to be applied to array" , e.type() == Array );
+                
+                for ( unsigned i=0; i<em.allMatchers.size(); i++ ){
+                    bool found = false;
+                    BSONObjIterator x( e.embeddedObject() );
+                    while ( x.more() ){
+                        BSONElement f = x.next();
+
+                        if ( f.type() != Object )
+                            continue;
+                        if ( em.allMatchers[i]->matches( f.embeddedObject() ) ){
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if ( ! found )
+                        return -1;
+                }
+                
+                return 1;
+            }
+            
             if ( em.myset->size() == 0 )
                 return -1; // is this desired?
+            
             BSONObjSetDefaultOrder actualKeys;
             IndexSpec( BSON( fieldName << 1 ) ).getKeys( obj, actualKeys );
             if ( actualKeys.size() == 0 )
                 return 0;
+            
             for( set< BSONElement, element_lt >::const_iterator i = em.myset->begin(); i != em.myset->end(); ++i ) {
                 // ignore nulls
                 if ( i->type() == jstNULL )
@@ -396,9 +518,10 @@ namespace mongo {
                 if ( !actualKeys.count( b.done() ) )
                     return -1;
             }
+
             return 1;
         }
-
+        
         if ( compareOp == BSONObj::NE )
             return matchesNe( fieldName, toMatch, obj, em );
         if ( compareOp == BSONObj::NIN ) {
@@ -466,7 +589,7 @@ namespace mongo {
         }
 
         if ( compareOp == BSONObj::opEXISTS ) {
-            return ( e.eoo() ^ toMatch.boolean() ) ? 1 : -1;
+            return ( e.eoo() ^ ( toMatch.boolean() ^ em.isNot ) ) ? 1 : -1;
         } else if ( ( e.type() != Array || indexed || compareOp == BSONObj::opSIZE ) &&
             valuesMatch(e, toMatch, compareOp, em ) ) {
             return 1;
@@ -506,21 +629,10 @@ namespace mongo {
     extern int dump;
 
     inline bool regexMatches(RegexMatcher& rm, const BSONElement& e) {
-        char buf[64];
-        const char *p = buf;
         if ( e.type() == String || e.type() == Symbol )
-            p = e.valuestr();
-        else if ( e.isNumber() ) {
-            sprintf(buf, "%f", e.number());
-        }
-        else if ( e.type() == Date ) {
-            Date_t d = e.date();
-            time_t t = (d.millis/1000);
-            time_t_to_String(t, buf);
-        }
+            return rm.re->PartialMatch(e.valuestr());
         else
             return false;
-        return rm.re->PartialMatch(p);
     }
 
     /* See if an object matches the query.
@@ -535,16 +647,20 @@ namespace mongo {
             BSONElement& m = bm.toMatch;
             // -1=mismatch. 0=missing element. 1=match
             int cmp = matchesDotted(m.fieldName(), m, jsobj, bm.compareOp, bm );
+            if ( bm.compareOp != BSONObj::opEXISTS && bm.isNot )
+                cmp = -cmp;
             if ( cmp < 0 )
                 return false;
             if ( cmp == 0 ) {
                 /* missing is ok iff we were looking for null */
                 if ( m.type() == jstNULL || m.type() == Undefined ) {
-                    if ( bm.compareOp == BSONObj::NE ) {
+                    if ( ( bm.compareOp == BSONObj::NE ) ^ bm.isNot ) {
                         return false;
                     }
                 } else {
-                    return false;
+                    if ( !bm.isNot ) {
+                        return false;
+                    }
                 }
             }
         }
@@ -563,7 +679,7 @@ namespace mongo {
             for( BSONElementSet::const_iterator i = s.begin(); i != s.end(); ++i )
                 if ( regexMatches(rm, *i) )
                     match = true;
-            if ( !match )
+            if ( !match ^ rm.isNot )
                 return false;
         }
         

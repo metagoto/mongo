@@ -20,6 +20,8 @@
 #include "stdafx.h"
 #include "jsobj.h"
 #include "commands.h"
+#include "client.h"
+#include "replset.h"
 
 namespace mongo {
 
@@ -97,11 +99,12 @@ namespace mongo {
     }
 
 
-    bool Command::readOnly( const string& name ){
+    Command::LockType Command::locktype( const string& name ){
         Command * c = findCommand( name );
         if ( ! c )
-            return false;
-        return c->readOnly();
+            return WRITE;
+        return c->locktype();
     }
+
     
 } // namespace mongo

@@ -205,6 +205,13 @@ namespace mongo {
 		/** If true, safe to call next().  Requests more from server if necessary. */
         bool more();
 
+        /** If true, there is more in our local buffers to be fetched via next(). Returns 
+            false when a getMore request back to server would be required.  You can use this 
+            if you want to exhaust whatever data has been fetched to the client already but 
+            then perhaps stop.
+        */
+        bool moreInCurrentBatch() { return pos < nReturned; }
+
         /** next
 		   @return next object in the result cursor.
            on an error at the remote server, you will get back:
@@ -246,16 +253,21 @@ namespace mongo {
             return (opts & QueryOption_CursorTailable) != 0;
         }
         
+        /** see QueryResult::ResultFlagType (db/dbmessage.h) for flag values 
+            mostly these flags are for internal purposes - 
+            ResultFlag_ErrSet is the possible exception to that
+        */
         bool hasResultFlag( int flag ){
             return (resultFlags & flag) != 0;
         }
-    public:
+
         DBClientCursor( DBConnector *_connector, const string &_ns, BSONObj _query, int _nToReturn,
                         int _nToSkip, const BSONObj *_fieldsToReturn, int queryOptions ) :
                 connector(_connector),
                 ns(_ns),
                 query(_query),
                 nToReturn(_nToReturn),
+                haveLimit( _nToReturn > 0 && !(queryOptions & QueryOption_CursorTailable)),
                 nToSkip(_nToSkip),
                 fieldsToReturn(_fieldsToReturn),
                 opts(queryOptions),
@@ -271,6 +283,7 @@ namespace mongo {
                 connector(_connector),
                 ns(_ns),
                 nToReturn( _nToReturn ),
+                haveLimit( _nToReturn > 0 && !(options & QueryOption_CursorTailable)),
                 opts( options ),
                 m(new Message()),
                 cursorId( _cursorId ),
@@ -294,6 +307,7 @@ namespace mongo {
         string ns;
         BSONObj query;
         int nToReturn;
+        bool haveLimit;
         int nToSkip;
         const BSONObj *fieldsToReturn;
         int opts;

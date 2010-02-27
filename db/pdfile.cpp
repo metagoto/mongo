@@ -30,6 +30,7 @@ _ disallow system* manipulations from the database.
 #include "../util/mmap.h"
 #include "../util/hashtab.h"
 #include "../util/file_allocator.h"
+#include "../util/processinfo.h"
 #include "btree.h"
 #include <algorithm>
 #include <list>
@@ -49,7 +50,7 @@ namespace mongo {
 
     bool BackgroundOperation::inProgForDb(const char *db) {
         assertInWriteLock();
-        return dbsInProg.count(db) != 0;
+        return dbsInProg[db] != 0;
     }
 
     bool BackgroundOperation::inProgForNs(const char *ns) { 
@@ -80,6 +81,18 @@ namespace mongo {
         nsInProg.erase(_ns.ns());
     }
 
+    void BackgroundOperation::dump(stringstream& ss) {
+        if( nsInProg.size() ) { 
+            ss << "\n<b>Background Jobs in Progress</b>\n";
+            for( set<string>::iterator i = nsInProg.begin(); i != nsInProg.end(); i++ )
+                ss << "  " << *i << '\n';
+        }
+        for( map<string,unsigned>::iterator i = dbsInProg.begin(); i != dbsInProg.end(); i++ ) { 
+            if( i->second ) 
+                ss << "database " << i->first << ": " << i->second << '\n';
+        }
+    }
+
     /* ----------------------------------------- */
 
     string dbpath = "/data/db/";
@@ -94,7 +107,8 @@ namespace mongo {
     extern int otherTraceLevel;
     void addNewNamespaceToCatalog(const char *ns, const BSONObj *options = 0);
     void ensureIdIndexForNewNs(const char *ns) {
-        if ( !strstr( ns, ".system." ) && !strstr( ns, ".$freelist" ) ) {
+        if ( ( strstr( ns, ".system." ) == 0 || legalClientSystemNS( ns , false ) ) &&
+             strstr( ns, ".$freelist" ) == 0 ){
             log( 1 ) << "adding _id index for new collection" << endl;
             ensureHaveIdIndex( ns );
         }        
@@ -531,13 +545,11 @@ namespace mongo {
     /*---------------------------------------------------------------------*/
 
     auto_ptr<Cursor> DataFileMgr::findAll(const char *ns, const DiskLoc &startLoc) {
-        DiskLoc loc;
-        bool found = nsindex(ns)->find(ns, loc);
-        if ( !found ) {
-            //		out() << "info: findAll() namespace does not exist: " << ns << endl;
+        NamespaceDetails * d = nsdetails( ns );
+        if ( ! d )
             return auto_ptr<Cursor>(new BasicCursor(DiskLoc()));
-        }
 
+        DiskLoc loc = d->firstExtent;
         Extent *e = getExtent(loc);
 
         DEBUGGING {
@@ -556,25 +568,25 @@ namespace mongo {
             }
 
             out() << endl;
-            nsdetails(ns)->dumpDeleted(&extents);
+            d->dumpDeleted(&extents);
         }
 
-        if ( !nsdetails( ns )->capped ) {
-            if ( !startLoc.isNull() )
-                return auto_ptr<Cursor>(new BasicCursor( startLoc ));                
-            while ( e->firstRecord.isNull() && !e->xnext.isNull() ) {
-                /* todo: if extent is empty, free it for reuse elsewhere.
-                   that is a bit complicated have to clean up the freelists.
-                */
-                RARELY out() << "info DFM::findAll(): extent " << loc.toString() << " was empty, skipping ahead " << ns << endl;
-                // find a nonempty extent
-                // it might be nice to free the whole extent here!  but have to clean up free recs then.
-                e = e->getNextExtent();
-            }
-            return auto_ptr<Cursor>(new BasicCursor( e->firstRecord ));
-        } else {
-            return auto_ptr< Cursor >( new ForwardCappedCursor( nsdetails( ns ), startLoc ) );
+        if ( d->capped ) 
+            return auto_ptr< Cursor >( new ForwardCappedCursor( d , startLoc ) );
+        
+        if ( !startLoc.isNull() )
+            return auto_ptr<Cursor>(new BasicCursor( startLoc ));                
+        
+        while ( e->firstRecord.isNull() && !e->xnext.isNull() ) {
+            /* todo: if extent is empty, free it for reuse elsewhere.
+               that is a bit complicated have to clean up the freelists.
+            */
+            RARELY out() << "info DFM::findAll(): extent " << loc.toString() << " was empty, skipping ahead " << ns << endl;
+            // find a nonempty extent
+            // it might be nice to free the whole extent here!  but have to clean up free recs then.
+            e = e->getNextExtent();
         }
+        return auto_ptr<Cursor>(new BasicCursor( e->firstRecord ));
     }
 
     /* get a table scan cursor, but can be forward or reverse direction.
@@ -585,11 +597,13 @@ namespace mongo {
 
         if ( el.number() >= 0 )
             return DataFileMgr::findAll(ns, startLoc);
-
+        
         // "reverse natural order"
         NamespaceDetails *d = nsdetails(ns);
+        
         if ( !d )
             return auto_ptr<Cursor>(new BasicCursor(DiskLoc()));
+        
         if ( !d->capped ) {
             if ( !startLoc.isNull() )
                 return auto_ptr<Cursor>(new ReverseCursor( startLoc ));                
@@ -715,9 +729,9 @@ namespace mongo {
             try {
                 ok = id.head.btree()->unindex(id.head, id, j, dl);
             }
-            catch (AssertionException&) {
+            catch (AssertionException& e) {
                 problem() << "Assertion failure: _unindex failed " << id.indexNamespace() << endl;
-                out() << "Assertion failure: _unindex failed" << '\n';
+                out() << "Assertion failure: _unindex failed: " << e.what() << '\n';
                 out() << "  obj:" << obj.toString() << '\n';
                 out() << "  key:" << j.toString() << '\n';
                 out() << "  dl:" << dl.toString() << endl;
@@ -980,11 +994,14 @@ namespace mongo {
         BSONObj order = idx.keyPattern();
 
         idx.head.Null();
+        
+        if ( logLevel > 1 ) printMemInfo( "before index start" );
 
         /* get and sort all the keys ----- */
         unsigned long long n = 0;
         auto_ptr<Cursor> c = theDataFileMgr.findAll(ns);
         BSONObjExternalSorter sorter(order);
+        sorter.hintNumObjects( d->nrecords );
         unsigned long long nkeys = 0;
         ProgressMeter pm( d->nrecords , 10 );
         while ( c->ok() ) {
@@ -1001,12 +1018,18 @@ namespace mongo {
                 sorter.add(*i, loc);
                 nkeys++;
             }
-
+            
             c->advance();
             n++;
             pm.hit();
+            if ( logLevel > 1 && n % 10000 == 0 ){
+                printMemInfo( "\t iterating objects" );
+            }
+
         };
+        if ( logLevel > 1 ) printMemInfo( "before final sort" );
         sorter.sort();
+        if ( logLevel > 1 ) printMemInfo( "after final sort" );
         
         log(t.seconds() > 5 ? 0 : 1) << "\t external sort used : " << sorter.numFiles() << " files " << " in " << t.seconds() << " secs" << endl;
 
@@ -1045,6 +1068,7 @@ namespace mongo {
                 }
                 pm2.hit();
             }
+            log(t.seconds() > 10 ? 0 : 1 ) << "\t done building bottom layer, going to commit" << endl;
             btBuilder.commit();
             wassert( btBuilder.getn() == nkeys || dropDups ); 
         }
@@ -1157,7 +1181,7 @@ namespace mongo {
 
     // throws DBException
     static void buildAnIndex(string ns, NamespaceDetails *d, IndexDetails& idx, int idxNo) { 
-        log() << "building new index on " << idx.keyPattern() << " for " << ns << "..." << endl;
+        log() << "building new index on " << idx.keyPattern() << " for " << ns << endl;
         Timer t;
 		unsigned long long n;
 
@@ -1289,7 +1313,7 @@ namespace mongo {
     */
     DiskLoc DataFileMgr::insert(const char *ns, const void *obuf, int len, bool god, const BSONElement &writeId, bool mayAddIndex) {
         bool wouldAddIndex = false;
-        uassert( 10093 , "cannot insert into reserved $ collection", god || strchr(ns, '$') == 0 );
+        massert( 10093 , "cannot insert into reserved $ collection", god || strchr(ns, '$') == 0 );
         uassert( 10094 , "invalid ns", strchr( ns , '.' ) > 0 );
         const char *sys = strstr(ns, "system.");
         if ( sys ) {
@@ -1317,8 +1341,8 @@ namespace mongo {
             /* todo: shouldn't be in the namespace catalog until after the allocations here work.
                also if this is an addIndex, those checks should happen before this!
             */
-            // This creates first file in the database.
-            cc().database()->newestFile()->createExtent(ns, initialExtentSize(len));
+            // This may create first file in the database.
+            cc().database()->allocExtent(ns, initialExtentSize(len), false);
             d = nsdetails(ns);
             if ( !god )
                 ensureIdIndexForNewNs(ns);
@@ -1440,6 +1464,7 @@ namespace mongo {
                 // save our error msg string as an exception on dropIndexes will overwrite our message
                 LastError *le = lastError.get();
                 assert( le );
+                int savecode = le->code;
                 string saveerrmsg = le->msg;
                 assert( !saveerrmsg.empty() );
 
@@ -1451,7 +1476,7 @@ namespace mongo {
                 if( !ok ) {
                     log() << "failed to drop index after a unique key error building it: " << errmsg << ' ' << tabletoidxns << ' ' << name << endl;
                 }
-                raiseError(12506,saveerrmsg.c_str());
+                raiseError(savecode,saveerrmsg.c_str());
                 throw;
             }
         }
@@ -1755,17 +1780,23 @@ namespace mongo {
         
         BSONObjBuilder bb( result.subarrayStart( "dbs" ) );
         int n = 0;
+        int nNotClosed = 0;
         for( set< string >::iterator i = dbs.begin(); i != dbs.end(); ++i ) {
             string name = *i;
             log(2) << "DatabaseHolder::closeAll path:" << path << " name:" << name << endl;
             Client::Context ctx( name , path );
-            if( !force && BackgroundOperation::inProgForDb(name.c_str()) )
-                log() << "WARNING: can't close database " << name << "because a bg job is in progress - try killOp command" << endl;
-            else
+            if( !force && BackgroundOperation::inProgForDb(name.c_str()) ) {
+                log() << "WARNING: can't close database " << name << " because a bg job is in progress - try killOp command" << endl;
+                nNotClosed++;
+            }
+            else {
                 closeDatabase( name.c_str() , path );
-            bb.append( bb.numStr( n++ ).c_str() , name );
+                bb.append( bb.numStr( n++ ).c_str() , name );
+            }
         }
         bb.done();
+        if( nNotClosed )
+            result.append("nNotClosed", nNotClosed);
         
         return true;
     }

@@ -1,3 +1,19 @@
+/*
+ *    Copyright (C) 2010 10gen Inc.
+ *
+ *    This program is free software: you can redistribute it and/or  modify
+ *    it under the terms of the GNU Affero General Public License, version 3,
+ *    as published by the Free Software Foundation.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU Affero General Public License for more details.
+ *
+ *    You should have received a copy of the GNU Affero General Public License
+ *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 /* concurrency.h
 
    mongod concurrency rules & notes will be placed here.
@@ -17,11 +33,25 @@
 #include <boost/thread/shared_mutex.hpp>
 #undef assert
 #define assert xassert
+#define HAVE_READLOCK
 #else
-#warning built with boost version 1.34 or older limited concurrency
+#warning built with boost version 1.34 or older - limited concurrency
 #endif
 
 namespace mongo {
+
+    inline bool readLockSupported(){
+#ifdef HAVE_READLOCK
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    string sayClientState();
+    
+    void curopWaitingForLock( int type );
+    void curopGotLock();
 
     /* mutex time stats */
     class MutexInfo {
@@ -56,7 +86,7 @@ namespace mongo {
         }
     };
 
-#if BOOST_VERSION >= 103500
+#ifdef HAVE_READLOCK
 //#if 0
     class MongoMutex {
         MutexInfo _minfo;
@@ -89,9 +119,13 @@ namespace mongo {
                 _state.set(s+1);
                 return;
             }
-            massert( 10293 , "internal error: locks are not upgradeable", s == 0 );
+            massert( 10293 , (string)"internal error: locks are not upgradeable: " + sayClientState() , s == 0 );
             _state.set(1);
+
+            curopWaitingForLock( 1 );
             _m.lock(); 
+            curopGotLock();
+
             _minfo.entered();
         }
         void unlock() { 
@@ -139,8 +173,27 @@ namespace mongo {
                 }
             }
             _state.set(-1);
+            curopWaitingForLock( -1 );
             _m.lock_shared(); 
+            curopGotLock();
         }
+        
+        bool lock_shared_try( int millis ) {
+            int s = _state.get();
+            if ( s ){
+                // we already have a lock, so no need to try
+                lock_shared();
+                return true;
+            }
+            
+            boost::system_time until = get_system_time();
+            until += boost::posix_time::milliseconds(2);
+            bool got = _m.timed_lock_shared( until );
+            if ( got )
+                _state.set(-1);
+            return got;
+        }
+        
         void unlock_shared() { 
             //DEV cout << " UNLOCKSHARED" << endl;
             int s = _state.get();
@@ -157,6 +210,7 @@ namespace mongo {
             _state.set(0);
             _m.unlock_shared(); 
         }
+        
         MutexInfo& info() { return _minfo; }
     };
 #else
@@ -168,7 +222,7 @@ namespace mongo {
     public:
         MongoMutex() { }
         void lock() { 
-#if BOOST_VERSION >= 103500
+#ifdef HAVE_READLOCK
             m.lock();
 #else
             boost::detail::thread::lock_ops<boost::recursive_mutex>::lock(m);
@@ -185,7 +239,7 @@ namespace mongo {
 
         void _unlock() {
             _minfo.leaving();
-#if BOOST_VERSION >= 103500
+#ifdef HAVE_READLOCK
             m.unlock();
 #else
             boost::detail::thread::lock_ops<boost::recursive_mutex>::unlock(m);
@@ -200,6 +254,18 @@ namespace mongo {
         }
 
         void lock_shared() { lock(); }
+        bool lock_shared_try( int millis ) {
+            while ( millis-- ){
+                if ( getState() ){
+                    sleepmillis(1);
+                    continue;
+                }
+                lock_shared();
+                return true;
+            }
+            return false;
+        }
+                    
         void unlock_shared() { unlock(); }
         MutexInfo& info() { return _minfo; }
         void assertWriteLocked() { 
@@ -241,7 +307,37 @@ namespace mongo {
             );
         }
     };	
+
+    struct readlocktry {
+        readlocktry( const string&ns , int tryms ){
+            _got = dbMutex.lock_shared_try( tryms );
+        }
+        ~readlocktry() {
+            if ( _got ){
+                dbunlocking_read();
+                dbMutex.unlock_shared();
+            }
+        }
+        bool got(){
+            return _got;
+        }
+        bool _got;
+    };
     
+    struct atleastreadlock {
+        atleastreadlock( const string& ns ){
+            _prev = dbMutex.getState();
+            if ( _prev == 0 )
+                dbMutex.lock_shared();
+        }
+        ~atleastreadlock(){
+            if ( _prev == 0 )
+                dbMutex.unlock_shared();
+        }
+
+        int _prev;
+    };
+
     class mongolock {
         bool _writelock;
     public:
