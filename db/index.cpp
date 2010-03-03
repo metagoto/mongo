@@ -27,12 +27,16 @@ namespace mongo {
 
     map<string,IndexPlugin*> * IndexPlugin::_plugins;
 
-    IndexType::IndexType( const IndexPlugin * plugin )
-        : _plugin( plugin ){
+    IndexType::IndexType( const IndexPlugin * plugin , const IndexSpec * spec )
+        : _plugin( plugin ) , _spec( spec ){
         
     }
 
     IndexType::~IndexType(){
+    }
+    
+    const BSONObj& IndexType::keyPattern() const { 
+        return _spec->keyPattern; 
     }
 
     IndexPlugin::IndexPlugin( const string& name )
@@ -42,8 +46,8 @@ namespace mongo {
         (*_plugins)[name] = this;
     }
     
-    int IndexType::compare( const IndexSpec& spec , const BSONObj& l , const BSONObj& r ) const {
-        return l.woCompare( r , spec.keyPattern );
+    int IndexType::compare( const BSONObj& l , const BSONObj& r ) const {
+        return l.woCompare( r , _spec->keyPattern );
     }
 
 
@@ -400,4 +404,35 @@ namespace mongo {
         return true;
     }
 
+    bool anyElementNamesMatch( const BSONObj& a , const BSONObj& b ){
+        BSONObjIterator x(a);
+        while ( x.more() ){
+            BSONElement e = x.next();
+            BSONObjIterator y(b);
+            while ( y.more() ){
+                BSONElement f = y.next();
+                FieldCompareResult res = compareDottedFieldNames( e.fieldName() , f.fieldName() );
+                if ( res == SAME || res == LEFT_SUBFIELD || res == RIGHT_SUBFIELD )
+                    return true;
+            }
+        }
+        return false;
+    }
+    
+    IndexSuitability IndexSpec::suitability( const BSONObj& query , const BSONObj& order ) const {
+        if ( _indexType.get() )
+            return _indexType->suitability( query , order );
+        return _suitability( query , order );
+    }
+    
+    IndexSuitability IndexSpec::_suitability( const BSONObj& query , const BSONObj& order ) const {
+        // TODO: optimize
+        if ( anyElementNamesMatch( keyPattern , query ) == 0 && anyElementNamesMatch( keyPattern , order ) == 0 )
+            return USELESS;
+        return HELPFUL;
+    }
+
+    IndexSuitability IndexType::suitability( const BSONObj& query , const BSONObj& order ) const {
+        return _spec->_suitability( query , order );
+    }
 }

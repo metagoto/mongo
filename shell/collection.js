@@ -139,7 +139,7 @@ DBCollection.prototype.find = function( query , fields , limit , skip ){
 }
 
 DBCollection.prototype.findOne = function( query , fields ){
-    var cursor = this._mongo.find( this._fullName , this._massageObject( query ) || {} , fields , -1 , 0  );
+    var cursor = this._mongo.find( this._fullName , this._massageObject( query ) || {} , fields , -1 , 0 , 0 );
     if ( ! cursor.hasNext() )
         return null;
     var ret = cursor.next();
@@ -163,7 +163,7 @@ DBCollection.prototype.insert = function( obj , _allow_dot ){
         }
     }
     this._mongo.insert( this._fullName , obj );
-    return obj._id;
+    this._lastID = obj._id;
 }
 
 DBCollection.prototype.remove = function( t ){
@@ -446,8 +446,8 @@ DBCollection.prototype.getCollection = function( subName ){
     return this._db.getCollection( this._shortName + "." + subName );
 }
 
-DBCollection.prototype.stats = function(){
-    return this._db.runCommand( { collstats : this._shortName } );
+DBCollection.prototype.stats = function( scale ){
+    return this._db.runCommand( { collstats : this._shortName , scale : scale } );
 }
 
 DBCollection.prototype.dataSize = function(){

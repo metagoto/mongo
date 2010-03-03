@@ -21,6 +21,7 @@
 #include "../util/message.h"
 #include "../db/jsobj.h"
 #include "../db/json.h"
+#include <stack>
 
 namespace mongo {
 
@@ -210,7 +211,7 @@ namespace mongo {
             if you want to exhaust whatever data has been fetched to the client already but 
             then perhaps stop.
         */
-        bool moreInCurrentBatch() { return pos < nReturned; }
+        bool moreInCurrentBatch() { return !_putBack.empty() || pos < nReturned; }
 
         /** next
 		   @return next object in the result cursor.
@@ -219,6 +220,11 @@ namespace mongo {
            if you do not want to handle that yourself, call nextSafe().
         */
         BSONObj next();
+        
+        /** 
+            restore an object previously returned by next() to the cursor
+         */
+        void putBack( const BSONObj &o ) { _putBack.push( o.getOwned() ); }
 
 		/** throws AssertionException if get back { $err : ... } */
         BSONObj nextSafe() {
@@ -262,7 +268,7 @@ namespace mongo {
         }
 
         DBClientCursor( DBConnector *_connector, const string &_ns, BSONObj _query, int _nToReturn,
-                        int _nToSkip, const BSONObj *_fieldsToReturn, int queryOptions ) :
+                        int _nToSkip, const BSONObj *_fieldsToReturn, int queryOptions , int bs ) :
                 connector(_connector),
                 ns(_ns),
                 query(_query),
@@ -271,6 +277,7 @@ namespace mongo {
                 nToSkip(_nToSkip),
                 fieldsToReturn(_fieldsToReturn),
                 opts(queryOptions),
+                batchSize(bs),
                 m(new Message()),
                 cursorId(),
                 nReturned(),
@@ -303,6 +310,9 @@ namespace mongo {
         void decouple() { _ownCursor = false; }
         
     private:
+        
+        int nextBatchSize();
+
         DBConnector *connector;
         string ns;
         BSONObj query;
@@ -311,7 +321,9 @@ namespace mongo {
         int nToSkip;
         const BSONObj *fieldsToReturn;
         int opts;
+        int batchSize;
         auto_ptr<Message> m;
+        stack< BSONObj > _putBack;
 
         int resultFlags;
         long long cursorId;
@@ -329,7 +341,7 @@ namespace mongo {
     class DBClientInterface : boost::noncopyable {
     public:
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0) = 0;
+                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 ) = 0;
 
         virtual auto_ptr<DBClientCursor> getMore( const string &ns, long long cursorId, int nToReturn = 0, int options = 0 ) = 0;
         
@@ -675,7 +687,7 @@ namespace mongo {
          @throws AssertionException
         */
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
+                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 );
 
         /** @param cursorId id of cursor to retrieve
             @return an handle to a previously allocated cursor
@@ -769,9 +781,9 @@ namespace mongo {
         virtual bool auth(const string &dbname, const string &username, const string &pwd, string& errmsg, bool digestPassword = true);
 
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0) {
+                                               const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 ) {
             checkConnection();
-            return DBClientBase::query( ns, query, nToReturn, nToSkip, fieldsToReturn, queryOptions );
+            return DBClientBase::query( ns, query, nToReturn, nToSkip, fieldsToReturn, queryOptions , batchSize );
         }
 
         /**
@@ -849,7 +861,7 @@ namespace mongo {
         /** throws userassertion "no master found" */
         virtual
         auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
-                                       const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
+                                       const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 );
 
         /** throws userassertion "no master found" */
         virtual

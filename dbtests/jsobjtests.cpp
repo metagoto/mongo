@@ -358,6 +358,26 @@ namespace JsobjTests {
             }
         };
 
+        struct AppendNumber {
+            void run(){
+                BSONObjBuilder b;
+                b.appendNumber( "a" , 5 );
+                b.appendNumber( "b" , 5.5 );
+                b.appendNumber( "c" , (1024LL*1024*1024)-1 );
+                b.appendNumber( "d" , (1024LL*1024*1024*1024)-1 );
+                b.appendNumber( "e" , 1024LL*1024*1024*1024*1024*1024 );
+                
+                BSONObj o = b.obj();
+                
+                ASSERT( o["a"].type() == NumberInt );
+                ASSERT( o["b"].type() == NumberDouble );
+                ASSERT( o["c"].type() == NumberInt );
+                ASSERT( o["d"].type() == NumberDouble );
+                ASSERT( o["e"].type() == NumberLong );
+
+            }
+        };
+
         namespace Validation {
 
             class Base {
@@ -1386,6 +1406,43 @@ namespace JsobjTests {
         }
     };
 
+    class ElementSetTest {
+    public:
+        void run(){
+            BSONObj x = BSON( "a" << 1 << "b" << 1 << "c" << 2 );
+            BSONElement a = x["a"];
+            BSONElement b = x["b"];
+            BSONElement c = x["c"];
+            cout << "c: " << c << endl;
+            ASSERT( a.woCompare( b ) != 0 );
+            ASSERT( a.woCompare( b , false ) == 0 );
+            
+            BSONElementSet s;
+            s.insert( a );
+            ASSERT_EQUALS( 1U , s.size() );
+            s.insert( b );
+            ASSERT_EQUALS( 1U , s.size() );
+            ASSERT( ! s.count( c ) );
+
+            ASSERT( s.find( a ) != s.end() );
+            ASSERT( s.find( b ) != s.end() );
+            ASSERT( s.find( c ) == s.end() );
+                    
+            
+            s.insert( c );
+            ASSERT_EQUALS( 2U , s.size() );
+
+
+            ASSERT( s.find( a ) != s.end() );
+            ASSERT( s.find( b ) != s.end() );
+            ASSERT( s.find( c ) != s.end() );
+
+            ASSERT( s.count( a ) );
+            ASSERT( s.count( b ) );
+            ASSERT( s.count( c ) );
+        }
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "jsobj" ){
@@ -1407,6 +1464,7 @@ namespace JsobjTests {
             add< BSONObjTests::Nan >();
             add< BSONObjTests::AsTempObj >();
             add< BSONObjTests::AppendIntOrLL >();
+            add< BSONObjTests::AppendNumber >();
             add< BSONObjTests::Validation::BadType >();
             add< BSONObjTests::Validation::EooBeforeEnd >();
             add< BSONObjTests::Validation::Undefined >();
@@ -1476,6 +1534,7 @@ namespace JsobjTests {
             add< bson2settest >();
             add< checkForStorageTests >();
             add< InvalidIDFind >();
+            add< ElementSetTest >();
         }
     } myall;
     

@@ -651,7 +651,7 @@ namespace mongo {
 
     struct BSONElementCmpWithoutField {
         bool operator()( const BSONElement &l, const BSONElement &r ) const {
-            return l.woCompare( r, false );
+            return l.woCompare( r, false ) < 0;
         }
     };
     
@@ -1290,6 +1290,31 @@ namespace mongo {
                 append( fieldName.c_str() , (int)n );
             else
                 append( fieldName.c_str() , n );
+        }
+
+
+        /**
+         * appendNumber is a series of method for appending the smallest sensible type
+         * mostly for JS
+         */
+        void appendNumber( const string& fieldName , int n ){
+            append( fieldName.c_str() , n );
+        }
+
+        void appendNumber( const string& fieldName , double d ){
+            append( fieldName.c_str() , d );
+        }
+
+        void appendNumber( const string& fieldName , long long l ){
+            static long long maxInt = (int)pow( 2.0 , 30.0 );
+            static long long maxDouble = (long long)pow( 2.0 , 40.0 );
+
+            if ( l < maxInt )
+                append( fieldName.c_str() , (int)l );
+            else if ( l < maxDouble )
+                append( fieldName.c_str() , (double)l );
+            else
+                append( fieldName.c_str() , l );
         }
         
         /** Append a double element */

@@ -210,7 +210,7 @@ namespace mongo {
        4 - skip
     */
     Handle<Value> mongoFind(const Arguments& args){
-        jsassert( args.Length() == 5 , "find needs 5 args" );
+        jsassert( args.Length() == 6 , "find needs 6 args" );
         jsassert( args[1]->IsObject() , "needs to be an object" );
         DBClientBase * conn = getConnection( args );
         GETNS;
@@ -227,14 +227,15 @@ namespace mongo {
         Local<v8::Value> slaveOkVal = mongo->Get( v8::String::New( "slaveOk" ) );
         jsassert( slaveOkVal->IsBoolean(), "slaveOk member invalid" );
         bool slaveOk = slaveOkVal->BooleanValue();
-    
+        
         try {
             auto_ptr<mongo::DBClientCursor> cursor;
             int nToReturn = (int)(args[3]->ToNumber()->Value());
             int nToSkip = (int)(args[4]->ToNumber()->Value());
+            int batchSize = (int)(args[5]->ToNumber()->Value());
             {
                 v8::Unlocker u;
-                cursor = conn->query( ns, q ,  nToReturn , nToSkip , haveFields ? &fields : 0, slaveOk ? QueryOption_SlaveOk : 0 );
+                cursor = conn->query( ns, q ,  nToReturn , nToSkip , haveFields ? &fields : 0, slaveOk ? QueryOption_SlaveOk : 0 , batchSize );
             }
             v8::Function * cons = (v8::Function*)( *( mongo->Get( v8::String::New( "internalCursor" ) ) ) );
             assert( cons );
@@ -425,6 +426,11 @@ namespace mongo {
             t->Set( v8::String::New( "_skip" ) , args[7] );
         else 
             t->Set( v8::String::New( "_skip" ) , Number::New( 0 ) );
+
+        if ( args.Length() > 8 && args[8]->IsNumber() )
+            t->Set( v8::String::New( "_batchSize" ) , args[7] );
+        else 
+            t->Set( v8::String::New( "_batchSize" ) , Number::New( 0 ) );
     
         t->Set( v8::String::New( "_cursor" ) , v8::Null() );
         t->Set( v8::String::New( "_numReturned" ) , v8::Number::New(0) );
@@ -597,8 +603,8 @@ namespace mongo {
 
     v8::Handle<v8::Value> numberLongInit( const v8::Arguments& args ) {
         
-        if (args.Length() != 2) {
-            return v8::ThrowException( v8::String::New( "NumberLong needs 2 arguments" ) );
+        if (args.Length() != 1 && args.Length() != 3) {
+            return v8::ThrowException( v8::String::New( "NumberLong needs 1 or 3 arguments" ) );
         }
         
         v8::Handle<v8::Object> it = args.This();
@@ -608,13 +614,25 @@ namespace mongo {
             it = f->NewInstance();
         }
         
-        it->Set( v8::String::New( "top" ) , args[0] );
-        it->Set( v8::String::New( "bottom" ) , args[1] );
+        it->Set( v8::String::New( "floatApprox" ) , args[0] );
+        if ( args.Length() == 3 ) {
+            it->Set( v8::String::New( "top" ) , args[1] );
+            it->Set( v8::String::New( "bottom" ) , args[2] );
+        }
         it->SetHiddenValue( v8::String::New( "__NumberLong" ), v8::Number::New( 1 ) );
         
         return it;
     }
 
+    long long numberLongVal( const v8::Handle< v8::Object > &it ) {
+        if ( !it->Has( v8::String::New( "top" ) ) )
+            return (long long)( it->Get( v8::String::New( "floatApprox" ) )->NumberValue() );
+        return
+        (long long)
+        ( (unsigned long long)( it->Get( v8::String::New( "top" ) )->ToInt32()->Value() ) << 32 ) +
+        (unsigned)( it->Get( v8::String::New( "bottom" ) )->ToInt32()->Value() );        
+    }
+    
     v8::Handle<v8::Value> numberLongValueOf( const v8::Arguments& args ) {
         
         if (args.Length() != 0) {
@@ -623,11 +641,9 @@ namespace mongo {
         
         v8::Handle<v8::Object> it = args.This();
         
-        unsigned long long val =
-        ( (unsigned long long)( it->Get( v8::String::New( "top" ) )->ToInt32()->Value() ) << 32 ) +
-        (unsigned)( it->Get( v8::String::New( "bottom" ) )->ToInt32()->Value() );
+        long long val = numberLongVal( it );
         
-        return v8::Number::New( double( (long long)val ) );
+        return v8::Number::New( double( val ) );
     }
 
     v8::Handle<v8::Value> numberLongToNumber( const v8::Arguments& args ) {
@@ -642,12 +658,10 @@ namespace mongo {
         
         v8::Handle<v8::Object> it = args.This();
         
-        unsigned long long val =
-        ( (unsigned long long)( it->Get( v8::String::New( "top" ) )->ToInt32()->Value() ) << 32 ) +
-        (unsigned)( it->Get( v8::String::New( "bottom" ) )->ToInt32()->Value() );
+        long long val = numberLongVal( it );
         
         stringstream ss;
-        ss << (long long)val;
+        ss << val;
         string ret = ss.str();
         return v8::String::New( ret.c_str() );
     }
