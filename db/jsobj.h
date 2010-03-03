@@ -1651,30 +1651,83 @@ namespace mongo {
 
     class BSONArrayBuilder : boost::noncopyable{
     public:
-        BSONArrayBuilder() :i(0), b() {}
+        BSONArrayBuilder() : _i(0), _b() {}
+        BSONArrayBuilder( BufBuilder &b ) : _i(0), _b(b) {}
 
         template <typename T>
         BSONArrayBuilder& append(const T& x){
-            b.append(num().c_str(), x);
+            _b.append(num().c_str(), x);
             return *this;
         }
 
         BSONArrayBuilder& append(const BSONElement& e){
-            b.appendAs(e, num().c_str());
+            _b.appendAs(e, num().c_str());
             return *this;
         }
-
+        
         template <typename T>
         BSONArrayBuilder& operator<<(const T& x){
             return append(x);
         }
+        
+        void appendNull() {
+            _b.appendNull(num().c_str());
+        }
 
-        BSONArray arr(){ return BSONArray(b.obj()); }
+        BSONArray arr(){ return BSONArray(_b.obj()); }
+        
+        BSONObj done() { return _b.done(); }
+        
+        template <typename T>
+        BSONArrayBuilder& append(const char *name, const T& x){
+            fill( name );
+            append( x );
+            return *this;
+        }
+        
+        BufBuilder &subobjStart( const char *name ) {
+            fill( name );
+            return _b.subobjStart( num().c_str() );
+        }
 
+        BufBuilder &subarrayStart( const char *name ) {
+            fill( name );
+            return _b.subarrayStart( num().c_str() );
+        }
+        
+        void appendArray( const char *name, BSONObj subObj ) {
+            fill( name );
+            _b.appendArray( num().c_str(), subObj );
+        }
+        
+        void appendAs( const BSONElement &e, const char *name ) {
+            fill( name );
+            append( e );
+        }
+        
     private:
-        string num(){ return b.numStr(i++); }
-        int i;
-        BSONObjBuilder b;
+        void fill( const char *name ) {
+            char *r;
+            int n = strtol( name, &r, 10 );
+            uassert( 13048, "can't append to array using string field name", !*r );
+            while( _i < n )
+                append( nullElt() );
+        }
+        
+        static BSONElement nullElt() {
+            static BSONObj n = nullObj();
+            return n.firstElement();
+        }
+        
+        static BSONObj nullObj() {
+            BSONObjBuilder b;
+            b.appendNull( "" );
+            return b.obj();
+        }
+        
+        string num(){ return _b.numStr(_i++); }
+        int _i;
+        BSONObjBuilder _b;
     };
 
 
