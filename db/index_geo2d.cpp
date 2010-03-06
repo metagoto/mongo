@@ -740,11 +740,11 @@ namespace mongo {
             if ( _points.size() >= _max && d > farthest() )
                 return;
             
-            bool loaded = false;
+            MatchDetails details;
             if ( _matcher.get() ){
 
-                bool good = _matcher->matches( node.key , node.recordLoc , &loaded );
-                if ( loaded )
+                bool good = _matcher->matches( node.key , node.recordLoc , &details );
+                if ( details.loadedObject )
                     _objectsLoaded++;
                 
                 if ( ! good ){
@@ -752,7 +752,7 @@ namespace mongo {
                 }
             }
             
-            if ( ! loaded ) // dont double count
+            if ( ! details.loadedObject ) // dont double count
                 _objectsLoaded++;
             
             _points.insert( GeoPoint( node.key , node.recordLoc , d ) );
@@ -1003,7 +1003,7 @@ namespace mongo {
     };
 
     auto_ptr<Cursor> Geo2dType::newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const {
-        uassert( 13045 , "can't specify order with geo search" , order.isEmpty() );
+        uassert( 13045 , "can't specify order with geo $near search" , order.isEmpty() );
         if ( numWanted < 0 )
             numWanted = numWanted * -1;
         else if ( numWanted == 0 )
