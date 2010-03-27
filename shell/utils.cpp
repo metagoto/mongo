@@ -76,20 +76,8 @@ namespace mongo {
             return BSON( "" << obj );
         }
 
-        void sleepms( int ms ) {
-            boost::xtime xt;
-            boost::xtime_get(&xt, boost::TIME_UTC);
-            xt.sec += ( ms / 1000 );
-            xt.nsec += ( ms % 1000 ) * 1000000;
-            if ( xt.nsec >= 1000000000 ) {
-                xt.nsec -= 1000000000;
-                xt.sec++;
-            }
-            boost::thread::sleep(xt);    
-        }
         
         // real methods
-
 
         
         mongo::BSONObj JSSleep(const mongo::BSONObj &args){
@@ -98,7 +86,7 @@ namespace mongo {
             int ms = int( args.firstElement().number() );
             {
                 auto_ptr< ScriptEngine::Unlocker > u = globalScriptEngine->newThreadUnlocker();
-                sleepms( ms );
+                sleepmillis( ms );
             }
             return undefined_;
         }
@@ -195,11 +183,11 @@ namespace mongo {
         map< pid_t, HANDLE > handles;
 #endif
         
-        boost::mutex &mongoProgramOutputMutex( *( new boost::mutex ) );
+        mongo::mutex mongoProgramOutputMutex;
         stringstream mongoProgramOutput_;
 
         void writeMongoProgramOutputLine( int port, int pid, const char *line ) {
-            boost::mutex::scoped_lock lk( mongoProgramOutputMutex );
+            mongo::mutex::scoped_lock lk( mongoProgramOutputMutex );
             stringstream buf;
             if ( port > 0 )
                 buf << "m" << port << "| " << line;
@@ -211,7 +199,7 @@ namespace mongo {
         
         // only returns last 100000 characters
         BSONObj RawMongoProgramOutput( const BSONObj &args ) {
-            boost::mutex::scoped_lock lk( mongoProgramOutputMutex );
+            mongo::mutex::scoped_lock lk( mongoProgramOutputMutex );
             string out = mongoProgramOutput_.str();
             size_t len = out.length();
             if ( len > 100000 )
@@ -220,7 +208,7 @@ namespace mongo {
         }
 
         BSONObj ClearRawMongoProgramOutput( const BSONObj &args ) {
-            boost::mutex::scoped_lock lk( mongoProgramOutputMutex );
+            mongo::mutex::scoped_lock lk( mongoProgramOutputMutex );
             mongoProgramOutput_.str( "" );
             return undefined_;
         }
@@ -549,7 +537,7 @@ namespace mongo {
                 }        
                 if(wait_for_pid(pid, false, &exitCode))
                     break;
-                sleepms( 1000 );
+                sleepmillis( 1000 );
             }
             if ( i == 65 ) {
                 char now[64];
@@ -567,7 +555,7 @@ namespace mongo {
                 shells.erase( pid );
             }
             if ( i > 4 || signal == SIGKILL ) {
-                sleepms( 4000 ); // allow operating system to reclaim resources
+                sleepmillis( 4000 ); // allow operating system to reclaim resources
             }
             
             return exitCode;

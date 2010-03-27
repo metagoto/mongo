@@ -25,7 +25,7 @@ namespace mongo {
      * this is a connection to a cluster of servers that operate as one
      * for super high durability
      */
-    class SyncClusterConnection : public DBClientWithCommands {
+    class SyncClusterConnection : public DBClientBase {
     public:
         /**
          * @param commaSeperated should be 3 hosts comma seperated
@@ -60,13 +60,40 @@ namespace mongo {
 
         virtual void update( const string &ns , Query query , BSONObj obj , bool upsert , bool multi );
 
-        virtual string toString();
+        virtual string toString(){
+            return _toString();
+        }
+
+        virtual bool call( Message &toSend, Message &response, bool assertOk );
+        virtual void say( Message &toSend );
+        virtual void sayPiggyBack( Message &toSend );
+        
+        virtual string getServerAddress() const { return _address; }
+
+        virtual bool isFailed() const { 
+            return false; 
+        }
+
     private:
         
+        SyncClusterConnection( SyncClusterConnection& prev );
+
+        string _toString() const;
+        
+        bool _commandOnActive(const string &dbname, const BSONObj& cmd, BSONObj &info, int options=0);
+
+        auto_ptr<DBClientCursor> _queryOnActive(const string &ns, Query query, int nToReturn, int nToSkip,
+                                                const BSONObj *fieldsToReturn, int queryOptions, int batchSize );
+        
+        bool _isReadOnly( const string& name );
+
         void _checkLast();
         
         void _connect( string host );
+
+        string _address;
         vector<DBClientConnection*> _conns;
+        map<string,int> _lockTypes;
     };
     
 

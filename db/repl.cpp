@@ -69,6 +69,8 @@ namespace mongo {
     
     IdTracker &idTracker = *( new IdTracker() );
     
+    int __findingStartInitialTimeout = 5; // configurable for testing    
+
 } // namespace mongo
 
 #include "replset.h"
@@ -936,6 +938,7 @@ namespace mongo {
         }
         
         Client::Context ctx( ns );
+        ctx.getClient()->curop()->reset();
 
         bool empty = ctx.db()->isEmpty();
         bool incompleteClone = incompleteCloneDbs.count( clientName ) != 0;
@@ -1116,8 +1119,12 @@ namespace mongo {
     
     /* slave: pull some data from the master's oplog
        note: not yet in db mutex at this point. 
+       @return -1 error
+               0 ok, don't sleep
+               1 ok, sleep
     */
-    bool ReplSource::sync_pullOpLog(int& nApplied) {
+    int ReplSource::sync_pullOpLog(int& nApplied) {
+        int okResultCode = 1;
         string ns = string("local.oplog.$") + sourceName();
         log(2) << "repl: sync_pullOpLog " << ns << " syncedTo:" << syncedTo.toStringLong() << '\n';
 
@@ -1188,7 +1195,7 @@ namespace mongo {
         if ( c == 0 ) {
             problem() << "repl:   dbclient::query returns null (conn closed?)" << endl;
             resetConnection();
-            return false;
+            return -1;
         }
 
         // show any deferred database creates from a previous pass
@@ -1206,6 +1213,9 @@ namespace mongo {
         if ( !c->more() ) {
             if ( tailing ) {
                 log(2) << "repl: tailing & no new activity\n";
+                if( c->hasResultFlag(QueryResult::ResultFlag_AwaitCapable) )
+                    okResultCode = 0; // don't sleep
+
             } else {
                 log() << "repl:   " << ns << " oplog is empty\n";
             }
@@ -1220,7 +1230,7 @@ namespace mongo {
                 }
                 save();            
             }
-            return true;
+            return okResultCode;
         }
         
         OpTime nextOpTime;
@@ -1245,7 +1255,7 @@ namespace mongo {
                 if ( !tailing && !initial && next != syncedTo ) {
                     log() << "remote slave log filled, forcing slave resync" << endl;
                     resetSlave();
-                    return true;
+                    return 1;
                 }            
             
                 dblock lk;
@@ -1313,6 +1323,8 @@ namespace mongo {
                             setLastSavedLocalTs( nextLastSaved );
                         }
                     }
+                    if( c->hasResultFlag(QueryResult::ResultFlag_AwaitCapable) && tailing )
+                        okResultCode = 0; // don't sleep
                     syncedTo = nextOpTime;
                     save(); // note how far we are synced up to now
                     log() << "repl:   applied " << n << " operations" << endl;
@@ -1371,7 +1383,7 @@ namespace mongo {
             }
         }
 
-        return true;
+        return okResultCode;
     }
 
 	BSONObj userReplQuery = fromjson("{\"user\":\"repl\"}");
@@ -1425,9 +1437,10 @@ namespace mongo {
     }
     
     /* note: not yet in mutex at this point.
-       returns true if everything happy.  return false if you want to reconnect.
+       returns >= 0 if ok.  return -1 if you want to reconnect.
+       return value of zero indicates no sleep necessary before next call
     */
-    bool ReplSource::sync(int& nApplied) {
+    int ReplSource::sync(int& nApplied) {
         _sleepAdviceTime = 0;
         ReplInfo r("sync");
         if ( !cmdLine.quiet ) {
@@ -1444,7 +1457,7 @@ namespace mongo {
         if ( (string("localhost") == hostName || string("127.0.0.1") == hostName) && cmdLine.port == CmdLine::DefaultDBPort ) {
             log() << "repl:   can't sync from self (localhost). sources configuration may be wrong." << endl;
             sleepsecs(5);
-            return false;
+            return -1;
         }
 
         if ( !connect() ) {
@@ -1453,7 +1466,7 @@ namespace mongo {
                 assert( startsWith(hostName.c_str(), replPair->remoteHost.c_str()) );
                 replPair->arbitrate();
             }
-            return false;            
+            return -1;
         }
         
         if ( paired ) {
@@ -1461,7 +1474,7 @@ namespace mongo {
             int nMasters = ( remote == ReplPair::State_Master ) + ( replPair->state == ReplPair::State_Master );
             if ( getInitialSyncCompleted() && nMasters != 1 ) {
                 log() << ( nMasters == 0 ? "no master" : "two masters" ) << ", deferring oplog pull" << endl;
-                return true;
+                return 1;
             }
         }
 
@@ -1537,14 +1550,14 @@ namespace mongo {
         Record *r;
         if ( strncmp( logNS, "local.", 6 ) == 0 ) { // For now, assume this is olog main
             if ( localOplogMainDetails == 0 ) {
-                Client::Context ctx("local.");
+                Client::Context ctx("local.", dbpath, 0, false);
                 localOplogDB = ctx.db();
                 localOplogMainDetails = nsdetails(logNS);
             }
-            Client::Context ctx( "" , localOplogDB );
+            Client::Context ctx( "" , localOplogDB, false );
             r = theDataFileMgr.fast_oplog_insert(localOplogMainDetails, logNS, len);
         } else {
-            Client::Context ctx( logNS );
+            Client::Context ctx( logNS, dbpath, 0, false );
             assert( nsdetails( logNS ) );
             r = theDataFileMgr.fast_oplog_insert( nsdetails( logNS ), logNS, len);
         }
@@ -1616,11 +1629,11 @@ namespace mongo {
         int sleepAdvice = 1;
         for ( ReplSource::SourceVector::iterator i = sources.begin(); i != sources.end(); i++ ) {
             ReplSource *s = i->get();
-            bool ok = false;
+            int res = -1;
             try {
-                ok = s->sync(nApplied);
+                res = s->sync(nApplied);
                 bool moreToSync = s->haveMoreDbsToSync();
-                if( !ok ) { 
+                if( res < 0 ) { 
                     sleepAdvice = 3;
                 }
                 else if( moreToSync ) {
@@ -1629,7 +1642,9 @@ namespace mongo {
                 else if ( s->sleepAdvice() ) {
                     sleepAdvice = s->sleepAdvice();
                 }
-                if ( ok && !moreToSync /*&& !s->syncedTo.isNull()*/ ) {
+                else 
+                    sleepAdvice = res;
+                if ( res >= 0 && !moreToSync /*&& !s->syncedTo.isNull()*/ ) {
                     pairSync->setInitialSyncCompletedLocking();
                 }
             }
@@ -1659,7 +1674,7 @@ namespace mongo {
                 log() << "unexpected exception during replication.  replication will halt" << endl;
                 replAllDead = "caught unexpected exception during replication";
             }
-            if ( !ok )
+            if ( res < 0 )
                 s->resetConnection();
         }
         return sleepAdvice;
@@ -1716,6 +1731,10 @@ namespace mongo {
         sleepsecs(4);
         Client::initThread("replmaster");
         while( 1 ) {
+            {
+                dblock lk;
+                cc().getAuthenticationInfo()->authorize("admin");   
+            }
             sleepsecs(10);
             /* write a keep-alive like entry to the log.  this will make things like 
                printReplicationStatus() and printSlaveReplicationStatus() stay up-to-date
@@ -1792,13 +1811,19 @@ namespace mongo {
         if ( cmdLine.oplogSize != 0 )
             sz = (double)cmdLine.oplogSize;
         else {
+			/* not specified. pick a default size */
             sz = 50.0 * 1000 * 1000;
             if ( sizeof(int *) >= 8 ) {
+#if defined(__APPLE__)
+				// typically these are desktops (dev machines), so keep it smallish
+				sz = (256-64) * 1000 * 1000;
+#else
                 sz = 990.0 * 1000 * 1000;
                 boost::intmax_t free = freeSpace(); //-1 if call not supported.
                 double fivePct = free * 0.05;
                 if ( fivePct > sz )
                     sz = fivePct;
+#endif
             }
         }
 
@@ -1827,6 +1852,7 @@ namespace mongo {
 
         {
             dblock lk;
+            cc().getAuthenticationInfo()->authorize("admin");
             pairSync->init();
         }
 

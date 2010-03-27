@@ -377,6 +377,12 @@ namespace mongo {
                 globalIndexCounters.append( bb );
                 bb.done();
             }
+
+            {
+                BSONObjBuilder bb( result.subobjStart( "backgroundFlushing" ) );
+                globalFlushCounters.append( bb );
+                bb.done();
+            }
             
             if ( anyReplEnabled() ){
                 BSONObjBuilder bb( result.subobjStart( "repl" ) );
@@ -431,9 +437,10 @@ namespace mongo {
         virtual bool slaveOk() {
             return true;
         }
-        virtual LockType locktype(){ return WRITE; } 
+        virtual LockType locktype(){ return NONE; } 
         CmdGetOpTime() : Command("getoptime") { }
         bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            writelock l( "" );
             result.appendDate("optime", OpTime::now().asDate());
             return true;
         }
@@ -1181,12 +1188,11 @@ namespace mongo {
             string toNs = string( realDbName ) + "." + to;
             NamespaceDetails *nsd = nsdetails( fromNs.c_str() );
             massert( 10301 ,  "source collection " + fromNs + " does not exist", nsd );
-            long long excessSize = nsd->datasize - size * 2;
+            long long excessSize = nsd->datasize - size * 2; // datasize and extentSize can't be compared exactly, so add some padding to 'size'
             DiskLoc extent = nsd->firstExtent;
-            for( ; excessSize > 0 && extent != nsd->lastExtent; extent = extent.ext()->xnext ) {
+            for( ; excessSize > extent.ext()->length && extent != nsd->lastExtent; extent = extent.ext()->xnext ) {
                 excessSize -= extent.ext()->length;
-                if ( excessSize > 0 )
-                    log( 2 ) << "cloneCollectionAsCapped skipping extent of size " << extent.ext()->length << endl;
+                log( 2 ) << "cloneCollectionAsCapped skipping extent of size " << extent.ext()->length << endl;
                 log( 6 ) << "excessSize: " << excessSize << endl;
             }
             DiskLoc startLoc = extent.ext()->firstRecord;
@@ -1194,7 +1200,7 @@ namespace mongo {
             CursorId id;
             {
                 auto_ptr< Cursor > c = theDataFileMgr.findAll( fromNs.c_str(), startLoc );
-                ClientCursor *cc = new ClientCursor(c, fromNs.c_str(), true);
+                ClientCursor *cc = new ClientCursor(0, c, fromNs.c_str());
                 cc->matcher.reset( new CoveredIndexMatcher( BSONObj(), fromjson( "{$natural:1}" ) ) );
                 id = cc->cursorid;
             }
@@ -1595,6 +1601,79 @@ namespace mongo {
             return true;
         }
     } cmdGodInsert;
+
+    class DBHashCmd : public Command {
+    public:
+        DBHashCmd() : Command( "dbhash" ){}
+        virtual bool slaveOk() { return true; }
+        virtual LockType locktype() { return READ; }
+        virtual bool run(const char * badns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
+            string dbname = nsToDatabase( badns );
+            
+            list<string> colls = _db.getCollectionNames( dbname );
+            colls.sort();
+            
+            result.appendNumber( "numCollections" , (long long)colls.size() );
+            
+            md5_state_t globalState;
+            md5_init(&globalState);
+
+            BSONObjBuilder bb( result.subobjStart( "collections" ) );
+            for ( list<string>::iterator i=colls.begin(); i != colls.end(); i++ ){
+                string c = *i;
+                if ( c.find( ".system.profil" ) != string::npos )
+                    continue;
+                
+                auto_ptr<Cursor> cursor;
+
+                NamespaceDetails * nsd = nsdetails( c.c_str() );
+                int idNum = nsd->findIdIndex();
+                if ( idNum >= 0 ){
+                    cursor.reset( new BtreeCursor( nsd , idNum , nsd->idx( idNum ) , BSONObj() , BSONObj() , false , 1 ) );
+                }
+                else if ( c.find( ".system." ) != string::npos ){
+                    continue;
+                }
+                else if ( nsd->capped ){
+                    cursor = findTableScan( c.c_str() , BSONObj() );
+                }
+                else {
+                    bb.done();
+                    errmsg = (string)"can't find _id index for: " + c;
+                    return 0;
+                }
+
+                md5_state_t st;
+                md5_init(&st);
+                
+                long long n = 0;
+                while ( cursor->ok() ){
+                    BSONObj c = cursor->current();
+                    md5_append( &st , (const md5_byte_t*)c.objdata() , c.objsize() );
+                    n++;
+                    cursor->advance();
+                }
+                md5digest d;
+                md5_finish(&st, d);
+                string hash = digestToString( d );
+                
+                bb.append( c.c_str() + ( dbname.size() + 1 ) , hash );
+
+                md5_append( &globalState , (const md5_byte_t*)hash.c_str() , hash.size() );
+            }
+            bb.done();
+
+            md5digest d;
+            md5_finish(&globalState, d);
+            string hash = digestToString( d );
+
+            result.append( "md5" , hash );
+
+            return 1;
+        }
+
+        DBDirectClient _db;
+    } dbhashCmd;
     
     /** 
      * this handles
@@ -1632,6 +1711,7 @@ namespace mongo {
             ss << "help for: " << c->name << " ";
             c->help( ss );
             result.append( "help" , ss.str() );
+            result.append( "lockType" , c->locktype() );
             return true;
         } 
 

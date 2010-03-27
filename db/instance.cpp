@@ -31,6 +31,7 @@
 #include "replset.h"
 #include "../s/d_logic.h"
 #include "../util/file_allocator.h"
+#include "../util/goodies.h"
 #include "cmdline.h"
 #if !defined(_WIN32)
 #include <sys/file.h>
@@ -45,8 +46,6 @@ namespace mongo {
     void receivedDelete(Message& m, CurOp& op);
     void receivedInsert(Message& m, CurOp& op);
     bool receivedGetMore(DbResponse& dbresponse, Message& m, CurOp& curop );
-
-    CmdLine cmdLine;
 
     int nloggedsome = 0;
 #define LOGSOME if( ++nloggedsome < 1000 || nloggedsome % 100 == 0 )
@@ -78,7 +77,7 @@ namespace mongo {
 
     // see FSyncCommand:
     unsigned lockedForWriting; 
-    boost::mutex lockedForWritingMutex;
+    mongo::mutex lockedForWritingMutex;
     bool unlockRequested = false;
 
     void inProgCmd( Message &m, DbResponse &dbresponse ) {
@@ -95,7 +94,7 @@ namespace mongo {
             vector<BSONObj> vals;
             {
                 Client& me = cc();
-                boostlock bl(Client::clientsMutex);
+                scoped_lock bl(Client::clientsMutex);
                 for( set<Client*>::iterator i = Client::clients.begin(); i != Client::clients.end(); i++ ) { 
                     Client *c = *i;
                     if ( c == &me )
@@ -348,8 +347,12 @@ namespace mongo {
         log = log || (logLevel >= 2 && ++ctr % 512 == 0);
         DEV log = true;
         if ( log || ms > logThreshold ) {
-            ss << ' ' << ms << "ms";
-            mongo::log() << ss.str() << endl;
+            if( logLevel < 3 && op == dbGetMore && strstr(ns, ".oplog.") && ms < 3000 && !log ) {
+                /* it's normal for getMore on the oplog to be slow because of use of awaitdata flag. */
+            } else {
+                ss << ' ' << ms << "ms";
+                mongo::log() << ss.str() << endl;
+            }
         }
         
         if ( currentOp.shouldDBProfile( ms ) ){
@@ -485,17 +488,29 @@ namespace mongo {
         
         ss << ns << " cid:" << cursorid << " ntoreturn:" << ntoreturn;;
 
+        int pass = 0;
+
         QueryResult* msgdata;
-        try {
-            mongolock lk(false);
-            Client::Context ctx(ns);
-            msgdata = getMore(ns, ntoreturn, cursorid, curop);
-        }
-        catch ( AssertionException& e ) {
-            ss << " exception " << e.toString();
-            msgdata = emptyMoreResult(cursorid);
-            ok = false;
-        }
+        while( 1 ) {
+            try {
+                mongolock lk(false);
+                Client::Context ctx(ns);
+                msgdata = processGetMore(ns, ntoreturn, cursorid, curop, pass);
+            }
+            catch ( GetMoreWaitException& ) { 
+                massert(13073, "shutting down", !inShutdown() );
+                pass++;
+                sleepmillis(2);
+                continue;
+            }
+            catch ( AssertionException& e ) {
+                ss << " exception " << e.toString();
+                msgdata = emptyMoreResult(cursorid);
+                ok = false;
+            }
+            break;
+        };
+
         Message *resp = new Message();
         resp->setData(msgdata, true);
         ss << " bytes:" << resp->data->dataLen();
@@ -590,7 +605,7 @@ namespace mongo {
 
     void recCacheCloseAll();
 
-    boost::mutex &exitMutex( *( new boost::mutex ) );
+    mongo::mutex exitMutex;
     int numExitCalls = 0;
     void shutdown();
 
@@ -618,7 +633,7 @@ namespace mongo {
     void dbexit( ExitCode rc, const char *why) {        
         Client * c = currentClient.get();
         {
-            boostlock lk( exitMutex );
+            scoped_lock lk( exitMutex );
             if ( numExitCalls++ > 0 ) {
                 if ( numExitCalls > 5 ){
                     // this means something horrible has happened
@@ -705,7 +720,7 @@ namespace mongo {
             // if we can't, then its probably just another mongod running
             cout << "************** \n" 
                  << "old lock file: " << name << ".  probably means unclean shutdown\n"
-                 << "reccomend removing file and running --repair\n" 
+                 << "recommend removing file and running --repair\n" 
                  << "see: http://dochub.mongodb.org/core/repair for more information\n"
                  << "*************" << endl;
             uassert( 12596 , "old lock file" , 0 );

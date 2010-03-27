@@ -46,10 +46,10 @@ namespace {
     }
 }
 
-namespace mongo {
-    
-    //#define DEBUGMATCHER(x) cout << x << endl;
+//#define DEBUGMATCHER(x) cout << x << endl;
 #define DEBUGMATCHER(x)
+
+namespace mongo {
     
     class Where {
     public:
@@ -125,20 +125,18 @@ namespace mongo {
                 rm.fieldName = 0; // no need for field name
                 rm.regex = ie.regex();
                 rm.flags = ie.regexFlags();
-                rm.isNot = false; // what about $nin?
-                if (!false){ //TODO something smarter
-                    bool purePrefix;
-                    string prefix = simpleRegex(rm.regex, rm.flags, &purePrefix);
-                    if (purePrefix)
-                        rm.prefix = prefix;
-                }                
+                rm.isNot = false;
+                bool purePrefix;
+                string prefix = simpleRegex(rm.regex, rm.flags, &purePrefix);
+                if (purePrefix)
+                    rm.prefix = prefix;
             } else {
                 myset->insert(ie);
             }
         }
         
         if ( allMatchers.size() ){
-            uassert( 13020 , "with $all, can't mix $elemMatch and others" , myset->size() == 0);
+            uassert( 13020 , "with $all, can't mix $elemMatch and others" , myset->size() == 0 && !myregex.get());
         }
         
     }
@@ -265,7 +263,13 @@ namespace mongo {
             }
             case BSONObj::opREGEX:{
                 uassert( 13032, "can't use $not with $regex, use BSON regex type instead", !isNot );
-                regex = fe.valuestrsafe();
+                if ( fe.type() == RegEx ){
+                    regex = fe.regex();
+                    flags = fe.regexFlags();
+                }
+                else {
+                    regex = fe.valuestrsafe();
+                }
                 break;
             }
             case BSONObj::opOPTIONS:{
@@ -274,6 +278,7 @@ namespace mongo {
                 break;
             }
             case BSONObj::opNEAR:
+            case BSONObj::opWITHIN:
                 break;
             default:
                 uassert( 10069 ,  (string)"BUG - can't operator for: " + fn , 0 );
@@ -520,7 +525,7 @@ namespace mongo {
                 return 1;
             }
             
-            if ( em.myset->size() == 0 )
+            if ( em.myset->size() == 0 && !em.myregex.get() )
                 return -1; // is this desired?
             
             BSONObjSetDefaultOrder actualKeys;
@@ -539,8 +544,23 @@ namespace mongo {
                     return -1;
             }
 
+            if ( !em.myregex.get() )
+                return 1;
+            
+            for( vector< RegexMatcher >::const_iterator i = em.myregex->begin(); i != em.myregex->end(); ++i ) {
+                bool match = false;
+                for( BSONObjSetDefaultOrder::const_iterator j = actualKeys.begin(); j != actualKeys.end(); ++j ) {
+                    if ( regexMatches( *i, j->firstElement() ) ) {
+                        match = true;
+                        break;
+                    }
+                }
+                if ( !match )
+                    return -1;
+            }
+            
             return 1;
-        }
+        } // end opALL
         
         if ( compareOp == BSONObj::NE )
             return matchesNe( fieldName, toMatch, obj, em , details );
@@ -549,6 +569,17 @@ namespace mongo {
                 int ret = matchesNe( fieldName, *i, obj, em , details );
                 if ( ret != 1 )
                     return ret;
+            }
+            if ( em.myregex.get() ) {
+                BSONElementSet s;
+                obj.getFieldsDotted( fieldName, s );
+                for( vector<RegexMatcher>::const_iterator i = em.myregex->begin(); i != em.myregex->end(); ++i ) {
+                    for( BSONElementSet::const_iterator j = s.begin(); j != s.end(); ++j ) {
+                        if ( regexMatches( *i, *j ) ) {
+                            return -1;
+                        }
+                    }
+                }
             }
             return 1;
         }
@@ -647,7 +678,7 @@ namespace mongo {
 
             }
             
-            if ( compareOp == BSONObj::Equality && e.woCompare( toMatch ) == 0 ){
+            if ( compareOp == BSONObj::Equality && e.woCompare( toMatch , false ) == 0 ){
                 // match an entire array to itself
                 return 1;
             }

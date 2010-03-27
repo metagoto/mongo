@@ -780,7 +780,7 @@ namespace mongo {
         BSONElement getFieldDotted(const char *name) const;
         /** Like getFieldDotted(), but expands multikey arrays and returns all matching objects
          */
-        void getFieldsDotted(const char *name, BSONElementSet &ret, bool *deep = 0) const;
+        void getFieldsDotted(const char *name, BSONElementSet &ret ) const;
         /** Like getFieldDotted(), but returns first array encountered while traversing the
             dotted fields of name.  The name variable is updated to represent field
             names with respect to the returned element. */
@@ -994,7 +994,8 @@ namespace mongo {
             opREGEX = 0x10,
             opOPTIONS = 0x11,
             opELEM_MATCH = 0x12,
-            opNEAR = 0x13
+            opNEAR = 0x13,
+            opWITHIN = 0x14,
         };        
     };
     ostream& operator<<( ostream &s, const BSONObj &o );
@@ -1901,7 +1902,8 @@ namespace mongo {
     }
 
     inline bool BSONObj::isValid(){
-        return objsize() > 0 && objsize() <= 1024 * 1024 * 8;
+        int x = objsize();
+        return x > 0 && x <= 1024 * 1024 * 8;
     }
 
     inline bool BSONObj::getObjectID(BSONElement& e) const { 
@@ -2021,7 +2023,7 @@ namespace mongo {
         
         ~BSONObjIteratorSorted(){
             assert( _fields );
-            delete _fields;
+            delete[] _fields;
             _fields = 0;
         }
 

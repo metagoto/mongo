@@ -129,6 +129,8 @@ namespace mongo {
     
     void DBConfig::unserialize(const BSONObj& from){
         _name = from.getStringField("name");
+        log(1) << "DBConfig unserialize: " << _name << " " << from << endl;
+
         _shardingEnabled = from.getBoolField("partitioned");
         _primary = from.getStringField("primary");
         
@@ -297,7 +299,7 @@ namespace mongo {
         if ( database == "config" )
             return &configServer;
 
-        boostlock l( _lock );
+        scoped_lock l( _lock );
 
         DBConfig*& cc = _databases[database];
         if ( cc == 0 ){
@@ -333,7 +335,7 @@ namespace mongo {
 
     void Grid::removeDB( string database ){
         uassert( 10186 ,  "removeDB expects db name" , database.find( '.' ) == string::npos );
-        boostlock l( _lock );
+        scoped_lock l( _lock );
         _databases.erase( database );
         
     }
@@ -369,30 +371,35 @@ namespace mongo {
         }
         ourHostname = hn;
         
+        stringstream fullString;
+
         set<string> hosts;
         for ( size_t i=0; i<configHosts.size(); i++ ){
             string host = configHosts[i];
             hosts.insert( getHost( host , false ) );
             configHosts[i] = getHost( host , true );
+            if ( i > 0 )
+                fullString << ",";
+            fullString << configHosts[i];
         }
-
+        
         for ( set<string>::iterator i=hosts.begin(); i!=hosts.end(); i++ ){
             string host = *i;
             bool ok = false;
-            for ( int x=0; x<10; x++ ){
+            for ( int x=10; x>0; x-- ){
                 if ( ! hostbyname( host.c_str() ).empty() ){
                     ok = true;
                     break;
                 }
-                log() << "can't resolve DNS for [" << host << "]  sleeping and trying " << (10-x) << " more times" << endl;
+                log() << "can't resolve DNS for [" << host << "]  sleeping and trying " << x << " more times" << endl;
                 sleepsecs( 10 );
             }
             if ( ! ok )
                 return false;
         }
         
-        uassert( 10188 ,  "can only hand 1 config db right now" , configHosts.size() == 1 );
-        _primary = configHosts[0];
+        _primary = fullString.str();
+        log(1) << " config string : " << fullString.str() << endl;
         
         return true;
     }

@@ -247,13 +247,30 @@ namespace mongo {
         case BSONObj::opALL: {
             massert( 10370 ,  "$all requires array", e.type() == Array );
             BSONObjIterator i( e.embeddedObject() );
-            if ( i.more() ){
+            bool bound = false;
+            while ( i.more() ){
                 BSONElement x = i.next();
                 if ( x.type() == Object && x.embeddedObject().firstElement().getGtLtOp() == BSONObj::opELEM_MATCH ){
-                    // this is a bit more complex...
+                    // taken care of elsewhere
                 }
-                else {
+                else if ( x.type() != RegEx ) {
                     lower = upper = x;
+                    bound = true;
+                    break;
+                }
+            }
+            if ( !bound ) { // if no good non regex bound found, try regex bounds
+                BSONObjIterator i( e.embeddedObject() );
+                while( i.more() ) {
+                    BSONElement x = i.next();
+                    if ( x.type() != RegEx )
+                        continue;
+                    string simple = simpleRegex( x.regex(), x.regexFlags() );
+                    if ( !simple.empty() ) {
+                        lower = addObj( BSON( "" << simple ) ).firstElement();
+                        upper = addObj( BSON( "" << simpleRegexEnd( simple ) ) ).firstElement();
+                        break;
+                    }
                 }
             }
             break;
@@ -295,6 +312,7 @@ namespace mongo {
             break;
         }
         case BSONObj::opNEAR:
+        case BSONObj::opWITHIN:
             _special = "2d";
             break;
         default:
@@ -430,21 +448,34 @@ namespace mongo {
     }
 
     void FieldRangeSet::processOpElement( const char *fieldName, const BSONElement &f, bool isNot, bool optimize ) {
-        int op2 = f.getGtLtOp();
+        BSONElement g = f;
+        int op2 = g.getGtLtOp();
+        if ( op2 == BSONObj::opALL ) {
+            BSONElement h = g;
+            massert( 13050 ,  "$all requires array", h.type() == Array );
+            BSONObjIterator i( h.embeddedObject() );
+            if( i.more() ) {
+                BSONElement x = i.next();
+                if ( x.type() == Object && x.embeddedObject().firstElement().getGtLtOp() == BSONObj::opELEM_MATCH ) {
+                    g = x.embeddedObject().firstElement();
+                    op2 = g.getGtLtOp();
+                }
+            }
+        }
         if ( op2 == BSONObj::opELEM_MATCH ) {
-            BSONObjIterator k( f.embeddedObjectUserCheck() );
+            BSONObjIterator k( g.embeddedObjectUserCheck() );
             while ( k.more() ){
-                BSONElement g = k.next();
+                BSONElement h = k.next();
                 StringBuilder buf(32);
-                buf << fieldName << "." << g.fieldName();
+                buf << fieldName << "." << h.fieldName();
                 string fullname = buf.str();
                 
-                int op3 = getGtLtOp( g );
+                int op3 = getGtLtOp( h );
                 if ( op3 == BSONObj::Equality ){
-                    ranges_[ fullname ] &= FieldRange( g , isNot , optimize );
+                    ranges_[ fullname ] &= FieldRange( h , isNot , optimize );
                 }
                 else {
-                    BSONObjIterator l( g.embeddedObject() );
+                    BSONObjIterator l( h.embeddedObject() );
                     while ( l.more() ){
                         ranges_[ fullname ] &= FieldRange( l.next() , isNot , optimize );
                     }

@@ -103,6 +103,7 @@ namespace mongo {
     /* ns:      namespace, e.g. <database>.<collection>
        pattern: the "where" clause / criteria
        justOne: stop after 1 match
+       god:     allow access to system namespaces, and don't yield
     */
     long long deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop, bool god) {
         if( !god ) {
@@ -136,14 +137,14 @@ namespace mongo {
 
         CoveredIndexMatcher matcher(pattern, creal->indexKeyPattern());
 
-        auto_ptr<ClientCursor> cc( new ClientCursor(creal, ns, false) );
+        auto_ptr<ClientCursor> cc( new ClientCursor(QueryOption_NoCursorTimeout, creal, ns) );
         cc->setDoingDeletes( true );
 
         CursorId id = cc->cursorid;
         
         unsigned long long nScanned = 0;
         do {
-            if ( ++nScanned % 128 == 0 && !matcher.docMatcher().atomic() ) {
+            if ( ++nScanned % 128 == 0 && !god && !matcher.docMatcher().atomic() ) {
                 if ( ! cc->yield() ){
                     cc.release(); // has already been deleted elsewhere
                     break;
@@ -249,8 +250,8 @@ namespace mongo {
         return qr;
     }
 
-    QueryResult* getMore(const char *ns, int ntoreturn, long long cursorid , CurOp& curop ) {
-        StringBuilder& ss = curop.debug().str;
+    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& curop, int pass) {
+
         ClientCursor::Pointer p(cursorid);
         ClientCursor *cc = p._c;
         
@@ -259,11 +260,12 @@ namespace mongo {
             bufSize += sizeof( QueryResult );
             bufSize += ( ntoreturn ? 4 : 1 ) * 1024 * 1024;
         }
+
         BufBuilder b( bufSize );
 
         b.skip(sizeof(QueryResult));
 
-        int resultFlags = 0; //QueryResult::ResultFlag_AwaitCapable;
+        int resultFlags = QueryResult::ResultFlag_AwaitCapable;
         int start = 0;
         int n = 0;
 
@@ -273,16 +275,27 @@ namespace mongo {
             resultFlags = QueryResult::ResultFlag_CursorNotFound;
         }
         else {
-            ss << " query: " << cc->query << " ";
+            if( pass == 0 ) {
+                StringBuilder& ss = curop.debug().str;
+                ss << " getMore: " << cc->query << " ";
+            }
             start = cc->pos;
             Cursor *c = cc->c.get();
             c->checkLocation();
             while ( 1 ) {
                 if ( !c->ok() ) {
                     if ( c->tailable() ) {
-                        if ( c->advance() ) {
+                        /* when a tailable cursor hits "EOF", ok() goes false, and current() is null.  however 
+                           advance() can still be retries as a reactivation attempt.  when there is new data, it will 
+                           return true.  that's what we are doing here.
+                           */
+                        if ( c->advance() )
                             continue;
+
+                        if( n == 0 && (cc->_queryOptions & QueryOption_AwaitData) && pass < 1000 ) {
+                            throw GetMoreWaitException();
                         }
+
                         break;
                     }
                     p.release();
@@ -449,12 +462,9 @@ namespace mongo {
         return res->count();
     }
 
-    int _findingStartInitialTimeout = 5; // configurable for testing
-    
     // Implements database 'query' requests using the query optimizer's QueryOp interface
     class UserQueryOp : public QueryOp {
     public:
-        enum FindingStartMode { Initial, FindExtent, InExtent };
         
         UserQueryOp( const ParsedQuery& pq ) :
         //int ntoskip, int ntoreturn, const BSONObj &order, bool wantMore,
@@ -462,40 +472,22 @@ namespace mongo {
             _buf( 32768 ) , // TODO be smarter here
             _pq( pq ) ,
             _ntoskip( pq.getSkip() ) ,
-            _nscanned(0),
+            _nscanned(0), _nscannedObjects(0),
             _n(0),
             _inMemSort(false),
             _saveClientCursor(false),
-            _findingStart( pq.hasOption( QueryOption_OplogReplay) ) ,
-            _findingStartCursor(0),
-            _findingStartTimer(0),
-            _findingStartMode()
+            _oplogReplay( pq.hasOption( QueryOption_OplogReplay) )
         {}
-        
-        void setupMatcher() {
-            _matcher.reset(new CoveredIndexMatcher( qp().query() , qp().indexKey()));
-        }
         
         virtual void init() {
             _buf.skip( sizeof( QueryResult ) );
             
-            if ( _findingStart ) {
-                // Use a ClientCursor here so we can release db mutex while scanning
-                // oplog (can take quite a while with large oplogs).
-                auto_ptr<Cursor> c = qp().newReverseCursor();
-                _findingStartCursor = new ClientCursor(c, qp().ns(), false);
-                _findingStartTimer.reset();
-                _findingStartMode = Initial;
-                BSONElement tsElt = qp().query()[ "ts" ];
-                massert( 13044, "no ts field in query", !tsElt.eoo() );
-                BSONObjBuilder b;
-                b.append( tsElt );
-                BSONObj tsQuery = b.obj();
-                _matcher.reset(new CoveredIndexMatcher(tsQuery, qp().indexKey()));
+            if ( _oplogReplay ) {
+                _findingStartCursor.reset( new FindingStartCursor( qp() ) );
             } else {
                 _c = qp().newCursor( DiskLoc() , _pq.getNumToReturn() + _pq.getSkip() );
-                setupMatcher();
             }
+            _matcher.reset(new CoveredIndexMatcher( qp().query() , qp().indexKey()));
 
             if ( qp().scanAndOrderRequired() ) {
                 _inMemSort = true;
@@ -503,107 +495,15 @@ namespace mongo {
             }
         }
         
-        DiskLoc startLoc( const DiskLoc &rec ) {
-            Extent *e = rec.rec()->myExtent( rec );
-            if ( e->myLoc != qp().nsd()->capExtent )
-                return e->firstRecord;
-            // Likely we are on the fresh side of capExtent, so return first fresh record.
-            // If we are on the stale side of capExtent, then the collection is small and it
-            // doesn't matter if we start the extent scan with capFirstNewRecord.
-            return qp().nsd()->capFirstNewRecord;
-        }
-        
-        DiskLoc prevLoc( const DiskLoc &rec ) {
-            Extent *e = rec.rec()->myExtent( rec );
-            if ( e->xprev.isNull() )
-                e = qp().nsd()->lastExtent.ext();
-            else
-                e = e->xprev.ext();
-            if ( e->myLoc != qp().nsd()->capExtent )
-                return e->firstRecord;
-            return DiskLoc(); // reached beginning of collection
-        }
-        
-        void createClientCursor( const DiskLoc &startLoc = DiskLoc() ) {
-            auto_ptr<Cursor> c = qp().newCursor( startLoc );
-            _findingStartCursor = new ClientCursor(c, qp().ns(), false);            
-        }
-        
-        void maybeRelease() {
-            RARELY {
-                CursorId id = _findingStartCursor->cursorid;
-                _findingStartCursor->updateLocation();
-                {
-                    dbtemprelease t;
-                }   
-                _findingStartCursor = ClientCursor::find( id, false );
-            }                                            
-        }
-        
         virtual void next() {
-            if ( _findingStart ) {
-                if ( !_findingStartCursor || !_findingStartCursor->c->ok() ) {
-                    _findingStart = false;
-                    _c = qp().newCursor(); // on error, start from beginning
-                    setupMatcher();
-                    return;
+            if ( _findingStartCursor.get() ) {
+                if ( _findingStartCursor->done() ) {
+                    _c = _findingStartCursor->cRelease();
+                    _findingStartCursor.reset( 0 );
+                } else {
+                    _findingStartCursor->next();
                 }
-                switch( _findingStartMode ) {
-                    case Initial: {
-                        if ( !_matcher->matches( _findingStartCursor->c->currKey(), _findingStartCursor->c->currLoc() ) ) {
-                            _findingStart = false; // found first record out of query range, so scan normally
-                            _c = qp().newCursor( _findingStartCursor->c->currLoc() );
-                            setupMatcher();
-                            return;
-                        }
-                        _findingStartCursor->c->advance();
-                        RARELY {
-                            if ( _findingStartTimer.seconds() >= _findingStartInitialTimeout ) {
-                                createClientCursor( startLoc( _findingStartCursor->c->currLoc() ) );
-                                _findingStartMode = FindExtent;
-                                return;
-                            }
-                        }
-                        maybeRelease();
-                        return;
-                    }
-                    case FindExtent: {
-                        if ( !_matcher->matches( _findingStartCursor->c->currKey(), _findingStartCursor->c->currLoc() ) ) {
-                            _findingStartMode = InExtent;
-                            return;
-                        }
-                        DiskLoc prev = prevLoc( _findingStartCursor->c->currLoc() );
-                        if ( prev.isNull() ) { // hit beginning, so start scanning from here
-                            createClientCursor();
-                            _findingStartMode = InExtent;
-                            return;
-                        }
-                        // There might be a more efficient implementation than creating new cursor & client cursor each time,
-                        // not worrying about that for now
-                        createClientCursor( prev );
-                        maybeRelease();
-                        return;
-                    }
-                    case InExtent: {
-                        if ( _matcher->matches( _findingStartCursor->c->currKey(), _findingStartCursor->c->currLoc() ) ) {
-                            _findingStart = false; // found first record in query range, so scan normally
-                            _c = qp().newCursor( _findingStartCursor->c->currLoc() );
-                            setupMatcher();
-                            return;
-                        }
-                        _findingStartCursor->c->advance();
-                        maybeRelease();
-                        return;
-                    }
-                    default: {
-                        massert( 12600, "invalid _findingStartMode", false );
-                    }
-                }
-            }
-            
-            if ( _findingStartCursor ) {
-                ClientCursor::erase( _findingStartCursor->cursorid );
-                _findingStartCursor = 0;
+                return;
             }
             
             if ( !_c->ok() ) {
@@ -618,20 +518,20 @@ namespace mongo {
             }
 
             _nscanned++;
-            if ( !_matcher->matches(_c->currKey(), _c->currLoc() ) ) {
+            if ( !_matcher->matches(_c->currKey(), _c->currLoc() , &_details ) ) {
                 // not a match, continue onward
+                if ( _details.loadedObject )
+                    _nscannedObjects++;
             }
             else {
+                _nscannedObjects++;
                 DiskLoc cl = _c->currLoc();
                 if( !_c->getsetdup(cl) ) { 
                     // got a match.
                     
-                    BSONObj js = _pq.returnKey() ? _c->currKey() : _c->current();
-                    assert( js.objsize() >= 0 ); //defensive for segfaults
-
                     if ( _inMemSort ) {
                         // note: no cursors for non-indexed, ordered results.  results must be fairly small.
-                        _so->add(js);
+                        _so->add( _pq.returnKey() ? _c->currKey() : _c->current() );
                     }
                     else if ( _ntoskip > 0 ) {
                         _ntoskip--;
@@ -648,14 +548,22 @@ namespace mongo {
                         else {
                             if ( _pq.returnKey() ){
                                 BSONObjBuilder bb( _buf );
-                                bb.appendKeys( _c->indexKeyPattern() , js );
+                                bb.appendKeys( _c->indexKeyPattern() , _c->currKey() );
                                 bb.done();
                             }
                             else {
+                                BSONObj js = _c->current();
+                                assert( js.isValid() );
                                 fillQueryResultFromObj( _buf , _pq.getFields() , js );
                             }
                             _n++;
-                            if ( _pq.enoughForFirstBatch( _n , _buf.len() ) ){
+                            if ( ! _c->supportGetMore() ){
+                                if ( _pq.enough( _n ) || _buf.len() >= MaxBytesToReturnToClientAtOnce ){
+                                    finish();
+                                    return;
+                                }
+                            }
+                            else if ( _pq.enoughForFirstBatch( _n , _buf.len() ) ){
                                 /* if only 1 requested, no cursor saved for efficiency...we assume it is findOne() */
                                 if ( mayCreateCursor1 ) {
                                     _c->advance();
@@ -704,6 +612,7 @@ namespace mongo {
         auto_ptr< CoveredIndexMatcher > matcher() { return _matcher; }
         int n() const { return _n; }
         long long nscanned() const { return _nscanned; }
+        long long nscannedObjects() const { return _nscannedObjects; }
         bool saveClientCursor() const { return _saveClientCursor; }
 
     private:
@@ -712,7 +621,10 @@ namespace mongo {
 
         long long _ntoskip;
         long long _nscanned;
+        long long _nscannedObjects;
         int _n; // found so far
+        
+        MatchDetails _details;
 
         bool _inMemSort;
         auto_ptr< ScanAndOrder > _so;
@@ -722,11 +634,8 @@ namespace mongo {
         auto_ptr< CoveredIndexMatcher > _matcher;
 
         bool _saveClientCursor;
-
-        bool _findingStart;
-        ClientCursor * _findingStartCursor;
-        Timer _findingStartTimer;
-        FindingStartMode _findingStartMode;
+        bool _oplogReplay;
+        auto_ptr< FindingStartCursor > _findingStartCursor;
     };
     
     /* run a query -- includes checking for and running a Command */
@@ -793,6 +702,16 @@ namespace mongo {
         BSONObj query = pq.getFilter();
         BSONObj order = pq.getOrder();
 
+        if ( pq.hasOption( QueryOption_CursorTailable ) ) {
+            NamespaceDetails *d = nsdetails( ns );
+            uassert( 13051, "tailable cursor requested on non capped collection", d && d->capped );
+            if ( order.isEmpty() ) {
+                order = BSON( "$natural" << 1 );
+            } else {
+                uassert( 13052, "only {$natural:1} order allowed for tailable cursor", order == BSON( "$natural" << 1 ) );
+            }
+        }
+        
         if( snapshot ) { 
             NamespaceDetails *d = nsdetails(ns);
             if ( d ){
@@ -826,7 +745,7 @@ namespace mongo {
         }
             
 
-        if ( isSimpleIdQuery( query ) ){
+        if ( ! explain && isSimpleIdQuery( query ) && !pq.hasOption( QueryOption_CursorTailable ) ) {
             nscanned = 1;
 
             bool nsFound = false;
@@ -877,7 +796,7 @@ namespace mongo {
         log( 5 ) << "   used cursor: " << cursor.get() << endl;
         if ( dqo.saveClientCursor() ) {
             // the clientcursor now owns the Cursor* and 'c' is released:
-            ClientCursor *cc = new ClientCursor(cursor, ns, !(queryOptions & QueryOption_NoCursorTimeout));
+            ClientCursor *cc = new ClientCursor(queryOptions, cursor, ns);
             cursorid = cc->cursorid;
             cc->query = jsobj.getOwned();
             DEV out() << "  query has more, cursorid: " << cursorid << endl;
@@ -896,7 +815,8 @@ namespace mongo {
             BSONObjBuilder builder;
             builder.append("cursor", cursor->toString());
             builder.appendArray("indexBounds", cursor->prettyIndexBounds());
-            builder.append("nscanned", double( dqo.nscanned() ) );
+            builder.appendNumber("nscanned", dqo.nscanned() );
+            builder.appendNumber("nscannedObjects", dqo.nscannedObjects() );
             builder.append("n", n);
             if ( dqo.scanAndOrderRequired() )
                 builder.append("scanAndOrder", true);

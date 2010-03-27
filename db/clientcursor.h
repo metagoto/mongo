@@ -31,6 +31,7 @@
 #include "diskloc.h"
 #include "dbhelpers.h"
 #include "matcher.h"
+#include "../client/dbclient.h"
 
 namespace mongo {
 
@@ -83,7 +84,7 @@ namespace mongo {
                 _c = 0;
             }
             Pointer(long long cursorid) {
-                recursive_boostlock lock(ccmutex);
+                recursive_scoped_lock lock(ccmutex);
                 _c = ClientCursor::find_inlock(cursorid, true);
                 if( _c ) {
                     if( _c->_pinValue >= 100 ) {
@@ -104,16 +105,17 @@ namespace mongo {
         auto_ptr<Cursor> c;
         int pos;                                 // # objects into the cursor so far 
         BSONObj query;
+        int _queryOptions;
 
-        ClientCursor(auto_ptr<Cursor>& _c, const char *_ns, bool okToTimeout) : 
+        ClientCursor(int queryOptions, auto_ptr<Cursor>& _c, const char *_ns) :
             _idleAgeMillis(0), _pinValue(0), 
             _doingDeletes(false), 
             ns(_ns), c(_c), 
-            pos(0) 
+            pos(0), _queryOptions(queryOptions)
         {
-            if( !okToTimeout )
+            if( queryOptions & QueryOption_NoCursorTimeout )
                 noTimeout();
-            recursive_boostlock lock(ccmutex);
+            recursive_scoped_lock lock(ccmutex);
             cursorid = allocCursorId_inlock();
             clientCursorsById.insert( make_pair(cursorid, this) );
         }
@@ -155,7 +157,7 @@ namespace mongo {
         }
     public:
         static ClientCursor* find(CursorId id, bool warn = true) { 
-            recursive_boostlock lock(ccmutex);
+            recursive_scoped_lock lock(ccmutex);
             ClientCursor *c = find_inlock(id, warn);
 			// if this asserts, your code was not thread safe - you either need to set no timeout 
 			// for the cursor or keep a ClientCursor::Pointer in scope for it.
@@ -164,7 +166,7 @@ namespace mongo {
         }
 
         static bool erase(CursorId id) {
-            recursive_boostlock lock(ccmutex);
+            recursive_scoped_lock lock(ccmutex);
             ClientCursor *cc = find_inlock(id);
             if ( cc ) {
                 assert( cc->_pinValue < 100 ); // you can't still have an active ClientCursor::Pointer

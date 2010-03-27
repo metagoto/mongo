@@ -186,6 +186,7 @@ namespace BasicTests {
 
     class sleeptest {
     public:
+
         void run(){
             Timer t;
             sleepsecs( 1 );
@@ -201,6 +202,21 @@ namespace BasicTests {
             ASSERT( t.millis() >= 1000 );
             ASSERT( t.millis() <= 2000 );
 
+            int total = 1200;
+            int ms = 2;
+            t.reset();
+            for ( int i=0; i<(total/ms); i++ ){
+                sleepmillis( ms );
+            }
+            {
+                int x = t.millis();
+                if ( x < 1000 || x > 2500 ){
+                    cout << "sleeptest x: " << x << endl;
+                    ASSERT( x >= 1000 );
+                    ASSERT( x <= 20000 );
+                }
+            }
+            
         }
         
     };
@@ -306,11 +322,14 @@ namespace BasicTests {
             ASSERT_EQUALS( 1, lexNumCmp( "f12g", "f12f" ) );
             ASSERT_EQUALS( 1, lexNumCmp( "aa{", "aab" ) );
             ASSERT_EQUALS( 1, lexNumCmp( "aa{", "aa1" ) );
-            ASSERT_EQUALS( 1, lexNumCmp( "a1{", "a11" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "a1{", "a11" ) );
             ASSERT_EQUALS( 1, lexNumCmp( "a1{a", "a1{" ) );
             ASSERT_EQUALS( -1, lexNumCmp( "a1{", "a1{a" ) );
             ASSERT_EQUALS( 1, lexNumCmp("21", "11") );
             ASSERT_EQUALS( -1, lexNumCmp("11", "21") );
+            
+            ASSERT_EQUALS( -1 , lexNumCmp( "a.0" , "a.1" ) );
+            ASSERT_EQUALS( -1 , lexNumCmp( "a.0.b" , "a.1" ) );
         }
     };
     

@@ -32,6 +32,7 @@ createMongoArgs = function( binaryName , args ){
             if ( k == "v" && isNumber( o[k] ) ){
                 var n = o[k];
                 if ( n > 0 ){
+                    if ( n > 10 ) n = 10;
                     var temp = "-";
                     while ( n-- > 0 ) temp += "v";
                     fullArgs.push( temp );
@@ -52,8 +53,11 @@ createMongoArgs = function( binaryName , args ){
     return fullArgs;
 }
 
-startMongodTest = function( port , dirname ){
-    var conn = startMongod( 
+startMongodTest = function( port , dirname , restart ){
+    var f = startMongod;
+    if ( restart )
+        f = startMongodNoReset;
+    var conn = f.apply(  null , [
         { 
             port : port , 
             dbpath : "/data/db/" + dirname , 
@@ -62,6 +66,7 @@ startMongodTest = function( port , dirname ){
             oplogSize : "2" , 
             nohttpinterface : ""
         } 
+    ]
     );
     conn.name = "localhost:" + port;
     return conn;
@@ -77,6 +82,11 @@ startMongod = function(){
     var dbpath = _parsePath.apply( null, args );
     resetDbpath( dbpath );
 
+    return startMongoProgram.apply( null, args );
+}
+
+startMongodNoReset = function(){
+    var args = createMongoArgs( "mongod" , arguments );
     return startMongoProgram.apply( null, args );
 }
 
@@ -126,15 +136,24 @@ ShardingTest = function( testName , numServers , verboseLevel , numMongos , othe
     if ( ! otherParams )
         otherParams = {}
     this._connections = [];
+    
+    if ( otherParams.sync && numServers < 3 )
+        throw "if you want sync, you need at least 3 servers";
 
     for ( var i=0; i<numServers; i++){
         var conn = startMongodTest( 30000 + i , testName + i );
         this._connections.push( conn );
     }
 
-    this._configDB = "localhost:30000";
-    this._connections[0].getDB( "config" ).settings.insert( { _id : "chunksize" , value : otherParams.chunksize || 50 } );
-    
+    if ( otherParams.sync ){
+        this._configDB = "localhost:30000,localhost:30001,localhost:30002";
+        this._configConnection = new Mongo( this._configDB );
+        this._configConnection.getDB( "config" ).settings.insert( { _id : "chunksize" , value : otherParams.chunksize || 50 } );        
+    }
+    else {
+        this._configDB = "localhost:30000";
+        this._connections[0].getDB( "config" ).settings.insert( { _id : "chunksize" , value : otherParams.chunksize || 50 } );
+    }
 
     this._mongos = [];
     var startMongosPort = 31000;
@@ -183,6 +202,14 @@ ShardingTest.prototype.getOther = function( one ){
     if ( this._connections[0] == one )
         return this._connections[1];
     return this._connections[0];
+}
+
+ShardingTest.prototype.getFirstOther = function( one ){
+    for ( var i=0; i<this._connections.length; i++ ){
+        if ( this._connections[i] != one )
+        return this._connections[i];
+    }
+    throw "impossible";
 }
 
 ShardingTest.prototype.stop = function(){
@@ -566,7 +593,7 @@ ReplTest.prototype.getPath = function( master ){
 }
 
 
-ReplTest.prototype.getOptions = function( master , extra , putBinaryFirst ){
+ReplTest.prototype.getOptions = function( master , extra , putBinaryFirst, norepl ){
 
     if ( ! extra )
         extra = {};
@@ -586,13 +613,15 @@ ReplTest.prototype.getOptions = function( master , extra , putBinaryFirst ){
     a.push( this.getPath( master ) );
     
 
-    if ( master ){
-        a.push( "--master" );
-    }
-    else {
-        a.push( "--slave" );
-        a.push( "--source" );
-        a.push( "127.0.0.1:" + this.ports[0] );
+    if ( !norepl ) {
+        if ( master ){
+            a.push( "--master" );
+        }
+        else {
+            a.push( "--slave" );
+            a.push( "--source" );
+            a.push( "127.0.0.1:" + this.ports[0] );
+        }
     }
     
     for ( var k in extra ){
@@ -605,10 +634,10 @@ ReplTest.prototype.getOptions = function( master , extra , putBinaryFirst ){
     return a;
 }
 
-ReplTest.prototype.start = function( master , options , restart ){
+ReplTest.prototype.start = function( master , options , restart, norepl ){
     var lockFile = this.getPath( master ) + "/mongod.lock";
     removeFile( lockFile );
-    var o = this.getOptions( master , options , restart );
+    var o = this.getOptions( master , options , restart, norepl );
     if ( restart )
         return startMongoProgram.apply( null , o );
     else
@@ -633,6 +662,7 @@ allocatePorts = function( n ) {
 
 
 SyncCCTest = function( testName ){
+    this._testName = testName;
     this._connections = [];
     
     for ( var i=0; i<3; i++ ){
@@ -647,4 +677,26 @@ SyncCCTest.prototype.stop = function(){
     for ( var i=0; i<this._connections.length; i++){
         stopMongod( 30000 + i );
     }
+}
+
+SyncCCTest.prototype.checkHashes = function( dbname , msg ){
+    var hashes = this._connections.map(
+        function(z){
+            return z.getDB( dbname ).runCommand( "dbhash" );
+        }
+    );
+
+    for ( var i=1; i<hashes.length; i++ ){
+        assert.eq( hashes[0].md5 , hashes[i].md5 , "checkHash on " + dbname + " " + msg + "\n" + tojson( hashes ) )
+    }
+}
+
+SyncCCTest.prototype.tempKill = function( num ){
+    num = num || 0;
+    stopMongod( 30000 + num );
+}
+
+SyncCCTest.prototype.tempStart = function( num ){
+    num = num || 0;
+    this._connections[num] = startMongodTest( 30000 + num , this._testName + num , true );
 }

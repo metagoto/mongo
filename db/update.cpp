@@ -24,6 +24,9 @@
 #include "repl.h"
 #include "update.h"
 
+//#define DEBUGUPDATE(x) cout << x << endl;
+#define DEBUGUPDATE(x)
+
 namespace mongo {
 
     const char* Mod::modNames[] = { "$inc", "$set", "$push", "$pushAll", "$pull", "$pullAll" , "$pop", "$unset" ,
@@ -307,11 +310,12 @@ namespace mongo {
 
         // Perform this check first, so that we don't leave a partially modified object on uassert.
         for ( ModHolder::const_iterator i = _mods.begin(); i != _mods.end(); ++i ) {
+            DEBUGUPDATE( "\t\t prepare : " << i->first );
             ModState& ms = mss->_mods[i->first];
 
             const Mod& m = i->second;
             BSONElement e = obj.getFieldDotted(m.fieldName);
-
+            
             ms.m = &m;
             ms.old = e;
 
@@ -403,6 +407,7 @@ namespace mongo {
                 mss->amIInPlacePossible( false );
             }
         }
+        
         return auto_ptr<ModSetState>( mss );
     }
     
@@ -474,6 +479,7 @@ namespace mongo {
     
     template< class Builder >
     void ModSetState::createNewFromMods( const string& root , Builder& b , const BSONObj &obj ){
+        DEBUGUPDATE( "\t\t createNewFromMods root: " << root );
         BSONObjIteratorSorted es( obj );
         BSONElement e = es.next();
 
@@ -485,6 +491,8 @@ namespace mongo {
         while ( e.type() && m != mend ){
             string field = root + e.fieldName();
             FieldCompareResult cmp = compareDottedFieldNames( m->second.m->fieldName , field );
+
+            DEBUGUPDATE( "\t\t\t" << field << "\t" << m->second.m->fieldName << "\t" << cmp );
             
             switch ( cmp ){
                 
@@ -618,7 +626,7 @@ namespace mongo {
                 uassert( 10152 ,  "Modifier $inc allowed for numbers only", f.isNumber() || op != Mod::INC );
                 uassert( 10153 ,  "Modifier $pushAll/pullAll allowed for arrays only", f.type() == Array || ( op != Mod::PUSH_ALL && op != Mod::PULL_ALL ) );
                 
-                _hasDynamicArray = _hasDynamicArray || strstr( fieldName , "~" ) > 0;
+                _hasDynamicArray = _hasDynamicArray || strstr( fieldName , ".$" ) > 0;
                 
                 Mod m;
                 m.init( op , f );
@@ -631,7 +639,7 @@ namespace mongo {
 
                 _mods[m.fieldName] = m;
 
-                cout << "\t\t " << fieldName << "\t" << _hasDynamicArray << endl;
+                DEBUGUPDATE( "\t\t " << fieldName << "\t" << _hasDynamicArray );
             }
         }
 
@@ -643,15 +651,15 @@ namespace mongo {
         n->_hasDynamicArray = _hasDynamicArray;
         for ( ModHolder::const_iterator i=_mods.begin(); i!=_mods.end(); i++ ){
             string s = i->first;
-            size_t idx = s.find( "~" );
+            size_t idx = s.find( ".$" );
             if ( idx == string::npos ){
                 n->_mods[s] = i->second;
                 continue;
             }
             StringBuilder buf(s.size()+strlen(elemMatchKey));
-            buf << s.substr(0,idx) << elemMatchKey << s.substr(idx+1);
+            buf << s.substr(0,idx+1) << elemMatchKey << s.substr(idx+2);
             string fixed = buf.str();
-            cout << "fixed dynamic: " << s << " -->> " << fixed << endl;
+            DEBUGUPDATE( "fixed dynamic: " << s << " -->> " << fixed );
             n->_mods[fixed] = i->second;
             ModHolder::iterator temp = n->_mods.find( fixed );
             temp->second.setFieldName( temp->first.c_str() );
@@ -711,6 +719,7 @@ namespace mongo {
 
     
     UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj patternOrig, bool upsert, bool multi, bool logop , OpDebug& debug ) {
+        DEBUGUPDATE( "update: " << ns << " update: " << updateobj << " query: " << patternOrig << " upsert: " << upsert << " multi: " << multi );
         int profile = cc().database()->profile;
         StringBuilder& ss = debug.str;
 
@@ -846,10 +855,13 @@ namespace mongo {
                         pattern = patternBuilder.obj();                        
                     }
                     
-                    if ( mss->needOpLogRewrite() )
+                    if ( mss->needOpLogRewrite() ){
+                        DEBUGUPDATE( "\t rewrite update: " << mss->getOpLogRewrite() );
                         logOp("u", ns, mss->getOpLogRewrite() , &pattern );
-                    else
+                    }
+                    else {
                         logOp("u", ns, updateobj, &pattern );
+                    }
                 }
                 numModded++;
                 if ( ! multi )

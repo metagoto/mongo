@@ -24,7 +24,7 @@
 
 namespace mongo {
 
-#if !defined(_WIN32) && !defined(NOEXECINFO) && !defined(__freebsd__)
+#if !defined(_WIN32) && !defined(NOEXECINFO) && !defined(__freebsd__) && !defined(__sun__)
 
 } // namespace mongo
 
@@ -154,6 +154,23 @@ namespace mongo {
         buf[24] = 0; // don't want the \n
     }
 
+
+    inline void time_t_to_Struct(time_t t, struct tm * buf , bool local = false ) {
+#if defined(_WIN32)
+        if ( local )
+            localtime_s( buf , &t );
+        else
+            gmtime_s(buf, &t);
+#else
+        if ( local )
+            localtime_r(&t, buf);
+        else
+            gmtime_r(&t, buf);
+#endif
+    }
+
+
+
 #define asctime _asctime_not_threadsafe_
 #define gmtime _gmtime_not_threadsafe_
 #define localtime _localtime_not_threadsafe_
@@ -200,8 +217,9 @@ namespace mongo {
     inline void sleepmicros(int s) {
         struct timespec t;
         t.tv_sec = (int)(s / 1000000);
-        t.tv_nsec = s % 1000000;
-        if ( nanosleep( &t , 0 ) ){
+        t.tv_nsec = 1000 * ( s % 1000000 );
+        struct timespec out;
+        if ( nanosleep( &t , &out ) ){
             cout << "nanosleep failed" << endl;
         }
     }
@@ -253,8 +271,42 @@ namespace mongo {
         return secs*1000000 + t;
     }
     using namespace boost;
-    typedef boost::mutex::scoped_lock boostlock;
-    typedef boost::recursive_mutex::scoped_lock recursive_boostlock;
+    
+    extern bool __destroyingStatics;
+    
+    // If you create a local static instance of this class, that instance will be destroyed
+    // before all global static objects are destroyed, so __destroyingStatics will be set
+    // to true before the global static variables are destroyed.
+    class StaticObserver : boost::noncopyable {
+    public:
+        ~StaticObserver() { __destroyingStatics = true; }
+    };
+    
+    // On pthread systems, it is an error to destroy a mutex while held.  Static global
+    // mutexes may be held upon shutdown in our implementation, and this way we avoid
+    // destroying them.
+    class mutex : boost::noncopyable {
+    public:
+        mutex() { new (_buf) boost::mutex(); }
+        ~mutex() {
+            if( !__destroyingStatics ) {
+                boost().boost::mutex::~mutex();
+            }
+        }
+        class scoped_lock : boost::noncopyable {
+        public:
+            scoped_lock( mongo::mutex &m ) : _l( m.boost() ) {}
+            boost::mutex::scoped_lock &boost() { return _l; }
+        private:
+            boost::mutex::scoped_lock _l;
+        };
+    private:
+        boost::mutex &boost() { return *( boost::mutex * )( _buf ); }
+        char _buf[ sizeof( boost::mutex ) ];
+    };
+    
+    typedef mongo::mutex::scoped_lock scoped_lock;
+    typedef boost::recursive_mutex::scoped_lock recursive_scoped_lock;
 
 // simple scoped timer
     class Timer {
@@ -293,7 +345,7 @@ namespace mongo {
 
     class DebugMutex : boost::noncopyable {
     	friend class lock;
-    	boost::mutex m;
+    	mongo::mutex m;
     	int locked;
     public:
     	DebugMutex() : locked(0); { }
@@ -302,7 +354,7 @@ namespace mongo {
 
     */
 
-//typedef boostlock lock;
+//typedef scoped_lock lock;
 
     inline bool startsWith(const char *str, const char *prefix) {
         size_t l = strlen(prefix);
@@ -393,12 +445,39 @@ namespace mongo {
 
     class ProgressMeter {
     public:
-        ProgressMeter( long long total , int secondsBetween = 3 , int checkInterval = 100 )
-            : _total( total ) , _secondsBetween( secondsBetween ) , _checkInterval( checkInterval ) ,
-              _done(0) , _hits(0) , _lastTime( (int) time(0) ){
+        ProgressMeter( long long total , int secondsBetween = 3 , int checkInterval = 100 ){
+            reset( total , secondsBetween , checkInterval );
+        }
+
+        ProgressMeter(){
+            _active = 0;
+        }
+        
+        void reset( long long total , int secondsBetween = 3 , int checkInterval = 100 ){
+            _total = total;
+            _secondsBetween = secondsBetween;
+            _checkInterval = checkInterval;
+
+            _done = 0;
+            _hits = 0;
+            _lastTime = (int)time(0);
+
+            _active = 1;
+        }
+
+        void finished(){
+            _active = 0;
+        }
+
+        bool isActive(){
+            return _active;
         }
         
         bool hit( int n = 1 ){
+            if ( ! _active ){
+                cout << "warning: hit on in-active ProgressMeter" << endl;
+            }
+
             _done += n;
             _hits++;
             if ( _hits % _checkInterval )
@@ -424,7 +503,16 @@ namespace mongo {
             return _hits;
         }
 
+        string toString() const {
+            if ( ! _active )
+                return "";
+            stringstream buf;
+            buf << _done << "/" << _total << " " << (_done*100)/_total << "%";
+            return buf.str();
+        }
     private:
+
+        bool _active;
         
         long long _total;
         int _secondsBetween;
@@ -443,7 +531,7 @@ namespace mongo {
         }
         
         bool tryAcquire(){
-            boostlock lk( _mutex );
+            scoped_lock lk( _mutex );
             if ( _num <= 0 ){
                 if ( _num < 0 ){
                     cerr << "DISASTER! in TicketHolder" << endl;
@@ -455,12 +543,12 @@ namespace mongo {
         }
         
         void release(){
-            boostlock lk( _mutex );
+            scoped_lock lk( _mutex );
             _num++;
         }
 
         void resize( int newSize ){
-            boostlock lk( _mutex );            
+            scoped_lock lk( _mutex );            
             int used = _outof - _num;
             if ( used > newSize ){
                 cout << "ERROR: can't resize since we're using (" << used << ") more than newSize(" << newSize << ")" << endl;
@@ -482,7 +570,7 @@ namespace mongo {
     private:
         int _outof;
         int _num;
-        boost::mutex _mutex;
+        mongo::mutex _mutex;
     };
 
     class TicketHolderReleaser {
@@ -563,43 +651,54 @@ namespace mongo {
     
     // for convenience, '{' is greater than anything and stops number parsing
     inline int lexNumCmp( const char *s1, const char *s2 ) {
-        int nret = 0;
         while( *s1 && *s2 ) {
+
             bool p1 = ( *s1 == '{' );
             bool p2 = ( *s2 == '{' );
             if ( p1 && !p2 )
                 return 1;
             if ( p2 && !p1 )
                 return -1;
+        
             bool n1 = isNumber( *s1 );
             bool n2 = isNumber( *s2 );
+        
             if ( n1 && n2 ) {
-                if ( nret == 0 ) {
-                    nret = *s1 > *s2 ? 1 : ( *s1 == *s2 ? 0 : -1 );
-                }
-            } else if ( n1 ) {
-                return 1;
-            } else if ( n2 ) {
-                return -1;
-            } else {
-                if ( nret ) {
-                    return nret;
-                }
-                if ( *s1 > *s2 ) {
+                char * e1;
+                char * e2;
+                long l1 = strtol( s1 , &e1 , 10 );
+                long l2 = strtol( s2 , &e2 , 10 );
+            
+                if ( l1 > l2 )
                     return 1;
-                } else if ( *s2 > *s1 ) {
+                else if ( l1 < l2 )
                     return -1;
-                }
-                nret = 0;
-            }
-            ++s1; ++s2;
+            
+                s1 = e1;
+                s2 = e2;
+                continue;
+            } 
+        
+            if ( n1 ) 
+                return 1;
+        
+            if ( n2 ) 
+                return -1;
+        
+            if ( *s1 > *s2 )
+                return 1;
+        
+            if ( *s2 > *s1 )
+                return -1;
+        
+            s1++; s2++;
         }
-        if ( *s1 ) {
+    
+        if ( *s1 ) 
             return 1;
-        } else if ( *s2 ) {
+        if ( *s2 )
             return -1;
-        }
-        return nret;
+        return 0;
     }
     
 } // namespace mongo

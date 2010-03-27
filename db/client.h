@@ -42,7 +42,7 @@ namespace mongo {
 
     class Client : boost::noncopyable { 
     public:
-        static boost::mutex clientsMutex;
+        static mongo::mutex clientsMutex;
         static set<Client*> clients; // always be in clientsMutex when manipulating this
 
         class GodScope {
@@ -96,7 +96,7 @@ namespace mongo {
              * if you are doing this after allowing a write there could be a race condition
              * if someone closes that db.  this checks that the DB is still valid
              */
-            Context( string ns , Database * db );
+            Context( string ns , Database * db, bool doauth=true );
             
             ~Context();
             
@@ -244,6 +244,9 @@ namespace mongo {
     }
 
     string sayClientState();
-    
+  
+    inline bool haveClient(){ 
+        return currentClient.get() > 0;
+    }
 };
 
