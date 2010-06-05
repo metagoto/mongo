@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "engine.h"
 #include "../util/file.h"
 #include "../client/dbclient.h"
@@ -228,7 +228,7 @@ namespace mongo {
     class ScopeCache {
     public:
 
-        ScopeCache(){
+        ScopeCache() : _mutex("ScopeCache") {
             _magic = 17;
         }
         
@@ -421,5 +421,15 @@ namespace mongo {
     void ( *ScriptEngine::_connectCallback )( DBClientWithCommands & ) = 0;
     
     ScriptEngine * globalScriptEngine;
+
+    bool hasJSReturn( const string& code ){
+        size_t x = code.find( "return" );
+        if ( x == string::npos )
+            return false;
+
+        return 
+            ( x == 0 || ! isalpha( code[x-1] ) ) &&
+            ! isalpha( code[x+6] );
+    }
 }
     

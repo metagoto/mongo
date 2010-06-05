@@ -1,4 +1,4 @@
-// log.h
+// @file log.h
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -19,6 +19,11 @@
 
 #include <string.h>
 #include <errno.h>
+#include "../bson/util/builder.h"
+
+#ifndef _WIN32
+//#include <syslog.h>
+#endif
 
 namespace mongo {
 
@@ -41,8 +46,17 @@ namespace mongo {
         const T& t_;
     };
 
+    class Tee { 
+    public:
+        virtual ~Tee(){}
+        virtual void write(const string& str) = 0;
+    };
+
     class Nullstream {
     public:
+        virtual Nullstream& operator<< (Tee* tee) { 
+            return *this;
+        }
         virtual ~Nullstream() {}
         virtual Nullstream& operator<<(const char *) {
             return *this;
@@ -111,12 +125,10 @@ namespace mongo {
         virtual Nullstream& operator<< (ios_base& (*hex)(ios_base&)) {
             return *this;
         }
-        virtual void flush(){}
+        virtual void flush(Tee *t = 0) {}
     };
     extern Nullstream nullstream;
     
-#define LOGIT { ss << x; return *this; }
-
     class Logstream : public Nullstream {
         static mongo::mutex mutex;
         static int doneSetup;
@@ -125,36 +137,54 @@ namespace mongo {
         static int magicNumber(){
             return 1717;
         }
-        void flush() {
+        void flush(Tee *t = 0) {
             // this ensures things are sane
-            if ( doneSetup == 1717 ){
+            if ( doneSetup == 1717 ) {
+                BufBuilder b(512);
+                time_t_to_String( time(0) , b.grow(20) );
+                b.append( ss.str() );
+                const char *s = b.buf();
+
                 scoped_lock lk(mutex);
-                cout << ss.str();
+
+                if( t ) t->write(s);
+#ifndef _WIN32
+                //syslog( LOG_INFO , "%s" , cc );
+#endif
+                cout << s;
                 cout.flush();
             }
-            ss.str("");
+            _init();
         }
-        Logstream& operator<<(const char *x) LOGIT
-        Logstream& operator<<(char *x) LOGIT
-        Logstream& operator<<(char x) LOGIT
-        Logstream& operator<<(int x) LOGIT
-        Logstream& operator<<(ExitCode x) LOGIT
-        Logstream& operator<<(long x) LOGIT
-        Logstream& operator<<(unsigned long x) LOGIT
-        Logstream& operator<<(unsigned x) LOGIT
-        Logstream& operator<<(double x) LOGIT
-        Logstream& operator<<(void *x) LOGIT
-        Logstream& operator<<(const void *x) LOGIT
-        Logstream& operator<<(long long x) LOGIT
-        Logstream& operator<<(unsigned long long x) LOGIT
-        Logstream& operator<<(bool x) LOGIT
+
+        /** note these are virtual */
+        Logstream& operator<<(const char *x) { ss << x; return *this; }
+        Logstream& operator<<(char *x)       { ss << x; return *this; }
+        Logstream& operator<<(char x)        { ss << x; return *this; }
+        Logstream& operator<<(int x)         { ss << x; return *this; }
+        Logstream& operator<<(ExitCode x)    { ss << x; return *this; }
+        Logstream& operator<<(long x)          { ss << x; return *this; }
+        Logstream& operator<<(unsigned long x) { ss << x; return *this; }
+        Logstream& operator<<(unsigned x)      { ss << x; return *this; }
+        Logstream& operator<<(double x)        { ss << x; return *this; }
+        Logstream& operator<<(void *x)         { ss << x; return *this; }
+        Logstream& operator<<(const void *x)   { ss << x; return *this; }
+        Logstream& operator<<(long long x)     { ss << x; return *this; }
+        Logstream& operator<<(unsigned long long x) { ss << x; return *this; }
+        Logstream& operator<<(bool x)               { ss << x; return *this; }
+
         Logstream& operator<<(const LazyString& x) {
             ss << x.val();
             return *this;
         }
+        Nullstream& operator<< (Tee* tee) { 
+            ss << '\n';
+            flush(tee);
+            return *this;
+        }
         Logstream& operator<< (ostream& ( *_endl )(ostream&)) {
             ss << '\n';
-            flush();
+            flush(0);
             return *this;
         }
         Logstream& operator<< (ios_base& (*_hex)(ios_base&)) {
@@ -168,20 +198,22 @@ namespace mongo {
             if ( ! t )
                 *this << "null";
             else 
-                *this << t;
+                *this << *t;
             return *this;
         }
 
         Logstream& prolog() {
-            char now[64];
-            time_t_to_String(time(0), now);
-            now[20] = 0;
-            ss << now;
             return *this;
         }
 
     private:
         static thread_specific_ptr<Logstream> tsp;
+        Logstream(){
+            _init();
+        }
+        void _init(){
+            ss.str("");
+        }
     public:
         static Logstream& get() {
             Logstream *p = tsp.get();
@@ -192,6 +224,7 @@ namespace mongo {
     };
 
     extern int logLevel;
+    extern int tlogLevel;
 
     inline Nullstream& out( int level = 0 ) {
         if ( level > logLevel )
@@ -203,7 +236,7 @@ namespace mongo {
        at the specified level or higher. */
     inline void logflush(int level = 0) { 
         if( level > logLevel )
-            Logstream::get().flush();
+            Logstream::get().flush(0);
     }
 
     /* without prolog */
@@ -213,9 +246,21 @@ namespace mongo {
         return Logstream::get();
     }
 
-    inline Nullstream& log( int level = 0 ) {
+    /** logging which we may not want during unit tests runs.
+        set tlogLevel to -1 to suppress tlog() output in a test program. */
+    inline Nullstream& tlog( int level = 0 ) {
+        if ( level > tlogLevel || level > logLevel )
+            return nullstream;
+        return Logstream::get().prolog();
+    }
+
+    inline Nullstream& log( int level ) {
         if ( level > logLevel )
             return nullstream;
+        return Logstream::get().prolog();
+    }
+
+    inline Nullstream& log() {
         return Logstream::get().prolog();
     }
 
@@ -242,9 +287,15 @@ namespace mongo {
     void initLogging( const string& logpath , bool append );
     void rotateLogs( int signal = 0 );
 
-#define OUTPUT_ERRNOX(x) "errno:" << x << " " << strerror(x) 
-#define OUTPUT_ERRNO OUTPUT_ERRNOX(errno)
+    inline string errnoWithDescription(int x = errno) {
+        stringstream s;
+        s << "errno:" << x << ' ' << strerror(x);
+        return s.str();
+    }
 
-    string errnostring( const char * prefix = 0 );
+    /** output the error # and error message with prefix.  
+        handy for use as parm in uassert/massert.
+        */
+    string errnoWithPrefix( const char * prefix = 0 );
 
 } // namespace mongo

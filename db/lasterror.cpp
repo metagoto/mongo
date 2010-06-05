@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 
 #include "../util/unittest.h"
 #include "../util/message.h"
@@ -28,7 +28,7 @@ namespace mongo {
 
     LastError LastError::noError;
     LastErrorHolder lastError;
-    mongo::mutex LastErrorHolder::_idsmutex;
+    mongo::mutex LastErrorHolder::_idsmutex("LastErrorHolder");
 
     void LastError::appendSelf( BSONObjBuilder &b ) {
         if ( !valid ) {
@@ -44,7 +44,7 @@ namespace mongo {
             b.append( "code" , code );
         if ( updatedExisting != NotUpdate )
             b.appendBool( "updatedExisting", updatedExisting == True );
-        b.append( "n", nObjects );
+        b.appendNumber( "n", nObjects );
     }
 
     void LastErrorHolder::setID( int id ){
@@ -72,8 +72,14 @@ namespace mongo {
     
     LastError * LastErrorHolder::_get( bool create ){
         int id = _id.get();
-        if ( id == 0 )
-            return _tl.get();
+        if ( id == 0 ){
+            LastError * le = _tl.get();
+            if ( ! le && create ){
+                le = new LastError();
+                _tl.reset( le );
+            }
+            return le;
+        }
 
         scoped_lock lock(_idsmutex);        
         map<int,Status>::iterator i = _ids.find( id );
@@ -113,6 +119,13 @@ namespace mongo {
         
         remove( id );
     }
+
+    /** ok to call more than once. */
+    void LastErrorHolder::initThread() { 
+        if( _tl.get() ) return;
+        assert( _id.get() == 0 );
+        _tl.reset( new LastError() );
+    }
     
     void LastErrorHolder::reset( LastError * le ){
         int id = _id.get();
@@ -126,10 +139,10 @@ namespace mongo {
         status.time = time(0);
         status.lerr = le;
     }
-
+    
     void prepareErrForNewRequest( Message &m, LastError * err ) {
         // a killCursors message shouldn't affect last error
-        if ( m.data->operation() == dbKillCursors ) {
+        if ( m.operation() == dbKillCursors ) {
             err->disabled = true;
         } else {
             err->disabled = false;
@@ -137,11 +150,15 @@ namespace mongo {
         }        
     }
     
-    void LastErrorHolder::startRequest( Message& m ) {
-        int id = m.data->id & 0xFFFF0000;
-        setID( id );
+    LastError * LastErrorHolder::startRequest( Message& m , int clientId ) {
+
+        if ( clientId == 0 )
+            clientId = m.header()->id & 0xFFFF0000;
+        setID( clientId );
+
         LastError * le = _get( true );
         prepareErrForNewRequest( m, le );
+        return le;
     }
 
     void LastErrorHolder::startRequest( Message& m , LastError * connectionOwned ) {
@@ -150,6 +167,14 @@ namespace mongo {
             return;
         }
         startRequest(m);
+    }
+
+    void LastErrorHolder::disconnect( int clientId ){
+        if ( ! clientId )
+            return;
+        
+        scoped_lock lock(_idsmutex);
+        _ids.erase( clientId );
     }
 
     struct LastErrorHolderTest : public UnitTest {

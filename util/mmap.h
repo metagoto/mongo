@@ -19,19 +19,100 @@
 
 namespace mongo {
 
-    class MemoryMappedFile {
+    /* the administrative-ish stuff here */
+    class MongoFile : boost::noncopyable { 
+    protected:
+        virtual void close() = 0;
+        virtual void flush(bool sync) = 0;
+
+        void created(); /* subclass must call after create */
+        void destroyed(); /* subclass must call in destructor */
     public:
+        virtual ~MongoFile() {}
+        virtual long length() = 0;
 
         enum Options {
-            SEQUENTIAL = 1
+            SEQUENTIAL = 1 // hint - e.g. FILE_FLAG_SEQUENTIAL_SCAN on windows
+        };
+
+        static int flushAll( bool sync ); // returns n flushed
+        static long long totalMappedLength();
+        static void closeAllFiles( stringstream &message );
+
+        /* can be "overriden" if necessary */
+        static bool exists(boost::filesystem::path p) {
+            return boost::filesystem::exists(p);
+        }
+    };
+
+    /** template for what a new storage engine's class definition must implement 
+        PRELIMINARY - subject to change.
+    */
+    class StorageContainerTemplate : public MongoFile {
+    protected:
+        virtual void close();
+        virtual void flush(bool sync);
+    public:
+        virtual long length();
+
+        /** pointer to a range of space in this storage unit */
+        class Pointer {
+        public:
+            /** retried address of buffer at offset 'offset' withing the storage unit. returned range is a contiguous 
+                buffer reflecting what is in storage.  caller will not read or write past 'len'.
+
+                note calls may be received that are at different points in a range and different lengths. however 
+                for now assume that on writes, if a call is made, previously returned addresses are no longer valid. i.e.
+                  p = at(10000, 500);
+                  q = at(10000, 600);
+                after the second call it is ok if p is invalid.
+            */
+            void* at(int offset, int len);
+
+            /** indicate that we wrote to the range (from a previous at() call) and that it needs 
+                flushing to disk.
+                */
+            void written(int offset, int len);
+
+            bool isNull() const;
+        };
+
+        /** commit written() calls from above. */
+        void commit();
+        
+        Pointer open(const char *filename);
+        Pointer open(const char *_filename, long &length, int options=0);
+    };
+
+    class MemoryMappedFile : public MongoFile {
+    public:
+        class Pointer {
+            char *_base;
+        public:
+            Pointer() : _base(0) { }
+            Pointer(void *p) : _base((char*) p) { }
+            void* at(int offset, int maxLen) { return _base + offset; } 
+			void grow(int offset, int len) { /* no action required with mem mapped file */ }
+            bool isNull() const { return _base == 0; }
         };
 
         MemoryMappedFile();
-        ~MemoryMappedFile(); /* closes the file if open */
+        ~MemoryMappedFile() {
+            destroyed();
+            close();
+        }
         void close();
         
-        // Throws exception if file doesn't exist.
+        // Throws exception if file doesn't exist. (dm may2010: not sure if this is always true?)
         void* map( const char *filename );
+
+        /*To replace map():
+        
+          Pointer open( const char *filename ) {
+            void *p = map(filename);
+            uassert(13077, "couldn't open/map file", p);
+            return Pointer(p);
+        }*/
 
         /* Creates with length if DNE, otherwise uses existing file length,
            passed length.
@@ -40,29 +121,33 @@ namespace mongo {
 
         void flush(bool sync);
 
-        void* viewOfs() {
+        /*void* viewOfs() {
             return view;
-        }
+        }*/
 
         long length() {
             return len;
         }
         
-        static void updateLength( const char *filename, long &length );
-        
-        static long long totalMappedLength();
-        static void closeAllFiles( stringstream &message );
-        static int flushAll( bool sync );
-
     private:
-        void created();
+        static void updateLength( const char *filename, long &length );
         
         HANDLE fd;
         HANDLE maphandle;
         void *view;
         long len;
+        string _filename;
     };
 
     void printMemInfo( const char * where );    
+
+#include "ramstore.h"
+
+//#define _RAMSTORE
+#if defined(_RAMSTORE)
+    typedef RamStoreFile MMF;
+#else
+    typedef MemoryMappedFile MMF;
+#endif
 
 } // namespace mongo

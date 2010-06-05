@@ -1,5 +1,6 @@
 
 __quiet = false;
+__magicNoPrint = { __magicNoPrint : 1111 }
 
 chatty = function(s){
     if ( ! __quiet )
@@ -43,6 +44,10 @@ assert.eq = function( a , b , msg ){
         return;
 
     doassert( "[" + tojson( a ) + "] != [" + tojson( b ) + "] are not equal : " + msg );
+}
+
+assert.eq.automsg = function( a, b ) {
+    assert.eq( eval( a ), eval( b ), "[" + a + "] != [" + b + "]" );
 }
 
 assert.neq = function( a , b , msg ){
@@ -646,7 +651,7 @@ tojsonObject = function( x, indent , nolint ){
         return x.tojson(indent,nolint);
     }
     
-    if ( typeof( x.constructor.tojson ) == "function" && x.constructor.tojson != tojson ) {
+    if ( x.constructor && typeof( x.constructor.tojson ) == "function" && x.constructor.tojson != tojson ) {
         return x.constructor.tojson( x, indent , nolint );
     }
 
@@ -723,6 +728,9 @@ shellPrintHelper = function( x ){
         return;
     }
     
+    if ( x == __magicNoPrint )
+        return;
+
     if ( x == null ){
         print( "null" );
         return;

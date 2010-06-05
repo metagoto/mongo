@@ -16,7 +16,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../util/message.h"
 #include "../client/dbclient.h"
 
@@ -44,8 +44,8 @@ public:
                 break;
             }
 
-            int oldId = m.data->id;
-            if ( m.data->operation() == dbQuery || m.data->operation() == dbMsg || m.data->operation() == dbGetMore ) {
+            int oldId = m.header()->id;
+            if ( m.operation() == dbQuery || m.operation() == dbMsg || m.operation() == dbGetMore ) {
                 Message response;
                 dest.port().call( m, response );
                 mp_.reply( m, response, oldId );
@@ -74,7 +74,7 @@ auto_ptr< MyListener > listener;
 
 #if !defined(_WIN32) 
 void cleanup( int sig ) {
-    close( listener->socket() );
+    ListeningSockets::get()->closeAll();
     for ( set<MessagingPort*>::iterator i = ports.begin(); i != ports.end(); i++ )
         (*i)->shutdown();
     ::exit( 0 );
@@ -125,8 +125,7 @@ int main( int argc, char **argv ) {
     check( port != 0 && !destUri.empty() );
 
     listener.reset( new MyListener( port ) );
-    listener->init();
-    listener->listen();
+    listener->initAndListen();
 
     return 0;
 }

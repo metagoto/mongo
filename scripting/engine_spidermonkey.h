@@ -37,11 +37,12 @@
 #include "jstypes.h"
 #undef JS_PUBLIC_API
 #undef JS_PUBLIC_DATA
-#define JS_PUBLIC_API(t)    t
+#define JS_PUBLIC_API(t)    t __cdecl 
 #define JS_PUBLIC_DATA(t)   t
 #endif
 
 #include "jsapi.h"
+#include "jsobj.h"
 #include "jsdate.h"
 #include "jsregexp.h"
 

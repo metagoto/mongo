@@ -27,17 +27,32 @@
 #include "../client/dbclient.h"
 #include "../client/model.h"
 #include "shardkey.h"
+#include "shard.h"
 
 namespace mongo {
+
+    struct ShardNS {
+        static string database;
+        static string shard;
+        static string chunk;
+        static string mongos;
+        static string settings;
+    };
+
     
     class Grid;
     class ConfigServer;
 
-    extern ConfigServer configServer;
+    class DBConfig;
+    typedef boost::shared_ptr<DBConfig> DBConfigPtr;
+
+    extern DBConfigPtr configServerPtr;
+    extern ConfigServer& configServer;
     extern Grid grid;
 
     class ChunkManager;
-
+    typedef shared_ptr<ChunkManager> ChunkManagerPtr;
+    
     class CollectionInfo {
     public:
         CollectionInfo( ShardKeyPattern _key = BSONObj() , bool _unique = false ) : 
@@ -53,7 +68,9 @@ namespace mongo {
     */
     class DBConfig : public Model {
     public:
-        DBConfig( string name = "" ) : _name( name ) , _primary("") , _shardingEnabled(false){ }
+
+        DBConfig( string name = "" ) : _name( name ) , _primary("config","") , 
+            _shardingEnabled(false), _lock("DBConfig") { }
         
         string getName(){ return _name; };
 
@@ -65,29 +82,28 @@ namespace mongo {
         }
         
         void enableSharding();
-        ChunkManager* shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique );
+        ChunkManagerPtr shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique );
         
         /**
          * @return whether or not this partition is partitioned
          */
         bool isSharded( const string& ns );
         
-        ChunkManager* getChunkManager( const string& ns , bool reload = false );
+        ChunkManagerPtr getChunkManager( const string& ns , bool reload = false );
         
         /**
          * @return the correct for shard for the ns
-         * if the namespace is sharded, will return an empty string
+         * if the namespace is sharded, will return NULL
          */
-        string getShard( const string& ns );
+        const Shard& getShard( const string& ns );
         
-        string getPrimary(){
-            if ( _primary.size() == 0 )
-                throw UserException( 8041 , (string)"no primary shard configured for db: " + _name );
+        const Shard& getPrimary(){
+            uassert( 8041 , (string)"no primary shard configured for db: " + _name , _primary.ok() );
             return _primary;
         }
         
         void setPrimary( string s ){
-            _primary = s;
+            _primary.reset( s );
         }
 
         bool reload();
@@ -106,7 +122,12 @@ namespace mongo {
         
     protected:
 
-        bool _dropShardedCollections( int& num, set<string>& allServers , string& errmsg );
+        /** 
+            lockless
+        */
+        bool _isSharded( const string& ns );
+
+        bool _dropShardedCollections( int& num, set<Shard>& allServers , string& errmsg );
         
         bool doload();
         
@@ -116,11 +137,13 @@ namespace mongo {
         bool removeSharding( const string& ns );
 
         string _name; // e.g. "alleyinsider"
-        string _primary; // e.g. localhost , mongo.foo.com:9999
+        Shard _primary; // e.g. localhost , mongo.foo.com:9999
         bool _shardingEnabled;
         
         map<string,CollectionInfo> _sharded; // { "alleyinsider.blog.posts" : { ts : 1 }  , ... ] - all ns that are sharded
-        map<string,ChunkManager*> _shards; // this will only have entries for things that have been looked at
+        map<string,ChunkManagerPtr> _shards; // this will only have entries for things that have been looked at
+
+        mongo::mutex _lock; // TODO: change to r/w lock ??
 
         friend class Grid;
         friend class ChunkManager;
@@ -132,26 +155,26 @@ namespace mongo {
      */
     class Grid {
     public:
+        Grid() : _lock("Grid") { }
+
         /**
            gets the config the db.
            will return an empty DBConfig if not in db already
          */
-        DBConfig * getDBConfig( string ns , bool create=true);
+        DBConfigPtr getDBConfig( string ns , bool create=true);
         
         /**
          * removes db entry.
          * on next getDBConfig call will fetch from db
          */
         void removeDB( string db );
-
-        string pickShardForNewDB();
         
         bool knowAboutShard( string name ) const;
-
+        
         unsigned long long getNextOpTime() const;
     private:
-        map<string,DBConfig*> _databases;
-        mongo::mutex _lock; // TODO: change to r/w lock
+        map<string, DBConfigPtr > _databases;
+        mongo::mutex _lock; // TODO: change to r/w lock ??
     };
 
     class ConfigServer : public DBConfig {
@@ -162,12 +185,12 @@ namespace mongo {
 
         bool ok(){
             // TODO: check can connect
-            return _primary.size() > 0;
+            return _primary.ok();
         }
         
         virtual string modelServer(){
-            uassert( 10190 ,  "ConfigServer not setup" , _primary.size() );
-            return _primary;
+            uassert( 10190 ,  "ConfigServer not setup" , _primary.ok() );
+            return _primary.getConnString();
         }
         
         /**
@@ -186,8 +209,15 @@ namespace mongo {
         /**
          * @return 0 = ok, otherwise error #
          */
-        int checkConfigVersion();
+        int checkConfigVersion( bool upgrade );
         
+        /**
+         * log a change to config.changes 
+         * @param what e.g. "split" , "migrate"
+         * @param msg any more info
+         */
+        void logChange( const string& what , const string& ns , const BSONObj& detail = BSONObj() );
+
         static int VERSION;
         
     private:

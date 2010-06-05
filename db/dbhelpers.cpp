@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "db.h"
 #include "dbhelpers.h"
 #include "query.h"
@@ -27,7 +27,7 @@
 
 namespace mongo {
 
-    CursorIterator::CursorIterator( auto_ptr<Cursor> c , BSONObj filter )
+    CursorIterator::CursorIterator( shared_ptr<Cursor> c , BSONObj filter )
         : _cursor( c ){
             if ( ! filter.isEmpty() )
                 _matcher.reset( new CoveredIndexMatcher( filter , BSONObj() ) );
@@ -93,42 +93,40 @@ namespace mongo {
     class FindOne : public QueryOp {
     public:
         FindOne( bool requireIndex ) : requireIndex_( requireIndex ) {}
-        virtual void init() {
+        virtual void _init() {
             if ( requireIndex_ && strcmp( qp().indexKey().firstElement().fieldName(), "$natural" ) == 0 )
                 throw MsgAssertionException( 9011 , "Not an index cursor" );
             c_ = qp().newCursor();
-            if ( !c_->ok() )
+            if ( !c_->ok() ) {
                 setComplete();
-            else
-                matcher_.reset( new CoveredIndexMatcher( qp().query(), qp().indexKey() ) );
+            }
         }
         virtual void next() {
             if ( !c_->ok() ) {
                 setComplete();
                 return;
             }
-            if ( matcher_->matches( c_->currKey(), c_->currLoc() ) ) {
+            if ( matcher()->matches( c_->currKey(), c_->currLoc() ) ) {
                 one_ = c_->current();
-                setComplete();
+                setStop();
             } else {
                 c_->advance();
             }
         }
         virtual bool mayRecordPlan() const { return false; }
-        virtual QueryOp *clone() const { return new FindOne( requireIndex_ ); }
+        virtual QueryOp *_createChild() const { return new FindOne( requireIndex_ ); }
         BSONObj one() const { return one_; }
     private:
         bool requireIndex_;
-        auto_ptr< Cursor > c_;
-        auto_ptr< CoveredIndexMatcher > matcher_;
+        shared_ptr<Cursor> c_;
         BSONObj one_;
     };
     
     /* fetch a single object from collection ns that matches query 
        set your db SavedContext first
     */
-    bool Helpers::findOne(const char *ns, BSONObj query, BSONObj& result, bool requireIndex) { 
-        QueryPlanSet s( ns, query, BSONObj(), 0, !requireIndex );
+    bool Helpers::findOne(const char *ns, const BSONObj &query, BSONObj& result, bool requireIndex) { 
+        MultiPlanScanner s( ns, query, BSONObj(), 0, !requireIndex );
         FindOne original( requireIndex );
         shared_ptr< FindOne > res = s.runOp( original );
         massert( 10302 ,  res->exceptionMessage(), res->complete() );
@@ -173,6 +171,12 @@ namespace mongo {
         return true;
     }
 
+    bool Helpers::isEmpty(const char *ns) {
+        Client::Context context(ns);
+        shared_ptr<Cursor> c = DataFileMgr::findAll(ns);
+        return !c->ok();
+    }
+
     /* Get the first object from a collection.  Generally only useful if the collection
        only ever has a single object -- which is a "singleton collection.
 
@@ -181,7 +185,7 @@ namespace mongo {
     bool Helpers::getSingleton(const char *ns, BSONObj& result) {
         Client::Context context(ns);
 
-        auto_ptr<Cursor> c = DataFileMgr::findAll(ns);
+        shared_ptr<Cursor> c = DataFileMgr::findAll(ns);
         if ( !c->ok() )
             return false;
 
@@ -189,10 +193,25 @@ namespace mongo {
         return true;
     }
 
+    bool Helpers::getLast(const char *ns, BSONObj& result) {
+        Client::Context ctx(ns);
+        shared_ptr<Cursor> c = findTableScan(ns, reverseNaturalObj);
+        if( !c->ok() ) 
+            return false;
+        result = c->current();
+        return true;
+    }
+
     void Helpers::putSingleton(const char *ns, BSONObj obj) {
         OpDebug debug;
         Client::Context context(ns);
-        updateObjects(ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false , true , debug );
+        updateObjects(ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false , /*logtheop=*/true , debug );
+    }
+
+    void Helpers::putSingletonGod(const char *ns, BSONObj obj, bool logTheOp) {
+        OpDebug debug;
+        Client::Context context(ns);
+        _updateObjects(/*god=*/true, ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false , logTheOp , debug );
     }
 
     void Helpers::emptyCollection(const char *ns) {
@@ -241,7 +260,7 @@ namespace mongo {
         if ( val ) {
             try {
                 BSONObj k = obj;
-                theDataFileMgr.insert( name_.c_str(), k, false );
+                theDataFileMgr.insertWithObjMod( name_.c_str(), k, false );
             } catch ( DBException& ) {
                 // dup key - already in set
             }

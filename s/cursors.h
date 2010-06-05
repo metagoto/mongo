@@ -18,7 +18,7 @@
 
 #pragma once 
 
-#include "../stdafx.h"
+#include "../pch.h"
 
 #include "../db/jsobj.h"
 #include "../db/dbmessage.h"
@@ -54,18 +54,32 @@ namespace mongo {
 
         long long _id;
     };
+
+    typedef boost::shared_ptr<ShardedClientCursor> ShardedClientCursorPtr;
     
     class CursorCache {
     public:
+        
+        typedef map<long long,ShardedClientCursorPtr> MapSharded;
+        typedef map<long long,string> MapNormal;
+
         CursorCache();
         ~CursorCache();
         
-        ShardedClientCursor * get( long long id );
-        void store( ShardedClientCursor* cursor );
+        ShardedClientCursorPtr get( long long id );
+        void store( ShardedClientCursorPtr cursor );
         void remove( long long id );
 
+        void storeRef( const string& server , long long id );
+
+        void gotKillCursors(Message& m );
+        
+        void appendInfo( BSONObjBuilder& result );
+
     private:
-        map<long long,ShardedClientCursor*> _cursors;
+        mutex _mutex;
+        MapSharded _cursors;
+        MapNormal _refs;
     };
     
     extern CursorCache cursorCache;

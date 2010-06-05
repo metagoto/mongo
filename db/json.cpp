@@ -16,11 +16,27 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
+
+#define BOOST_SPIRIT_THREADSAFE
+#if BOOST_VERSION >= 103800
+#define BOOST_SPIRIT_USE_OLD_NAMESPACE
+#include <boost/spirit/include/classic_core.hpp>
+#include <boost/spirit/include/classic_loops.hpp>
+#include <boost/spirit/include/classic_lists.hpp>
+#else
+#include <boost/spirit/core.hpp>
+#include <boost/spirit/utility/loops.hpp>
+#include <boost/spirit/utility/lists.hpp>
+#endif
+#undef assert
+#define assert MONGO_assert
+
 #include "json.h"
-#include "../util/builder.h"
+#include "../bson/util/builder.h"
 #include "../util/base64.h"
 #include "../util/hex.h"
+
 
 using namespace boost::spirit;
 
@@ -426,20 +442,20 @@ public:
                 array = ch_p( '[' )[ arrayStart( self.b ) ] >> !elements >> ']';
                 elements = list_p(value, ch_p(',')[arrayNext( self.b )]);
                 value =
-                    oid[ oidEnd( self.b ) ] |
-                    dbref[ dbrefEnd( self.b ) ] |
-                    bindata[ binDataEnd( self.b ) ] |
-                    date[ dateEnd( self.b ) ] |
-                    regex[ regexEnd( self.b ) ] |
                     str[ stringEnd( self.b ) ] |
-                    singleQuoteStr[ stringEnd( self.b ) ] |
                     number |
                     integer |
-                    object[ subobjectEnd( self.b ) ] |
                     array[ arrayEnd( self.b ) ] |
                     lexeme_d[ str_p( "true" ) ][ trueValue( self.b ) ] |
                     lexeme_d[ str_p( "false" ) ][ falseValue( self.b ) ] |
-                    lexeme_d[ str_p( "null" ) ][ nullValue( self.b ) ];
+                    lexeme_d[ str_p( "null" ) ][ nullValue( self.b ) ] |
+                    singleQuoteStr[ stringEnd( self.b ) ] |
+                    date[ dateEnd( self.b ) ] |
+                    oid[ oidEnd( self.b ) ] |
+                    bindata[ binDataEnd( self.b ) ] |
+                    dbref[ dbrefEnd( self.b ) ] |
+                    regex[ regexEnd( self.b ) ] |
+                    object[ subobjectEnd( self.b ) ] ;
                 // NOTE lexeme_d and rules don't mix well, so we have this mess.
                 // NOTE We use range_p rather than cntrl_p, because the latter is locale dependent.
                 str = lexeme_d[ ch_p( '"' )[ chClear( self.b ) ] >>

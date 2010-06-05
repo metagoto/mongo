@@ -20,16 +20,17 @@
    to an open socket (or logical connection if pooling on sockets) from a client.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "db.h"
 #include "client.h"
 #include "curop.h"
 #include "json.h"
 #include "security.h"
+#include "commands.h"
 
 namespace mongo {
 
-    mongo::mutex Client::clientsMutex;
+    mongo::mutex Client::clientsMutex("clientsMutex");
     set<Client*> Client::clients; // always be in clientsMutex when manipulating this
     boost::thread_specific_ptr<Client> currentClient;
 
@@ -52,6 +53,38 @@ namespace mongo {
             cout << "ERROR: Client::~Client _context should be NULL: " << _desc << endl;
         if ( !_shutdown ) 
             cout << "ERROR: Client::shutdown not called: " << _desc << endl;
+    }
+    
+    void Client::dropTempCollectionsInDB( const string db ) {
+        list<string>::iterator i = _tempCollections.begin();
+        while ( i!=_tempCollections.end() ) {
+            string ns = *i;
+            dblock l;
+            Client::Context ctx( ns );
+            if ( nsdetails( ns.c_str() ) &&
+                 ns.compare( 0, db.length(), db ) == 0 ) {
+                try {
+                    string err;
+                    BSONObjBuilder b;
+                    dropCollection( ns, err, b );
+                    i = _tempCollections.erase(i);
+                    if ( i!=_tempCollections.end() )
+                        ++i;
+                }
+                catch ( ... ){
+                    log() << "error dropping temp collection: " << ns << endl;
+                }
+            } else {
+                ++i;
+            }
+        }
+    }
+
+    void Client::dropAllTempCollectionsInDB(const string db) {
+        for ( set<Client*>::iterator i = clients.begin(); i!=clients.end(); i++ ){
+            Client* cli = *i;
+            cli->dropTempCollectionsInDB(db);
+        }
     }
 
     bool Client::shutdown(){
@@ -162,14 +195,20 @@ namespace mongo {
         _client->_context = _oldContext; // note: _oldContext may be null
         
         stringstream ss;
-        ss << "unauthorized for db [" << _db->name << "] lock type: " << lockState << endl;
-        massert( 10057 , ss.str() , 0 );
+        ss << "unauthorized db:" << _db->name << " lock type:" << lockState << " client:" << _client->clientAddress() << endl;
+        uasserted( 10057 , ss.str() );
     }
 
     Client::Context::~Context() {
         DEV assert( _client == currentClient.get() );
         _client->_curOp->leave( this );
         _client->_context = _oldContext; // note: _oldContext may be null
+    }
+
+    string Client::clientAddress() const {
+        if( _curOp )
+            return _curOp->getRemoteString(false);
+        return "";
     }
 
     string Client::toString() const {
@@ -225,7 +264,7 @@ namespace mongo {
         }
         // b.append("inLock",  ??
         stringstream clientStr;
-        clientStr << inet_ntoa( _remote.sin_addr ) << ":" << ntohs( _remote.sin_port );
+        clientStr << _remote.toString();
         b.append("client", clientStr.str());
 
         if ( _client )
@@ -245,4 +284,51 @@ namespace mongo {
         return b.obj();
     }
 
+    void Client::gotHandshake( const BSONObj& o ){
+        BSONObjIterator i(o);
+
+        {
+            BSONElement id = i.next();
+            assert( id.type() );
+            _remoteId = id.wrap( "_id" );
+        }
+        
+        BSONObjBuilder b;
+        while ( i.more() )
+            b.append( i.next() );
+        _handshake = b.obj();
+    }
+
+    class HandshakeCmd : public Command {
+    public:
+        void help(stringstream& h) const { h << "internal"; }
+        HandshakeCmd() : Command( "handshake" ){}
+        virtual LockType locktype() const { return NONE; } 
+        virtual bool slaveOk() const { return true; }
+        virtual bool adminOnly() const { return false; }
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            Client& c = cc();
+            c.gotHandshake( cmdObj );
+            return 1;
+        }        
+
+    } handshakeCmd;
+
+
+    int Client::recommendedYieldMicros(){
+        int num = 0;
+        {
+            scoped_lock bl(clientsMutex);
+            num = clients.size();
+        }
+        
+        if ( --num <= 0 ) // -- is for myself
+            return 0;
+        
+        if ( num > 50 )
+            num = 50;
+
+        num *= 100;
+        return num;
+    }
 }

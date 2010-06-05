@@ -22,25 +22,27 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "client.h"
 #include "db.h"
 
 namespace mongo {
+
+    const BSONObj reverseNaturalObj = BSON( "$natural" << -1 );
 
     class Cursor;
     class CoveredIndexMatcher;
 
     class CursorIterator {
     public:
-        CursorIterator( auto_ptr<Cursor> c , BSONObj filter = BSONObj() );
+        CursorIterator( shared_ptr<Cursor> c , BSONObj filter = BSONObj() );
         BSONObj next();
         bool hasNext();
 
     private:
         void _advance();
 
-        auto_ptr<Cursor> _cursor;
+        shared_ptr<Cursor> _cursor;
         auto_ptr<CoveredIndexMatcher> _matcher;
         BSONObj _o;
     };
@@ -66,12 +68,15 @@ namespace mongo {
         /* fetch a single object from collection ns that matches query.
            set your db SavedContext first.
 
+           @param query - the query to perform.  note this is the low level portion of query so "orderby : ..." 
+                          won't work.
+
            @param requireIndex if true, complain if no index for the query.  a way to guard against
            writing a slow query.
 
            @return true if object found
         */
-        static bool findOne(const char *ns, BSONObj query, BSONObj& result, bool requireIndex = false);
+        static bool findOne(const char *ns, const BSONObj &query, BSONObj& result, bool requireIndex = false);
         
 
         /**
@@ -83,16 +88,23 @@ namespace mongo {
 
         static auto_ptr<CursorIterator> find( const char *ns , BSONObj query = BSONObj() , bool requireIndex = false );
 
-        /* Get/put the first object from a collection.  Generally only useful if the collection
-           only ever has a single object -- which is a "singleton collection".
+        /** Get/put the first (or last) object from a collection.  Generally only useful if the collection
+            only ever has a single object -- which is a "singleton collection".
 
-		   You do not need to set the database before calling.
-		   
-		   Returns: true if object exists.
+            You do not need to set the database (Context) before calling.
+
+            @return true if object exists.
         */
         static bool getSingleton(const char *ns, BSONObj& result);
         static void putSingleton(const char *ns, BSONObj obj);
+        static void putSingletonGod(const char *ns, BSONObj obj, bool logTheOp);
+        static bool getFirst(const char *ns, BSONObj& result) { return getSingleton(ns, result); }
+        static bool getLast(const char *ns, BSONObj& result); // get last object int he collection; e.g. {$natural : -1}
 
+        /** You do not need to set the database before calling.
+            @return true if collection is empty.
+        */
+        static bool isEmpty(const char *ns);
 
         /* Remove all objects from a collection.
         You do not need to set the database before calling.

@@ -17,10 +17,6 @@
 
 #pragma once
 
-#include <boost/thread/tss.hpp>
-#undef assert
-#define assert xassert
-
 namespace mongo {
     class BSONObjBuilder;
     class Message;
@@ -75,7 +71,10 @@ namespace mongo {
         LastError * _get( bool create = false ); // may return a disabled LastError
 
         void reset( LastError * le );
-        
+
+        /** ok to call more than once. */
+        void initThread();
+
         /**
          * id of 0 means should use thread local management
          */
@@ -87,8 +86,10 @@ namespace mongo {
         
         /** when db receives a message/request, call this */
         void startRequest( Message& m , LastError * connectionOwned );
-        void startRequest( Message& m );
+        LastError * startRequest( Message& m , int clientId = 0 );
         
+        void disconnect( int clientId );
+
         // used to disable lastError reporting while processing a killCursors message
         // disable causes get() to return 0.
         LastError *disableForCommand(); // only call once per command invocation!
@@ -107,7 +108,8 @@ namespace mongo {
     inline void raiseError(int code , const char *msg) {
         LastError *le = lastError.get();
         if ( le == 0 ) {
-            DEV log() << "warning: lastError==0 can't report:" << msg << '\n';
+            /* might be intentional (non-user thread) */
+            DEV log() << "warning dev: lastError==0 won't report:" << msg << endl;
         } else if ( le->disabled ) {
             log() << "lastError disabled, can't report: " << msg << endl;
         } else {

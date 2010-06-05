@@ -22,17 +22,20 @@
    mostly around shard management and checking
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include <map>
 #include <string>
 
 #include "../db/commands.h"
 #include "../db/jsobj.h"
 #include "../db/dbmessage.h"
+#include "../db/query.h"
 
 #include "../client/connpool.h"
 
 #include "../util/queue.h"
+
+#include "shard.h"
 
 using namespace std;
 
@@ -61,7 +64,7 @@ namespace mongo {
             return e._numberLong();
 
         
-        errmsg = "version is not a numberic type";
+        errmsg = "version is not a numeric type";
         return 0;
     }
 
@@ -69,19 +72,20 @@ namespace mongo {
     public:
         MongodShardCommand( const char * n ) : Command( n ){
         }
-        virtual bool slaveOk(){
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
     };
     
     class WriteBackCommand : public MongodShardCommand {
     public:
-        virtual LockType locktype(){ return NONE; } 
+        virtual LockType locktype() const { return NONE; } 
         WriteBackCommand() : MongodShardCommand( "writebacklisten" ){}
-        bool run(const char *cmdns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
+        void help(stringstream& h) const { h<<"internal"; }
+        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
 
             BSONElement e = cmdObj.firstElement();
             if ( e.type() != jstOID ){
@@ -113,9 +117,9 @@ namespace mongo {
             help << " example: { setShardVersion : 'alleyinsider.foo' , version : 1 , configdb : '' } ";
         }
         
-        virtual LockType locktype(){ return WRITE; } // TODO: figure out how to make this not need to lock
+        virtual LockType locktype() const { return WRITE; } // TODO: figure out how to make this not need to lock
  
-        bool run(const char *cmdns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
+        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
             
             bool authoritative = cmdObj.getBoolField( "authoritative" );
 
@@ -248,9 +252,9 @@ namespace mongo {
             help << " example: { getShardVersion : 'alleyinsider.foo'  } ";
         }
         
-        virtual LockType locktype(){ return WRITE; } // TODO: figure out how to make this not need to lock
+        virtual LockType locktype() const { return WRITE; } // TODO: figure out how to make this not need to lock
 
-        bool run(const char *cmdns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
+        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
             string ns = cmdObj["getShardVersion"].valuestrsafe();
             if ( ns.size() == 0 ){
                 errmsg = "need to speciy fully namespace";
@@ -277,9 +281,9 @@ namespace mongo {
             help << "should not be calling this directly" << endl;
         }
 
-        virtual LockType locktype(){ return WRITE; } 
+        virtual LockType locktype() const { return WRITE; } 
         
-        bool run(const char *cmdns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
+        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
             // so i have to start clone, tell caller its ok to make change
             // at this point the caller locks me, and updates config db
             // then finish calls finish, and then deletes data when cursors are done
@@ -348,9 +352,9 @@ namespace mongo {
             help << "should not be calling this directly" << endl;
         }
 
-        virtual LockType locktype(){ return WRITE; } 
+        virtual LockType locktype() const { return WRITE; } 
         
-        bool run(const char *cmdns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
+        bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
             // see MoveShardStartCommand::run
             
             string ns = cmdObj["movechunk.finish"].valuestrsafe();
@@ -415,11 +419,13 @@ namespace mongo {
             // wait until cursors are clean
             cout << "WARNING: deleting data before ensuring no more cursors TODO" << endl;
             
-            dbtemprelease unlock;
-
-            DBDirectClient client;
-            BSONObj removeFilter = finishToken.getObjectField( "query" );
-            client.remove( ns , removeFilter );
+            {
+                BSONObj removeFilter = finishToken.getObjectField( "query" );
+                Client::Context ctx(ns);
+                long long num = deleteObjects( ns.c_str() , removeFilter , false , true );
+                log() << "movechunk.finish deleted: " << num << endl;
+                result.appendNumber( "numDeleted" , num );
+            }
 
             return true;
         }
@@ -493,12 +499,15 @@ namespace mongo {
             return false;
         }
 
-        int op = m.data->operation();
-        if ( op < 2000 || op >= 3000 )
+        int op = m.operation();
+        if ( op < 2000 
+             || op >= 3000 
+             || op == dbGetMore  // cursors are weird
+             )
             return false;
 
         
-        const char *ns = m.data->_data + 4;
+        const char *ns = m.singleData()->_data + 4;
         string errmsg;
         if ( shardVersionOk( ns , errmsg ) ){
             return false;
@@ -527,7 +536,7 @@ namespace mongo {
             resp->setData( qr , true );
             
             dbresponse.response = resp;
-            dbresponse.responseTo = m.data->id;
+            dbresponse.responseTo = m.header()->id;
             return true;
         }
         
@@ -539,8 +548,8 @@ namespace mongo {
         BSONObjBuilder b;
         b.appendBool( "writeBack" , true );
         b.append( "ns" , ns );
-        b.appendBinData( "msg" , m.data->len , bdtCustom , (char*)(m.data) );
-        log() << "writing back msg with len: " << m.data->len << " op: " << m.data->_operation << endl;
+        b.appendBinData( "msg" , m.header()->len , bdtCustom , (char*)(m.singleData()) );
+        log() << "writing back msg with len: " << m.header()->len << " op: " << m.operation() << endl;
         clientQueues[clientID->str()]->push( b.obj() );
 
         return true;

@@ -15,7 +15,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "db.h"
 #include "instance.h"
 #include "commands.h"
@@ -23,6 +23,9 @@
 #include "../client/dbclient.h"
 #include "../client/connpool.h"
 #include "../client/parallel.h"
+#include "queryoptimizer.h"
+#include "matcher.h"
+#include "clientcursor.h"
 
 namespace mongo {
 
@@ -152,10 +155,10 @@ namespace mongo {
                 }
              
                 { // code
-                    mapCode = cmdObj["map"].ascode();
-                    reduceCode = cmdObj["reduce"].ascode();
+                    mapCode = cmdObj["map"]._asCode();
+                    reduceCode = cmdObj["reduce"]._asCode();
                     if ( cmdObj["finalize"].type() ){
-                        finalizeCode = cmdObj["finalize"].ascode();
+                        finalizeCode = cmdObj["finalize"]._asCode();
                     }
                     checkCodeWScope( "map" , cmdObj );
                     checkCodeWScope( "reduce" , cmdObj );
@@ -287,7 +290,7 @@ namespace mongo {
                 if ( setup.replicate )
                     theDataFileMgr.insertAndLog( setup.tempLong.c_str() , res , false );
                 else
-                    theDataFileMgr.insert( setup.tempLong.c_str() , res , false );
+                    theDataFileMgr.insertWithObjMod( setup.tempLong.c_str() , res , false );
             }
 
             
@@ -327,6 +330,7 @@ namespace mongo {
                     if ( all.size() == 1 ){
                         // this key has low cardinality, so just write to db
                         writelock l(_state.setup.incLong);
+                        Client::Context ctx(_state.setup.incLong.c_str());
                         write( *(all.begin()) );
                     }
                     else if ( all.size() > 1 ){
@@ -379,7 +383,7 @@ namespace mongo {
 
         private:
             void write( BSONObj& o ){
-                theDataFileMgr.insert( _state.setup.incLong.c_str() , o , true );
+                theDataFileMgr.insertWithObjMod( _state.setup.incLong.c_str() , o , true );
             }
             
             MRState& _state;
@@ -403,20 +407,22 @@ namespace mongo {
 
         class MapReduceCommand : public Command {
         public:
-            MapReduceCommand() : Command("mapreduce"){}
-            virtual bool slaveOk() { return true; }
+            MapReduceCommand() : Command("mapReduce", false, "mapreduce"){}
+            virtual bool slaveOk() const { return true; }
         
             virtual void help( stringstream &help ) const {
-                help << "see http://www.mongodb.org/display/DOCS/MapReduce";
+                help << "Run a map/reduce operation on the server.\n";
+                help << "Note this is used for aggregation, not querying, in MongoDB.\n";
+                help << "http://www.mongodb.org/display/DOCS/MapReduce";
             }
-            virtual LockType locktype(){ return WRITE; } // TODO, READ?
-            bool run(const char *dbname, BSONObj& cmd, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+            virtual LockType locktype() const { return NONE; } 
+            bool run(const string& dbname , BSONObj& cmd, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
                 Timer t;
                 Client::GodScope cg;
                 Client& client = cc();
                 CurOp * op = client.curop();
 
-                MRSetup mr( client.database()->name , cmd );
+                MRSetup mr( dbname , cmd );
 
                 log(1) << "mr ns: " << mr.ns << endl;
                 
@@ -440,36 +446,58 @@ namespace mongo {
                     MRTL * mrtl = new MRTL( state );
                     _tlmr.reset( mrtl );
 
-                    ProgressMeter & pm = op->setMessage( "m/r: (1/3) emit phase" , db.count( mr.ns , mr.filter ) );
-                    auto_ptr<DBClientCursor> cursor = db.query( mr.ns , mr.q );
+                    ProgressMeterHolder pm( op->setMessage( "m/r: (1/3) emit phase" , db.count( mr.ns , mr.filter ) ) );
                     long long mapTime = 0;
-                    Timer mt;
-                    while ( cursor->more() ){
-                        BSONObj o = cursor->next(); 
-                    
-                        if ( mr.verbose ) mt.reset();
+                    {
+                        readlock lock( mr.ns );
+                        Client::Context ctx( mr.ns );
                         
-                        state.scope->setThis( &o );
-                        if ( state.scope->invoke( state.map , state.setup.mapparams , 0 , true ) )
-                            throw UserException( 9014, (string)"map invoke failed: " + state.scope->getError() );
-                        
-                        if ( mr.verbose ) mapTime += mt.micros();
-                        
-                        num++;
-                        if ( num % 100 == 0 ){
-                            Timer t;
-                            mrtl->checkSize();
-                            inReduce += t.micros();
-                            killCurrentOp.checkForInterrupt();
-                            dbtemprelease temprlease;
-                        }
-                        pm.hit();
+                        shared_ptr<Cursor> temp = bestGuessCursor( mr.ns.c_str(), mr.filter, BSONObj() );
+                        auto_ptr<ClientCursor> cursor( new ClientCursor( QueryOption_NoCursorTimeout , temp , mr.ns.c_str() ) );
 
-                        if ( mr.limit && num >= mr.limit )
-                            break;
+                        Timer mt;
+                        while ( cursor->ok() ){
+                            
+                            if ( ! cursor->currentMatches() ){
+                                cursor->advance();
+                                continue;
+                            }
+                            
+                            BSONObj o = cursor->current(); 
+                            cursor->advance();
+                            
+                            if ( mr.verbose ) mt.reset();
+                            
+                            state.scope->setThis( &o );
+                            if ( state.scope->invoke( state.map , state.setup.mapparams , 0 , true ) )
+                                throw UserException( 9014, (string)"map invoke failed: " + state.scope->getError() );
+                            
+                            if ( mr.verbose ) mapTime += mt.micros();
+                            
+                            num++;
+                            if ( num % 100 == 0 ){
+                                ClientCursor::YieldLock yield (cursor.get());
+                                Timer t;
+                                mrtl->checkSize();
+                                inReduce += t.micros();
+                                
+                                if ( ! yield.stillOk() ){
+                                    cursor.release();
+                                    break;
+                                }
+
+                                killCurrentOp.checkForInterrupt();
+                            }
+                            pm.hit();
+                            
+                            if ( mr.limit && num >= mr.limit )
+                                break;
+                        }
                     }
                     pm.finished();
                     
+                    killCurrentOp.checkForInterrupt();
+
                     countsBuilder.appendNumber( "input" , num );
                     countsBuilder.appendNumber( "emit" , mrtl->numEmits );
                     if ( mrtl->numEmits )
@@ -486,36 +514,67 @@ namespace mongo {
                     BSONObj sortKey = BSON( "0" << 1 );
                     db.ensureIndex( mr.incLong , sortKey );
                     
-                    BSONObj prev;
-                    BSONList all;
-                    
-                    assert( userCreateNS( mr.tempLong.c_str() , BSONObj() , errmsg , mr.replicate ) );
-
-                    pm = op->setMessage( "m/r: (3/3) final reduce to collection" , db.count( mr.incLong ) );
-                    cursor = db.query( mr.incLong, Query().sort( sortKey ) );
-
-                    while ( cursor->more() ){
-                        BSONObj o = cursor->next().getOwned();
-                        pm.hit();
-
-                        if ( o.woSortOrder( prev , sortKey ) == 0 ){
-                            all.push_back( o );
-                            if ( pm.hits() % 1000 == 0 ){
-                                dbtemprelease tl;
-                            }
-                            continue;
-                        }
-                        
-                        state.finalReduce( all );
-                        
-                        all.clear();
-                        prev = o;
-                        all.push_back( o );
-                        killCurrentOp.checkForInterrupt();
-                        dbtemprelease tl;
+                    {
+                        writelock lock( mr.tempLong.c_str() );
+                        Client::Context ctx( mr.tempLong.c_str() );
+                        assert( userCreateNS( mr.tempLong.c_str() , BSONObj() , errmsg , mr.replicate ) );
                     }
-                    state.finalReduce( all );
-                    pm.finished();
+
+
+                    {
+                        readlock rl(mr.incLong.c_str());
+                        Client::Context ctx( mr.incLong );
+                        
+                        BSONObj prev;
+                        BSONList all;
+                        
+                        assert( pm == op->setMessage( "m/r: (3/3) final reduce to collection" , db.count( mr.incLong ) ) );
+
+                        shared_ptr<Cursor> temp = bestGuessCursor( mr.incLong.c_str() , BSONObj() , sortKey );
+                        auto_ptr<ClientCursor> cursor( new ClientCursor( QueryOption_NoCursorTimeout , temp , mr.incLong.c_str() ) );
+                        
+                        while ( cursor->ok() ){
+                            BSONObj o = cursor->current().getOwned();
+                            cursor->advance();
+                            
+                            pm.hit();
+                            
+                            if ( o.woSortOrder( prev , sortKey ) == 0 ){
+                                all.push_back( o );
+                                if ( pm->hits() % 1000 == 0 ){
+                                    if ( ! cursor->yield() ){
+                                        cursor.release();
+                                        break;
+                                    } 
+                                    killCurrentOp.checkForInterrupt();
+                                }
+                                continue;
+                            }
+                        
+                            ClientCursor::YieldLock yield (cursor.get());
+                                
+                            state.finalReduce( all );
+                            
+                            all.clear();
+                            prev = o;
+                            all.push_back( o );
+
+                            if ( ! yield.stillOk() ){
+                                cursor.release();
+                                break;
+                            }
+                            
+                            killCurrentOp.checkForInterrupt();
+                        }
+
+                        {
+                            dbtemprelease tl;
+                            state.finalReduce( all );
+                        }
+
+                        pm.finished();
+                    }
+
                     _tlmr.reset( 0 );
                 }
                 catch ( ... ){
@@ -525,9 +584,13 @@ namespace mongo {
                     throw;
                 }
                 
-                db.dropCollection( mr.incLong );
+                long long finalCount = 0;
+                {
+                    dblock lock;
+                    db.dropCollection( mr.incLong );
                 
-                long long finalCount = mr.renameIfNeeded( db );
+                    finalCount = mr.renameIfNeeded( db );
+                }
 
                 timingBuilder.append( "total" , t.millis() );
                 
@@ -554,13 +617,10 @@ namespace mongo {
         class MapReduceFinishCommand : public Command {
         public:
             MapReduceFinishCommand() : Command( "mapreduce.shardedfinish" ){}
-            virtual bool slaveOk() { return true; }
+            virtual bool slaveOk() const { return true; }
             
-            virtual LockType locktype(){ return WRITE; } 
-            bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
-                string dbname = cc().database()->name; // this has to come before dbtemprelease
-                dbtemprelease temprelease; // we don't touch the db directly
-
+            virtual LockType locktype() const { return NONE; } 
+            bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
                 string shardedOutputCollection = cmdObj["shardedOutputCollection"].valuestrsafe();
 
                 MRSetup mr( dbname , cmdObj.firstElement().embeddedObjectUserCheck() , false );
@@ -597,7 +657,7 @@ namespace mongo {
                                                     Query().sort( sortKey ) );
                 
                 
-                auto_ptr<Scope> s = globalScriptEngine->getPooledScope( ns );
+                auto_ptr<Scope> s = globalScriptEngine->getPooledScope( dbname );
                 ScriptingFunction reduceFunction = s->createFunction( mr.reduceCode.c_str() );
                 ScriptingFunction finalizeFunction = 0;
                 if ( mr.finalizeCode.size() )
@@ -637,6 +697,7 @@ namespace mongo {
                 for ( set<ServerAndQuery>::iterator i=servers.begin(); i!=servers.end(); i++ ){
                     ScopedDbConnection conn( i->_server );
                     conn->dropCollection( dbname + "." + shardedOutputCollection );
+                    conn.done();
                 }
                 
                 result.append( "shardCounts" , shardCounts.obj() );

@@ -42,15 +42,15 @@ namespace mongo {
          */
         BSONObj globalMax() const { return gMax; }
 
-        bool isGlobalMin( const BSONObj& k ){
+        bool isGlobalMin( const BSONObj& k ) const{
             return k.woCompare( globalMin() ) == 0;
         }
 
-        bool isGlobalMax( const BSONObj& k ){
+        bool isGlobalMax( const BSONObj& k ) const{
             return k.woCompare( globalMax() ) == 0;
         }
         
-        bool isGlobal( const BSONObj& k ){
+        bool isGlobal( const BSONObj& k ) const{
             return isGlobalMin( k ) || isGlobalMax( k );
         }
 
@@ -59,30 +59,20 @@ namespace mongo {
            l == r 0
            l > r positive
          */
-        int compare( const BSONObj& l , const BSONObj& r );
+        int compare( const BSONObj& l , const BSONObj& r ) const;
         
         /**
            @return whether or not obj has all fields in this shard key pattern
 		   e.g. 
 		     ShardKey({num:1}).hasShardKey({ name:"joe", num:3 }) is true
          */
-        bool hasShardKey( const BSONObj& obj );
+        bool hasShardKey( const BSONObj& obj ) const;
         
         /**
            returns a query that filters results only for the range desired, i.e. returns 
              { "field" : { $gte: keyval(min), $lt: keyval(max) } }
         */
-        void getFilter( BSONObjBuilder& b , const BSONObj& min, const BSONObj& max );
-        
-        /** @return true if shard s is relevant for query q.
-
-            Example:
-              q:     { x : 3 }
-              *this: { x : 1 }
-              s:     x:2..x:7
-               -> true
-         */
-        bool relevantForQuery( const BSONObj& q , Chunk * s );
+        void getFilter( BSONObjBuilder& b , const BSONObj& min, const BSONObj& max ) const;
         
         /**
            Returns if the given sort pattern can be ordered by the shard key pattern.
@@ -96,9 +86,9 @@ namespace mongo {
               < 0 if sort is descending
               > 1 if sort is ascending
          */
-        int canOrder( const BSONObj& sort );
+        int canOrder( const BSONObj& sort ) const;
 
-        BSONObj key() { return pattern; }
+        BSONObj key() const { return pattern; }
 
         string toString() const;
 
@@ -107,7 +97,9 @@ namespace mongo {
         bool partOfShardKey(const string& key ) const {
             return patternfields.count( key ) > 0;
         }
-
+        
+        bool uniqueAllowd( const BSONObj& otherPattern ) const;
+        
         operator string() const {
             return pattern.toString();
         }
@@ -116,9 +108,8 @@ namespace mongo {
         BSONObj gMin;
         BSONObj gMax;
 
-        /* question: better to have patternfields precomputed or not?  depends on if we use copy contructor often. */
+        /* question: better to have patternfields precomputed or not?  depends on if we use copy constructor often. */
         set<string> patternfields;
-        bool relevant(const BSONObj& query, const BSONObj& L, const BSONObj& R);
     };
 
     inline BSONObj ShardKeyPattern::extractKey(const BSONObj& from) const { 

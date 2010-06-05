@@ -17,8 +17,8 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
-#include "../db/replset.h"
+#include "pch.h"
+#include "../db/replpair.h"
 #include "dbtests.h"
 #include "mockdbclient.h"
 #include "../db/cmdline.h"

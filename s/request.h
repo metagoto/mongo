@@ -18,14 +18,16 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../util/message.h"
 #include "../db/dbmessage.h"
 #include "config.h"
 #include "util.h"
 
 namespace mongo {
+
     
+    class OpCounters;
     class ClientInfo;
     
     class Request : boost::noncopyable {
@@ -35,58 +37,55 @@ namespace mongo {
         // ---- message info -----
 
 
-        const char * getns(){
+        const char * getns() const {
             return _d.getns();
         }
-        int op(){
-            return _m.data->operation();
+        int op() const {
+            return _m.operation();
         }
-        bool expectResponse(){
+        bool expectResponse() const {
             return op() == dbQuery || op() == dbGetMore;
         }
-        
-        MSGID id(){
+        bool isCommand() const;
+
+        MSGID id() const {
             return _id;
         }
 
-        DBConfig * getConfig(){
+        DBConfigPtr getConfig() const {
             return _config;
         }
-        bool isShardingEnabled(){
+        bool isShardingEnabled() const {
             return _config->isShardingEnabled();
         }
         
-        ChunkManager * getChunkManager(){
+        ChunkManagerPtr getChunkManager() const {
             return _chunkManager;
         }
         
-        int getClientId(){
+        int getClientId() const {
             return _clientId;
         }
-        ClientInfo * getClientInfo(){
+        ClientInfo * getClientInfo() const {
             return _clientInfo;
         }
 
         // ---- remote location info -----
-
         
-        string singleServerName();
         
-        const char * primaryName(){
-            return _config->getPrimary().c_str();
-        }
-
+        Shard primaryShard() const ;
+        
         // ---- low level access ----
 
-        void reply( Message & response ){
-            _p->reply( _m , response , _id );
-        }
+        void reply( Message & response , const string& fromServer );
         
-        Message& m(){ return _m; }
-        DbMessage& d(){ return _d; }
-        AbstractMessagingPort* p(){ return _p; }
+        Message& m() { return _m; }
+        DbMessage& d() { return _d; }
+        AbstractMessagingPort* p() const { return _p; }
 
         void process( int attempt = 0 );
+
+        void gotInsert();
         
     private:
         
@@ -97,11 +96,13 @@ namespace mongo {
         AbstractMessagingPort* _p;
         
         MSGID _id;
-        DBConfig * _config;
-        ChunkManager * _chunkManager;
+        DBConfigPtr _config;
+        ChunkManagerPtr _chunkManager;
         
         int _clientId;
         ClientInfo * _clientInfo;
+
+        OpCounters* _counter;
     };
 
     typedef map<int,ClientInfo*> ClientCache;
@@ -111,24 +112,36 @@ namespace mongo {
         ClientInfo( int clientId );
         ~ClientInfo();
         
+        string getRemote() const { return _remote; }
+
         void addShard( const string& shard );
         set<string> * getPrev() const { return _prev; };
         
-        void newRequest();
+        void newRequest( AbstractMessagingPort* p = 0 );
         void disconnect();
-
-        static ClientInfo * get( int clientId = 0 , bool create = true );
         
+        static ClientInfo * get( int clientId = 0 , bool create = true );
+        static void disconnect( int clientId );
+        
+        const set<string>& sinceLastGetError() const { return _sinceLastGetError; }
+        void clearSinceLastGetError(){ 
+            _sinceLastGetError.clear(); 
+        }
+
     private:
         int _id;
+        string _remote;
+
         set<string> _a;
         set<string> _b;
         set<string> * _cur;
         set<string> * _prev;
         int _lastAccess;
         
+        set<string> _sinceLastGetError;
+
         static mongo::mutex _clientsLock;
-        static ClientCache _clients;
+        static ClientCache& _clients;
         static boost::thread_specific_ptr<ClientInfo> _tlInfo;
     };
 }

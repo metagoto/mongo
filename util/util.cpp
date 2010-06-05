@@ -1,4 +1,4 @@
-// util.cpp
+// @file util.cpp
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -15,13 +15,44 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "goodies.h"
 #include "unittest.h"
 #include "file_allocator.h"
 #include "optime.h"
 
 namespace mongo {
+
+#if defined(_WIN32)
+#define MS_VC_EXCEPTION 0x406D1388
+#pragma pack(push,8)
+typedef struct tagTHREADNAME_INFO
+{
+   DWORD dwType; // Must be 0x1000.
+   LPCSTR szName; // Pointer to name (in user addr space).
+   DWORD dwThreadID; // Thread ID (-1=caller thread).
+   DWORD dwFlags; // Reserved for future use, must be zero.
+} THREADNAME_INFO;
+#pragma pack(pop)
+void setThreadName(const char *name)
+{
+   Sleep(10);
+   THREADNAME_INFO info;
+   info.dwType = 0x1000;
+   info.szName = name;
+   info.dwThreadID = -1;
+   info.dwFlags = 0;
+   __try
+   {
+      RaiseException( MS_VC_EXCEPTION, 0, sizeof(info)/sizeof(ULONG_PTR), (ULONG_PTR*)&info );
+   }
+   __except(EXCEPTION_EXECUTE_HANDLER)
+   {
+   }
+}
+#else
+    void setThreadName(const char *) { }
+#endif
 
     vector<UnitTest*> *UnitTest::tests = 0;
     bool UnitTest::running = false;
@@ -34,7 +65,8 @@ namespace mongo {
     const char * (*getcurns)() = default_getcurns;
 
     int logLevel = 0;
-    mongo::mutex Logstream::mutex;
+    int tlogLevel = 0;
+    mongo::mutex Logstream::mutex("Logstream");
     int Logstream::doneSetup = Logstream::magicNumber();
     
     bool goingAway = false;
@@ -117,20 +149,6 @@ namespace mongo {
         write( STDOUT_FILENO, s.c_str(), s.length() );
         fsync( STDOUT_FILENO );        
 #endif
-    }
-
-#ifndef _SCONS
-    // only works in scons
-    const char * gitVersion(){ return ""; }
-    const char * sysInfo(){ return ""; }
-#endif
-
-    void printGitVersion() { log() << "git version: " << gitVersion() << endl; }
-    void printSysInfo() { log() << "sys info: " << sysInfo() << endl; }
-    string mongodVersion() {
-        stringstream ss;
-        ss << "db version v" << versionString << ", pdfile version " << VERSION << "." << VERSION_MINOR;
-        return ss.str();
     }
 
     ostream& operator<<( ostream &s, const ThreadSafeString &o ){

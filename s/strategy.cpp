@@ -16,7 +16,7 @@
 
 // stragegy.cpp
 
-#include "stdafx.h"
+#include "pch.h"
 #include "request.h"
 #include "../util/background.h"
 #include "../client/connpool.h"
@@ -27,10 +27,10 @@ namespace mongo {
 
     // ----- Strategy ------
 
-    void Strategy::doWrite( int op , Request& r , string server ){
-        ScopedDbConnection dbcon( server );
+    void Strategy::doWrite( int op , Request& r , const Shard& shard ){
+        ShardConnection dbcon( shard , r.getns() );
         DBClientBase &_c = dbcon.conn();
-        
+
         /* TODO FIX - do not case and call DBClientBase::say() */
         DBClientConnection&c = dynamic_cast<DBClientConnection&>(_c);
         c.port().say( r.m() );
@@ -38,18 +38,16 @@ namespace mongo {
         dbcon.done();
     }
 
-    void Strategy::doQuery( Request& r , string server ){
+    void Strategy::doQuery( Request& r , const Shard& shard ){
         try{
-            ScopedDbConnection dbcon( server );
+            ShardConnection dbcon( shard , r.getns() );
             DBClientBase &c = dbcon.conn();
-            
-            checkShardVersion( c , r.getns() );
             
             Message response;
             bool ok = c.call( r.m(), response);
 
             {
-                QueryResult *qr = (QueryResult *) response.data;
+                QueryResult *qr = (QueryResult *) response.singleData();
                 if ( qr->resultFlags() & QueryResult::ResultFlag_ShardConfigStale ){
                     dbcon.done();
                     throw StaleConfigException( r.getns() , "Strategy::doQuery" );
@@ -57,29 +55,29 @@ namespace mongo {
             }
 
             uassert( 10200 , "mongos: error calling db", ok);
-            r.reply( response );
+            r.reply( response , c.getServerAddress() );
             dbcon.done();
         }
         catch ( AssertionException& e ) {
             BSONObjBuilder err;
             err.append("$err", string("mongos: ") + (e.msg.empty() ? "assertion during query" : e.msg));
+            err.append("code",e.getCode());
             BSONObj errObj = err.done();
             replyToQuery(QueryResult::ResultFlag_ErrSet, r.p() , r.m() , errObj);
         }
     }
     
-    void Strategy::insert( string server , const char * ns , const BSONObj& obj ){
-        ScopedDbConnection dbcon( server );
-        checkShardVersion( dbcon.conn() , ns );
+    void Strategy::insert( const Shard& shard , const char * ns , const BSONObj& obj ){
+        ShardConnection dbcon( shard , ns );
         dbcon->insert( ns , obj );
         dbcon.done();
     }
 
-    map<DBClientBase*,unsigned long long> checkShardVersionLastSequence;
+    map< pair<DBClientBase*,string> ,unsigned long long> checkShardVersionLastSequence;
 
     class WriteBackListener : public BackgroundJob {
     protected:
-        
+        string name() { return "WriteBackListener"; }
         WriteBackListener( const string& addr ) : _addr( addr ){
             cout << "creating WriteBackListener for: " << addr << endl;
         }
@@ -112,7 +110,7 @@ namespace mongo {
                         int len;
 
                         Message m( (void*)data["msg"].binData( len ) , false );
-                        massert( 10427 ,  "invalid writeback message" , m.data->valid() );                        
+                        massert( 10427 ,  "invalid writeback message" , m.header()->valid() );                        
 
                         grid.getDBConfig( ns )->getChunkManager( ns , true );
                         
@@ -141,10 +139,13 @@ namespace mongo {
         
     private:
         string _addr;
-        static map<string,WriteBackListener*> _cache;
 
+        static map<string,WriteBackListener*> _cache;
+        static mongo::mutex _lock;
+        
     public:
         static void init( DBClientBase& conn ){
+            scoped_lock lk( _lock );
             WriteBackListener*& l = _cache[conn.getServerAddress()];
             if ( l )
                 return;
@@ -155,37 +156,46 @@ namespace mongo {
     };
 
     map<string,WriteBackListener*> WriteBackListener::_cache;
-    
+    mongo::mutex WriteBackListener::_lock("WriteBackListener");
 
     void checkShardVersion( DBClientBase& conn , const string& ns , bool authoritative ){
         // TODO: cache, optimize, etc...
         
         WriteBackListener::init( conn );
 
-        DBConfig * conf = grid.getDBConfig( ns );
+        DBConfigPtr conf = grid.getDBConfig( ns );
         if ( ! conf )
             return;
         
         ShardChunkVersion version = 0;
         unsigned long long officialSequenceNumber = 0;
 
-        if ( conf->isSharded( ns ) ){
-            ChunkManager * manager = conf->getChunkManager( ns , authoritative );
+        ChunkManagerPtr manager;
+        const bool isSharded = conf->isSharded( ns );
+        if ( isSharded ){
+            manager = conf->getChunkManager( ns , authoritative );
             officialSequenceNumber = manager->getSequenceNumber();
-            version = manager->getVersion( conn.getServerAddress() );
         }
 
-        unsigned long long & sequenceNumber = checkShardVersionLastSequence[ &conn ];        
-        if ( officialSequenceNumber == sequenceNumber )
+        unsigned long long & sequenceNumber = checkShardVersionLastSequence[ make_pair(&conn,ns) ];        
+        if ( sequenceNumber == officialSequenceNumber )
             return;
-        
-        log(2) << " have to set shard version for conn: " << &conn << " ns:" << ns << " my last seq: " << sequenceNumber << "  current: " << officialSequenceNumber << endl;
 
+        if ( isSharded ){
+            version = manager->getVersion( Shard::make( conn.getServerAddress() ) );
+        }
+        
+        log(2) << " have to set shard version for conn: " << &conn << " ns:" << ns 
+               << " my last seq: " << sequenceNumber << "  current: " << officialSequenceNumber 
+               << " version: " << version << " manager: " << manager.get()
+               << endl;
+        
         BSONObj result;
         if ( setShardVersion( conn , ns , version , authoritative , result ) ){
             // success!
             log(1) << "      setShardVersion success!" << endl;
             sequenceNumber = officialSequenceNumber;
+            dassert( sequenceNumber == checkShardVersionLastSequence[ make_pair(&conn,ns) ] );
             return;
         }
 
@@ -199,8 +209,8 @@ namespace mongo {
             return;
         }
         
-        log(1) << "     setShardVersion failed: " << result << endl;
-        massert( 10429 ,  "setShardVersion failed!" , 0 );
+        log() << "     setShardVersion failed: " << result << endl;
+        massert( 10429 , (string)"setShardVersion failed! " + result.jsonString() , 0 );
     }
     
     bool setShardVersion( DBClientBase & conn , const string& ns , ShardChunkVersion version , bool authoritative , BSONObj& result ){
@@ -219,8 +229,8 @@ namespace mongo {
         return conn.runCommand( "admin" , cmd , result );
     }
 
-    bool lockNamespaceOnServer( const string& server , const string& ns ){
-        ScopedDbConnection conn( server );
+    bool lockNamespaceOnServer( const Shard& shard, const string& ns ){
+        ScopedDbConnection conn( shard.getConnString() );
         bool res = lockNamespaceOnServer( conn.conn() , ns );
         conn.done();
         return res;

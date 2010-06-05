@@ -80,22 +80,35 @@ namespace mongo {
     class DbMessage {
     public:
         DbMessage(const Message& _m) : m(_m) {
-            theEnd = _m.data->_data + _m.data->dataLen();
-            int *r = (int *) _m.data->_data;
+            // for received messages, Message has only one buffer
+            theEnd = _m.singleData()->_data + _m.header()->dataLen();
+            int *r = (int *) _m.singleData()->_data;
             reserved = *r;
             r++;
             data = (const char *) r;
             nextjsobj = data;
         }
 
-        const char * getns() {
+        const char * getns() const {
             return data;
         }
-        void getns(Namespace& ns) {
+        void getns(Namespace& ns) const {
             ns = data;
         }
+
+        const char * afterNS() const {
+            return data + strlen( data ) + 1;
+        }
         
-        
+        int getInt( int num ) const {
+            const int * foo = (const int*)afterNS();
+            return foo[num];
+        }
+
+        int getQueryNToReturn() const {
+            return getInt( 1 );
+        }
+
         void resetPull(){
             nextjsobj = data;
         }
@@ -117,7 +130,7 @@ namespace mongo {
             return i;
         }
 
-        OID* getOID() {
+        OID* getOID() const {
             return (OID *) (data + strlen(data) + 1); // skip namespace
         }
 
@@ -129,7 +142,7 @@ namespace mongo {
         }
 
         /* for insert and update msgs */
-        bool moreJSObjs() {
+        bool moreJSObjs() const {
             return nextjsobj != 0;
         }
         BSONObj nextJsObj() {
@@ -137,13 +150,13 @@ namespace mongo {
                 nextjsobj += strlen(data) + 1; // skip namespace
                 massert( 13066 ,  "Message contains no documents", theEnd > nextjsobj );
             }
-            massert( 10304 ,  "Remaining data too small for BSON object", theEnd - nextjsobj > 3 );
+            massert( 10304 ,  "Client Error: Remaining data too small for BSON object", theEnd - nextjsobj > 3 );
             BSONObj js(nextjsobj);
-            massert( 10305 ,  "Invalid object size", js.objsize() > 3 );
-            massert( 10306 ,  "Next object larger than available space",
+            massert( 10305 ,  "Client Error: Invalid object size", js.objsize() > 3 );
+            massert( 10306 ,  "Client Error: Next object larger than space left in message",
                     js.objsize() < ( theEnd - data ) );
             if ( objcheck && !js.valid() ) {
-                massert( 10307 , "bad object in message", false);
+                massert( 10307 , "Client Error: bad object in message", false);
             }            
             nextjsobj += js.objsize();
             if ( nextjsobj >= theEnd )
@@ -151,7 +164,7 @@ namespace mongo {
             return js;
         }
 
-        const Message& msg() {
+        const Message& msg() const {
             return m;
         }
 
@@ -193,7 +206,7 @@ namespace mongo {
             if ( d.moreJSObjs() ) {
                 fields = d.nextJsObj();
             }
-            queryOptions = d.msg().data->dataAsInt();
+            queryOptions = d.msg().header()->dataAsInt();
         }
     };
 
@@ -221,7 +234,7 @@ namespace mongo {
         qr->nReturned = nReturned;
         b.decouple();
         Message resp(qr, true);
-        p->reply(requestMsg, resp, requestMsg.data->id);
+        p->reply(requestMsg, resp, requestMsg.header()->id);
     }
 
 } // namespace mongo
@@ -258,7 +271,7 @@ namespace mongo {
         Message *resp = new Message();
         resp->setData(msgdata, true); // transport will free
         dbresponse.response = resp;
-        dbresponse.responseTo = m.data->id;
+        dbresponse.responseTo = m.header()->id;
     }
 
 } // namespace mongo

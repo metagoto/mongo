@@ -16,7 +16,7 @@
 
 // client.cpp
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../client/dbclient.h"
 #include "dbtests.h"
 #include "../db/concurrency.h"
@@ -153,7 +153,7 @@ namespace ClientTests {
             ASSERT( db.runCommand( "unittests", BSON( "collstats" << "clienttests.create" ), info ) );
         }
     };
-    
+
     class All : public Suite {
     public:
         All() : Suite( "client" ){

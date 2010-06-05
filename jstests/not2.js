@@ -27,6 +27,7 @@ t.save( {i:"a"} );
 t.save( {i:"b"} );
 
 fail( {i:{$not:"a"}} );
+fail( {i:{$not:{$not:"a"}}} );
 fail( {i:{$not:{$not:{$gt:"a"}}}} );
 fail( {i:{$not:{$ref:"foo"}}} );
 fail( {i:{$not:{}}} );
@@ -124,6 +125,8 @@ indexed( {i:{$not:{$lt:"b"}}}, "b", {} );
 
 indexed( {i:{$lte:"b"}}, "", "b" );
 indexed( {i:{$not:{$lte:"b"}}}, "b", {} );
+
+indexed( {i:{$not:{$lte:"b",$gte:"f"}}}, "b", "f" );
 
 not( {i:{$not:{$all:["a"]}}} );
 not( {i:{$not:{$mod:[2,1]}}} );

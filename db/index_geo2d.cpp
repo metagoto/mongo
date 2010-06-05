@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "namespace.h"
 #include "jsobj.h"
 #include "index.h"
@@ -43,9 +43,21 @@ namespace mongo {
             for ( int i=0; i<64; i++ ){
                 masks64[i] = ( 1LL << ( 63 - i ) );
             }
+            
+            for ( unsigned i=0; i<16; i++ ){
+                unsigned fixed = 0;
+                for ( int j=0; j<4; j++ ){
+                    if ( i & ( 1 << j ) )
+                        fixed |= ( 1 << ( j * 2 ) );
+                }
+                hashedToNormal[fixed] = i;
+            }
+            
         }
         int masks32[32];
         long long masks64[64];
+
+        unsigned hashedToNormal[256];
     } geoBitSets;
 
     
@@ -102,7 +114,20 @@ namespace mongo {
             }
         }
 
-        void unhash( unsigned& x , unsigned& y ) const {
+        void unhash_fast( unsigned& x , unsigned& y ) const {
+            x = 0;
+            y = 0;
+            char * c = (char*)(&_hash);
+            for ( int i=0; i<8; i++ ){
+                unsigned t = (unsigned)(c[i]) & 0x55;
+                y |= ( geoBitSets.hashedToNormal[t] << (4*(i)) );
+
+                t = ( (unsigned)(c[i]) >> 1 ) & 0x55;
+                x |= ( geoBitSets.hashedToNormal[t] << (4*(i)) );
+            }
+        }
+
+        void unhash_slow( unsigned& x , unsigned& y ) const {
             x = 0;
             y = 0;
             for ( unsigned i=0; i<_bits; i++ ){
@@ -111,6 +136,10 @@ namespace mongo {
                 if ( getBitY(i) )
                     y |= geoBitSets.masks32[i];
             }
+        }
+
+        void unhash( unsigned& x , unsigned& y ) const {
+            unhash_fast( x , y );
         }
 
         /**
@@ -265,11 +294,8 @@ namespace mongo {
         }
       
         void _fix(){
-            if ( ( _hash << ( _bits * 2 ) ) == 0 )
-                return;
-            long long mask = 0;
-            for ( unsigned i=0; i<_bits*2; i++ )
-                mask |= geoBitSets.masks64[i];
+            static long long FULL = 0xFFFFFFFFFFFFFFFFLL;
+            long long mask = FULL << ( 64 - ( _bits * 2 ) );
             _hash &= mask;
         }
         
@@ -417,7 +443,7 @@ namespace mongo {
             uassert( 13068 , "geo field only has 1 element" , i.more() );
             BSONElement y = i.next();
             
-            uassert( 13026 , "geo values have to be numbers" , x.isNumber() && y.isNumber() );
+            uassert( 13026 , "geo values have to be numbers: " + o.toString() , x.isNumber() && y.isNumber() );
 
             return _hash( x.number() , y.number() );
         }
@@ -467,17 +493,26 @@ namespace mongo {
             return sqrt( ( dx * dx ) + ( dy * dy ) );
         }
 
-        double size( const GeoHash& a ) const {
+        double sizeDiag( const GeoHash& a ) const {
             GeoHash b = a;
             b.move( 1 , 1 );
             return distance( a , b );
+        }
+
+        double sizeEdge( const GeoHash& a ) const {
+	    double ax,ay,bx,by;
+            GeoHash b = a;
+            b.move( 1 , 1 );
+	    _unconvert( a, ax, ay );
+	    _unconvert( b, bx, by );
+	    return (abs(ax-bx));
         }
 
         const IndexDetails* getDetails() const {
             return _spec->getDetails();
         }
 
-        virtual auto_ptr<Cursor> newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const;
+        virtual shared_ptr<Cursor> newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const;
 
         virtual IndexSuitability suitability( const BSONObj& query , const BSONObj& order ) const {
             BSONElement e = query.getFieldDotted(_geo.c_str());
@@ -543,7 +578,7 @@ namespace mongo {
         
         Box( const Geo2dType * g , const GeoHash& hash )
             : _min( g , hash ) , 
-              _max( _min._x + g->size( hash ) , _min._y + g->size( hash ) ){
+              _max( _min._x + g->sizeEdge( hash ) , _min._y + g->sizeEdge( hash ) ){
         }
         
         Box( double x , double y , double size )
@@ -794,7 +829,39 @@ namespace mongo {
                 assert( GeoHash( "11" ) == a.commonPrefix( "11" ) );
                 assert( GeoHash( "11" ) == a.commonPrefix( "11110000" ) );
             }
-            
+
+            {
+                int N = 10000;
+                {
+                    Timer t;
+                    for ( int i=0; i<N; i++ ){
+                        unsigned x = (unsigned)rand();
+                        unsigned y = (unsigned)rand();
+                        GeoHash h( x , y );
+                        unsigned a,b;
+                        h.unhash_slow( a,b );
+                        assert( a == x );
+                        assert( b == y );
+                    }
+                    cout << "slow: " << t.millis() << endl;
+                }
+
+                {
+                    Timer t;
+                    for ( int i=0; i<N; i++ ){
+                        unsigned x = (unsigned)rand();
+                        unsigned y = (unsigned)rand();
+                        GeoHash h( x , y );
+                        unsigned a,b;
+                        h.unhash_fast( a,b );
+                        assert( a == x );
+                        assert( b == y );
+                    }
+                    cout << "fast: " << t.millis() << endl;
+                }
+
+            }
+
         }
     } geoUnitTest;
     
@@ -893,14 +960,14 @@ namespace mongo {
     public:
         typedef multiset<GeoPoint> Holder;
 
-        GeoHopper( const Geo2dType * g , unsigned max , const GeoHash& n , const BSONObj& filter = BSONObj() )
-            : GeoAccumulator( g , filter ) , _max( max ) , _near( n ) {
+        GeoHopper( const Geo2dType * g , unsigned max , const GeoHash& n , const BSONObj& filter = BSONObj() , double maxDistance = numeric_limits<double>::max() )
+            : GeoAccumulator( g , filter ) , _max( max ) , _near( n ), _maxDistance( maxDistance ) {
 
         }
 
         virtual bool checkDistance( const GeoHash& h , double& d ){
             d = _g->distance( _near , h );
-            bool good = _points.size() < _max || d < farthest();
+            bool good = d < _maxDistance && ( _points.size() < _max || d < farthest() );
             GEODEBUG( "\t\t\t\t\t\t\t checkDistance " << _near << "\t" << h << "\t" << d 
                       << " ok: " << good << " farthest: " << farthest() );
             return good;
@@ -926,6 +993,7 @@ namespace mongo {
         unsigned _max;
         GeoHash _near;
         Holder _points;
+        double _maxDistance;
 
     };
 
@@ -980,16 +1048,19 @@ namespace mongo {
         static bool initial( const IndexDetails& id , const Geo2dType * spec , 
                              BtreeLocation& min , BtreeLocation&  max , 
                              GeoHash start ,
-                             int & found , GeoAccumulator * hopper ){
+                             int & found , GeoAccumulator * hopper )
+        {
             
+            Ordering ordering = Ordering::make(spec->_order);
+
             min.bucket = id.head.btree()->locate( id , id.head , start.wrap() , 
-                                                  spec->_order , min.pos , min.found , minDiskLoc );
+                                                  ordering , min.pos , min.found , minDiskLoc );
             min.checkCur( found , hopper );
             max = min;
             
             if ( min.bucket.isNull() ){
                 min.bucket = id.head.btree()->locate( id , id.head , start.wrap() , 
-                                                      spec->_order , min.pos , min.found , minDiskLoc , -1 );
+                                                      ordering , min.pos , min.found , minDiskLoc , -1 );
                 min.checkCur( found , hopper );
             }
             
@@ -999,10 +1070,10 @@ namespace mongo {
 
     class GeoSearch {
     public:
-        GeoSearch( const Geo2dType * g , const GeoHash& n , int numWanted=100 , BSONObj filter=BSONObj() )
+        GeoSearch( const Geo2dType * g , const GeoHash& n , int numWanted=100 , BSONObj filter=BSONObj() , double maxDistance = numeric_limits<double>::max() )
             : _spec( g ) , _n( n ) , _start( n ) ,
-              _numWanted( numWanted ) , _filter( filter ) , 
-              _hopper( new GeoHopper( g , numWanted , n , filter ) )
+              _numWanted( numWanted ) , _filter( filter ) , _maxDistance( maxDistance ) ,
+              _hopper( new GeoHopper( g , numWanted , n , filter , maxDistance ) )
         {
             assert( g->getDetails() );
             _nscanned = 0;
@@ -1042,20 +1113,24 @@ namespace mongo {
                     if ( ! _prefix.constrains() )
                         break;
                     _prefix = _prefix.up();
+                    
+                    double temp = _spec->distance( _prefix , _start );
+                    if ( temp > ( _maxDistance * 2 ) )
+                        break;
                 }
             }
             GEODEBUG( "done part 1" );
             if ( _found && _prefix.constrains() ){
                 // 2
                 Point center( _spec , _n );
-                double boxSize = _spec->size( _prefix );
+                double boxSize = _spec->sizeEdge( _prefix );
                 double farthest = hopper->farthest();
                 if ( farthest > boxSize )
                     boxSize = farthest;
                 Box want( center._x - ( boxSize / 2 ) , center._y - ( boxSize / 2 ) , boxSize );
-                while ( _spec->size( _prefix ) < boxSize )
+                while ( _spec->sizeEdge( _prefix ) < boxSize )
                     _prefix = _prefix.up();
-                log(1) << "want: " << want << " found:" << _found << " hash size:" << _spec->size( _prefix ) << endl;
+                log(1) << "want: " << want << " found:" << _found << " hash size:" << _spec->sizeEdge( _prefix ) << endl;
                 
                 for ( int x=-1; x<=1; x++ ){
                     for ( int y=-1; y<=1; y++ ){
@@ -1089,7 +1164,7 @@ namespace mongo {
             }
 
             BtreeLocation loc;
-            loc.bucket = id.head.btree()->locate( id , id.head , toscan.wrap() , _spec->_order , 
+            loc.bucket = id.head.btree()->locate( id , id.head , toscan.wrap() , Ordering::make(_spec->_order) , 
                                                         loc.pos , loc.found , minDiskLoc );
             loc.checkCur( _found , _hopper.get() );
             while ( loc.hasPrefix( toscan ) && loc.advance( 1 , _found , _hopper.get() ) )
@@ -1105,6 +1180,7 @@ namespace mongo {
         GeoHash _prefix;
         int _numWanted;
         BSONObj _filter;
+        double _maxDistance;
         shared_ptr<GeoHopper> _hopper;
 
         long long _nscanned;
@@ -1459,7 +1535,7 @@ namespace mongo {
     };    
 
 
-    auto_ptr<Cursor> Geo2dType::newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const {
+    shared_ptr<Cursor> Geo2dType::newCursor( const BSONObj& query , const BSONObj& order , int numWanted ) const {
         if ( numWanted < 0 )
             numWanted = numWanted * -1;
         else if ( numWanted == 0 )
@@ -1477,10 +1553,25 @@ namespace mongo {
             
             switch ( e.embeddedObject().firstElement().getGtLtOp() ){
             case BSONObj::opNEAR: {
-                e = e.embeddedObject().firstElement();
-                shared_ptr<GeoSearch> s( new GeoSearch( this , _tohash(e) , numWanted , query ) );
+                BSONObj n = e.embeddedObject();
+                e = n.firstElement();
+                double maxDistance = numeric_limits<double>::max();
+                if ( e.isABSONObj() && e.embeddedObject().nFields() > 2 ){
+                    BSONObjIterator i(e.embeddedObject());
+                    i.next();
+                    i.next();
+                    BSONElement e = i.next();
+                    if ( e.isNumber() )
+                        maxDistance = e.numberDouble();
+                }
+                {
+                    BSONElement e = n["$maxDistance"];
+                    if ( e.isNumber() )
+                        maxDistance = e.numberDouble();
+                }
+                shared_ptr<GeoSearch> s( new GeoSearch( this , _tohash(e) , numWanted , query , maxDistance ) );
                 s->exec();
-                auto_ptr<Cursor> c;
+                shared_ptr<Cursor> c;
                 c.reset( new GeoSearchCursor( s ) );
                 return c;   
             }
@@ -1491,13 +1582,13 @@ namespace mongo {
                 string type = e.fieldName();
                 if ( type == "$center" ){
                     uassert( 13059 , "$center has to take an object or array" , e.isABSONObj() );
-                    auto_ptr<Cursor> c;
+                    shared_ptr<Cursor> c;
                     c.reset( new GeoCircleBrowse( this , e.embeddedObjectUserCheck() , query ) );
                     return c;   
                 }
                 else if ( type == "$box" ){
                     uassert( 13065 , "$box has to take an object or array" , e.isABSONObj() );
-                    auto_ptr<Cursor> c;
+                    shared_ptr<Cursor> c;
                     c.reset( new GeoBoxBrowse( this , e.embeddedObjectUserCheck() , query ) );
                     return c;   
                 }
@@ -1518,11 +1609,12 @@ namespace mongo {
     class Geo2dFindNearCmd : public Command {
     public:
         Geo2dFindNearCmd() : Command( "geoNear" ){}
-        virtual LockType locktype(){ return READ; } 
-        bool slaveOk() { return true; }
+        virtual LockType locktype() const { return READ; } 
+        bool slaveOk() const { return true; }
+        void help(stringstream& h) const { h << "http://www.mongodb.org/display/DOCS/Geospatial+Indexing#GeospatialIndexing-geoNearCommand"; }
         bool slaveOverrideOk() { return true; }
-        bool run(const char * stupidns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
-            string ns = nsToDatabase( stupidns ) + "." + cmdObj.firstElement().valuestr();
+        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
+            string ns = dbname + "." + cmdObj.firstElement().valuestr();
 
             NamespaceDetails * d = nsdetails( ns.c_str() );
             if ( ! d ){
@@ -1568,7 +1660,11 @@ namespace mongo {
             if ( cmdObj["query"].type() == Object )
                 filter = cmdObj["query"].embeddedObject();
 
-            GeoSearch gs( g , n , numWanted , filter );
+            double maxDistance = numeric_limits<double>::max();
+            if ( cmdObj["maxDistance"].isNumber() )
+                maxDistance = cmdObj["maxDistance"].number();
+
+            GeoSearch gs( g , n , numWanted , filter , maxDistance );
 
             if ( cmdObj["start"].type() == String){
                 GeoHash start = (string) cmdObj["start"].valuestr();
@@ -1615,11 +1711,11 @@ namespace mongo {
     class GeoWalkCmd : public Command {
     public:
         GeoWalkCmd() : Command( "geoWalk" ){}
-        virtual LockType locktype(){ return READ; } 
-        bool slaveOk() { return true; }
+        virtual LockType locktype() const { return READ; } 
+        bool slaveOk() const { return true; }
         bool slaveOverrideOk() { return true; }
-        bool run(const char * stupidns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
-            string ns = nsToDatabase( stupidns ) + "." + cmdObj.firstElement().valuestr();
+        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
+            string ns = dbname + "." + cmdObj.firstElement().valuestr();
 
             NamespaceDetails * d = nsdetails( ns.c_str() );
             if ( ! d ){

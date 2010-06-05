@@ -181,18 +181,35 @@ ShardingTest.prototype.getDB = function( name ){
 }
 
 ShardingTest.prototype.getServerName = function( dbname ){
-    return this.config.databases.findOne( { name : dbname } ).primary;
+    var x = this.config.databases.findOne( { _id : dbname } );
+    if ( x )
+        return x.primary;
+    this.config.databases.find().forEach( printjson );
+    throw "couldn't find dbname: " + dbname + " total: " + this.config.databases.count();
 }
 
 ShardingTest.prototype.getServer = function( dbname ){
     var name = this.getServerName( dbname );
+
+    var x = this.config.shards.findOne( { _id : name } );
+    if ( x )
+        name = x.host;
+
     for ( var i=0; i<this._connections.length; i++ ){
         var c = this._connections[i];
         if ( name == c.name )
             return c;
     }
+
     throw "can't find server for: " + dbname + " name:" + name;
 
+}
+
+ShardingTest.prototype.normalize = function( x ){
+    var z = this.config.shards.findOne( { host : x } );
+    if ( z )
+        return z._id;
+    return x;
 }
 
 ShardingTest.prototype.getOther = function( one ){
@@ -262,6 +279,8 @@ ShardingTest.prototype.printCollectionInfo = function( ns , msg ){
 }
 
 printShardingStatus = function( configDB ){
+    if (configDB === undefined)
+        configDB = db.getSisterDB('config')
     
     var version = configDB.getCollection( "version" ).findOne();
     if ( version == null ){
@@ -285,17 +304,20 @@ printShardingStatus = function( configDB ){
 
     output( "  databases:" );
     configDB.databases.find().sort( { name : 1 } ).forEach( 
-        function(z){
-            output( "\t" + tojson(z,"",true) );
+        function(db){
+            output( "\t" + tojson(db,"",true) );
         
-            output( "\t\tmy chunks" );
-            
-            configDB.chunks.find( { "ns" : new RegExp( "^" + z.name ) } ).sort( { ns : 1 } ).forEach( 
-                function(z){
-                    output( "\t\t\t" + z.ns + " " + tojson( z.min ) + " -->> " + tojson( z.max ) + 
-                           " on : " + z.shard + " " + tojson( z.lastmod ) );
+            if (db.partitioned){
+                for (ns in db.sharded){
+                    output("\t\t" + ns + " chunks:");
+                    configDB.chunks.find( { "ns" : ns } ).sort( { min : 1 } ).forEach( 
+                        function(chunk){
+                            output( "\t\t\t" + tojson( chunk.min ) + " -->> " + tojson( chunk.max ) + 
+                                   " on : " + chunk.shard + " " + tojson( chunk.lastmod ) );
+                        }
+                    );
                 }
-            );
+            }
         }
     );
     
@@ -699,4 +721,12 @@ SyncCCTest.prototype.tempKill = function( num ){
 SyncCCTest.prototype.tempStart = function( num ){
     num = num || 0;
     this._connections[num] = startMongodTest( 30000 + num , this._testName + num , true );
+}
+
+
+function startParallelShell( jsCode ){
+    var x = startMongoProgramNoConnect( "mongo" , "--eval" , jsCode , db ? db.getMongo().host : null );
+    return function(){
+        waitProgram( x );
+    };
 }

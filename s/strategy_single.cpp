@@ -16,7 +16,7 @@
 
 // strategy_simple.cpp
 
-#include "stdafx.h"
+#include "pch.h"
 #include "request.h"
 #include "../client/connpool.h"
 #include "../db/commands.h"
@@ -40,7 +40,7 @@ namespace mongo {
             log(3) << "single query: " << q.ns << "  " << q.query << "  ntoreturn: " << q.ntoreturn << endl;
             
             try {
-                if ( ( q.ntoreturn == -1 || q.ntoreturn == 1 ) && strstr(q.ns, ".$cmd") ) {
+                if ( r.isCommand() ){
                     BSONObjBuilder builder;
                     bool ok = Command::runAgainstRegistered(q.ns, q.query, builder);
                     if ( ok ) {
@@ -55,12 +55,17 @@ namespace mongo {
                 }
 
                 lateAssert = true;
-                doQuery( r , r.singleServerName() );
+                doQuery( r , r.primaryShard() );
             }
             catch ( AssertionException& e ) {
-                assert( !lateAssert );
+                if ( lateAssert ){
+                    log() << "lateAssert: " << e.msg << endl;
+                    assert( !lateAssert );
+                }
+
                 BSONObjBuilder err;
                 err.append("$err", string("mongos: ") + (e.msg.empty() ? "assertion during query" : e.msg));
+                err.append("code",e.getCode());
                 BSONObj errObj = err.done();
                 replyToQuery(QueryResult::ResultFlag_ErrSet, r.p() , r.m() , errObj);
                 return;
@@ -73,7 +78,7 @@ namespace mongo {
         
             log(3) << "single getmore: " << ns << endl;
 
-            ScopedDbConnection dbcon( r.singleServerName() );
+            ShardConnection dbcon( r.primaryShard() , ns );
             DBClientBase& _c = dbcon.conn();
 
             // TODO 
@@ -82,7 +87,7 @@ namespace mongo {
             Message response;
             bool ok = c.port().call( r.m() , response);
             uassert( 10204 , "dbgrid: getmore: error calling db", ok);
-            r.reply( response );
+            r.reply( response , c.getServerAddress() );
         
             dbcon.done();
 
@@ -97,18 +102,23 @@ namespace mongo {
                     BSONObj o = d.nextJsObj();
                     const char * ns = o["ns"].valuestr();
                     if ( r.getConfig()->isSharded( ns ) ){
+                        BSONObj newIndexKey = o["key"].embeddedObjectUserCheck();
+                        
                         uassert( 10205 ,  (string)"can't use unique indexes with sharding  ns:" + ns + 
                                  " key: " + o["key"].embeddedObjectUserCheck().toString() , 
-                                 IndexDetails::isIdIndexPattern( o["key"].embeddedObjectUserCheck() ) || 
-                                 ! o["unique"].trueValue() );
-                        ChunkManager * cm = r.getConfig()->getChunkManager( ns );
+                                 IndexDetails::isIdIndexPattern( newIndexKey ) ||
+                                 ! o["unique"].trueValue() || 
+                                 r.getConfig()->getChunkManager( ns )->getShardKey().uniqueAllowd( newIndexKey ) );
+
+                        ChunkManagerPtr cm = r.getConfig()->getChunkManager( ns );
                         assert( cm );
                         for ( int i=0; i<cm->numChunks();i++)
                             doWrite( op , r , cm->getChunk(i)->getShard() );
                     }
                     else {
-                        doWrite( op , r , r.singleServerName() );
+                        doWrite( op , r , r.primaryShard() );
                     }
+                    r.gotInsert();
                 }
             }
             else if ( op == dbUpdate ){
@@ -129,15 +139,16 @@ namespace mongo {
             const char *ns = r.getns();
             
             if ( r.isShardingEnabled() && 
-                 strstr( ns , ".system.indexes" ) == strstr( ns , "." ) && 
-                 strstr( ns , "." ) ){
+                 strstr( ns , ".system.indexes" ) == strchr( ns , '.' ) && 
+                 strchr( ns , '.' ) ) {
                 log(1) << " .system.indexes write for: " << ns << endl;
                 handleIndexWrite( op , r );
                 return;
             }
             
             log(3) << "single write: " << ns << endl;
-            doWrite( op , r , r.singleServerName() );
+            doWrite( op , r , r.primaryShard() );
+            r.gotInsert(); // Won't handle mulit-insert correctly. Not worth parsing the request.
         }
 
         set<string> _commandsSafeToPass;

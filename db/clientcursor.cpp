@@ -22,12 +22,13 @@
    Cursor -- and its derived classes -- are our internal cursors.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "query.h"
 #include "introspect.h"
 #include <time.h>
 #include "db.h"
 #include "commands.h"
+#include "repl_block.h"
 
 namespace mongo {
 
@@ -128,7 +129,7 @@ namespace mongo {
 
         while ( 1 ) {
             toAdvance.push_back(j->second);
-            WIN assert( j->first == dl );
+            DEV assert( j->first == dl );
             ++j;
             if ( j == stop )
                 break;
@@ -232,6 +233,10 @@ namespace mongo {
             
         {
             dbtempreleasecond unlock;
+            if ( unlock.unlocked() )
+                sleepmicros( Client::recommendedYieldMicros() );
+            else
+                log() << "ClientCursor::yield can't unlock b/c of recursive lock" << endl;
         }
 
         if ( ClientCursor::find( id , false ) == 0 ){
@@ -254,26 +259,64 @@ namespace mongo {
                 break;
         }
         ctmLast = ctm;
-        DEV out() << "  alloccursorid " << x << endl;
+        //DEV tlog() << "  alloccursorid " << x << endl;
         return x;
     }
+
+    void ClientCursor::storeOpForSlave( DiskLoc last ){
+        if ( ! ( _queryOptions & QueryOption_OplogReplay ))
+            return;
+
+        if ( last.isNull() )
+            return;
+        
+        BSONElement e = last.obj()["ts"];
+        if ( e.type() == Date || e.type() == Timestamp )
+            _slaveReadTill = e._opTime();
+    }
+    
+    void ClientCursor::updateSlaveLocation( CurOp& curop ){
+        if ( _slaveReadTill.isNull() )
+            return;
+        mongo::updateSlaveLocation( curop , ns.c_str() , _slaveReadTill );
+    }
+
+
 
     // QUESTION: Restrict to the namespace from which this command was issued?
     // Alternatively, make this command admin-only?
     class CmdCursorInfo : public Command {
     public:
-        CmdCursorInfo() : Command( "cursorInfo" ) {}
-        virtual bool slaveOk() { return true; }
+        CmdCursorInfo() : Command( "cursorInfo", true ) {}
+        virtual bool slaveOk() const { return true; }
         virtual void help( stringstream& help ) const {
             help << " example: { cursorInfo : 1 }";
         }
-        virtual LockType locktype(){ return NONE; }
-        bool run(const char *dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+        virtual LockType locktype() const { return NONE; }
+        bool run(const string&, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             recursive_scoped_lock lock(ClientCursor::ccmutex);
             result.append("byLocation_size", unsigned( ClientCursor::byLoc.size() ) );
             result.append("clientCursors_size", unsigned( ClientCursor::clientCursorsById.size() ) );
             return true;
         }
     } cmdCursorInfo;
+    
+    void ClientCursorMonitor::run(){
+        Client::initThread("clientcursormon");
+        Client& client = cc();
+        
+        unsigned old = curTimeMillis();
+
+        while ( ! inShutdown() ){
+            unsigned now = curTimeMillis();
+            ClientCursor::idleTimeReport( now - old );
+            old = now;
+            sleepsecs(4);
+        }
+
+        client.shutdown();
+    }
+
+    ClientCursorMonitor clientCursorMonitor;
 
 } // namespace mongo

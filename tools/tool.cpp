@@ -24,6 +24,7 @@
 #include <pcrecpp.h>
 
 #include "util/file_allocator.h"
+#include "util/password.h"
 
 using namespace std;
 using namespace mongo;
@@ -32,24 +33,30 @@ namespace po = boost::program_options;
 
 namespace mongo {
 
-    Tool::Tool( string name , bool localDBAllowed , string defaultDB , string defaultCollection ) :
-        _name( name ) , _db( defaultDB ) , _coll( defaultCollection ) , _conn(0), _paired(false) {
-    
+    CmdLine cmdLine;
+
+    Tool::Tool( string name , bool localDBAllowed , string defaultDB , 
+                string defaultCollection , bool usesstdout ) :
+        _name( name ) , _db( defaultDB ) , _coll( defaultCollection ) , 
+        _usesstdout(usesstdout), _noconnection(false), _conn(0), _paired(false) {
+        
         _options = new po::options_description( "options" );
         _options->add_options()
             ("help","produce help message")
             ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
             ("host,h",po::value<string>(), "mongo host to connect to (\"left,right\" for pairs)" )
+            ("port",po::value<string>(), "server port. Can also use --host hostname:port" )
             ("db,d",po::value<string>(), "database to use" )
             ("collection,c",po::value<string>(), "collection to use (some commands)" )
             ("username,u",po::value<string>(), "username" )
-            ("password,p",po::value<string>(), "password" )
+            ("password,p", new PasswordValue( &_password ), "password" )
+            ("ipv6", "enable IPv6 support (disabled by default)")
             ;
         if ( localDBAllowed )
             _options->add_options()
-                ("dbpath",po::value<string>(), "directly access mongod data "
-                 "files in the given path, instead of connecting to a mongod "
-                 "instance - needs to lock the data directory, so cannot be "
+                ("dbpath",po::value<string>(), "directly access mongod database "
+                 "files in the given path, instead of connecting to a mongod  "
+                 "server - needs to lock the data directory, so cannot be "
                  "used if a mongod is currently accessing the same path" )
                 ("directoryperdb", "if dbpath specified, each db is in a separate directory" )
                 ;
@@ -107,8 +114,18 @@ namespace mongo {
             return EXIT_BADOPTIONS;
         }
 
+        // hide password from ps output
+        for (int i=0; i < (argc-1); ++i){
+            if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--password")){
+                char* arg = argv[i+1];
+                while (*arg){
+                    *arg++ = 'x';
+                }
+            }
+        }
+
         if ( _params.count( "help" ) ){
-            printHelp(cerr);
+            printHelp(cout);
             return 0;
         }
 
@@ -121,15 +138,23 @@ namespace mongo {
                 logLevel = s.length();
             }
         }
+        
+        preSetup();
 
         bool useDirectClient = hasParam( "dbpath" );
-
+        
         if ( ! useDirectClient ) {
             _host = "127.0.0.1";
             if ( _params.count( "host" ) )
                 _host = _params["host"].as<string>();
 
-            if ( _host.find( "," ) == string::npos ){
+            if ( _params.count( "port" ) )
+                _host += ':' + _params["port"].as<string>();
+            
+            if ( _noconnection ){
+                // do nothing
+            }
+            else if ( _host.find( "," ) == string::npos ){
                 DBClientConnection * c = new DBClientConnection();
                 _conn = c;
 
@@ -150,13 +175,14 @@ namespace mongo {
                     return -1;
                 }
             }
-
-            cerr << "connected to: " << _host << endl;
+            
+            (_usesstdout ? cout : cerr ) << "connected to: " << _host << endl;
         }
         else {
             if ( _params.count( "directoryperdb" ) ) {
                 directoryperdb = true;
             }
+            assert( lastError.get( true ) );
             Client::initThread("tools");
             _conn = new DBDirectClient();
             _host = "DIRECT";
@@ -185,8 +211,13 @@ namespace mongo {
         if ( _params.count( "username" ) )
             _username = _params["username"].as<string>();
 
-        if ( _params.count( "password" ) )
-            _password = _params["password"].as<string>();
+        if ( _params.count( "password" )
+             && ( _password.empty() ) ) {
+            _password = askPassword();
+        }
+
+        if (_params.count("ipv6"))
+            enableIPv6();
 
         int ret = -1;
         try {
@@ -213,7 +244,7 @@ namespace mongo {
 
     void Tool::addFieldOptions(){
         add_options()
-            ("fields,f" , po::value<string>() , "comma seperated list of field names e.g. -f name,age" )
+            ("fields,f" , po::value<string>() , "comma separated list of field names e.g. -f name,age" )
             ("fieldFile" , po::value<string>() , "file with fields names - 1 per line" )
             ;
     }
@@ -227,7 +258,7 @@ namespace mongo {
             pcrecpp::StringPiece input(fields_arg);
         
             string f;
-            pcrecpp::RE re("([\\w\\.\\s]+),?" );
+            pcrecpp::RE re("([#\\w\\.\\s\\-]+),?" );
             while ( re.Consume( &input, &f ) ){
                 _fields.push_back( f );
                 b.append( f.c_str() , 1 );

@@ -16,7 +16,7 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "jsobj.h"
 #include "../util/embedded_builder.h"
 #include "matcher.h"
@@ -100,12 +100,13 @@ namespace mongo {
             }
         }
         
-        bool isIndexed( const set<string>& idxKeys ) const {
+        static bool isIndexed( const string& fullName , const set<string>& idxKeys ){
+            const char * fieldName = fullName.c_str();
             // check if there is an index key that is a parent of mod
             for( const char *dot = strchr( fieldName, '.' ); dot; dot = strchr( dot + 1, '.' ) )
                 if ( idxKeys.count( string( fieldName, dot - fieldName ) ) )
                     return true;
-            string fullName = fieldName;
+
             // check if there is an index key equal to mod
             if ( idxKeys.count(fullName) )
                 return true;
@@ -113,6 +114,49 @@ namespace mongo {
             set< string >::const_iterator j = idxKeys.upper_bound( fullName );
             if ( j != idxKeys.end() && j->find( fullName ) == 0 && (*j)[fullName.size()] == '.' )
                 return true;
+
+            return false;
+        }
+        
+        bool isIndexed( const set<string>& idxKeys ) const {
+            string fullName = fieldName;
+            
+            if ( isIndexed( fullName , idxKeys ) )
+                return true;
+            
+            if ( strstr( fieldName , "." ) ){
+                // check for a.0.1
+                StringBuilder buf( fullName.size() + 1 );
+                for ( size_t i=0; i<fullName.size(); i++ ){
+                    char c = fullName[i];
+                    buf << c;
+
+                    if ( c != '.' )
+                        continue;
+
+                    if ( ! isdigit( fullName[i+1] ) )
+                        continue;
+                    
+                    bool possible = true;
+                    size_t j=i+2;
+                    for ( ; j<fullName.size(); j++ ){
+                        char d = fullName[j];
+                        if ( d == '.' )
+                            break;
+                        if ( isdigit( d ) )
+                            continue;
+                        possible = false;
+                        break;
+                    }
+                    
+                    if ( possible )
+                        i = j;
+                }
+                string x = buf.str();
+                if ( isIndexed( x , idxKeys ) )
+                    return true;
+            }
+
             return false;
         }
         
@@ -327,7 +371,7 @@ namespace mongo {
         const Mod * m;
         BSONElement old;
         
-        const char * fixedName;
+        const char * fixedOpName;
         BSONElement * fixed;
         int pushStartSize;
         
@@ -337,7 +381,7 @@ namespace mongo {
         long long inclong;
         
         ModState(){
-            fixedName = 0;
+            fixedOpName = 0;
             fixed = 0;
             pushStartSize = -1;
             incType = EOO;
@@ -352,7 +396,7 @@ namespace mongo {
         }
         
         bool needOpLogRewrite() const {
-            if ( fixed || fixedName || incType )
+            if ( fixed || fixedOpName || incType )
                 return true;
             
             switch( op() ){
@@ -366,23 +410,7 @@ namespace mongo {
             }
         }
         
-        void appendForOpLog( BSONObjBuilder& b ) const {
-            if ( incType ){
-                BSONObjBuilder bb( b.subobjStart( "$set" ) );
-                appendIncValue( bb );
-                bb.done();
-                return;
-            }
-            
-            const char * name = fixedName ? fixedName : Mod::modNames[op()];
-
-            BSONObjBuilder bb( b.subobjStart( name ) );
-            if ( fixed )
-                bb.appendAs( *fixed , m->fieldName );
-            else
-                bb.append( m->elt );
-            bb.done();
-        }
+        void appendForOpLog( BSONObjBuilder& b ) const;
 
         template< class Builder >
         void apply( Builder& b , BSONElement in ){
@@ -390,18 +418,22 @@ namespace mongo {
         }
         
         template< class Builder >
-        void appendIncValue( Builder& b ) const {
+        void appendIncValue( Builder& b , bool useFullName ) const {
+            const char * n = useFullName ? m->fieldName : m->shortFieldName;
+
             switch ( incType ){
             case NumberDouble:
-                b.append( m->shortFieldName , incdouble ); break;
+                b.append( n , incdouble ); break;
             case NumberLong:
-                b.append( m->shortFieldName , inclong ); break;
+                b.append( n , inclong ); break;
             case NumberInt:
-                b.append( m->shortFieldName , incint ); break;
+                b.append( n , incint ); break;
             default:
                 assert(0);
             }
         }
+
+        string toString() const;
     };
     
     /**
@@ -470,7 +502,7 @@ namespace mongo {
                 break;
                 
             case Mod::INC:
-                ms.fixedName = "$set";
+                ms.fixedOpName = "$set";
             case Mod::SET: {
                 m._checkForAppending( m.elt );
                 b.appendAs( m.elt, m.shortFieldName );
@@ -532,6 +564,7 @@ namespace mongo {
             }
         }
 
+        string toString() const;
 
         friend class ModSet;
     };

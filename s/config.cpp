@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../util/message.h"
 #include "../util/unittest.h"
 #include "../client/connpool.h"
@@ -30,7 +30,14 @@
 
 namespace mongo {
 
-    int ConfigServer::VERSION = 2;
+    int ConfigServer::VERSION = 3;
+    Shard Shard::EMPTY;
+    
+    string ShardNS::database = "config.databases";
+    string ShardNS::chunk = "config.chunks";
+    string ShardNS::shard = "config.shards";
+    string ShardNS::mongos = "config.mongos";
+    string ShardNS::settings = "config.settings";
 
     /* --- DBConfig --- */
 
@@ -41,14 +48,22 @@ namespace mongo {
     bool DBConfig::isSharded( const string& ns ){
         if ( ! _shardingEnabled )
             return false;
+        scoped_lock lk( _lock );
+        return _isSharded( ns );
+    }
+
+    bool DBConfig::_isSharded( const string& ns ){
+        if ( ! _shardingEnabled )
+            return false;
         return _sharded.find( ns ) != _sharded.end();
     }
 
-    string DBConfig::getShard( const string& ns ){
+
+    const Shard& DBConfig::getShard( const string& ns ){
         if ( isSharded( ns ) )
-            return "";
+            return Shard::EMPTY;
         
-        uassert( 10178 ,  "no primary!" , _primary.size() );
+        uassert( 10178 ,  "no primary!" , _primary.ok() );
         return _primary;
     }
     
@@ -56,21 +71,23 @@ namespace mongo {
         _shardingEnabled = true; 
     }
     
-    ChunkManager* DBConfig::shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique ){
+    ChunkManagerPtr DBConfig::shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique ){
         if ( ! _shardingEnabled )
             throw UserException( 8042 , "db doesn't have sharding enabled" );
         
-        ChunkManager * info = _shards[ns];
+        scoped_lock lk( _lock );
+
+        ChunkManagerPtr info = _shards[ns];
         if ( info )
             return info;
         
-        if ( isSharded( ns ) )
+        if ( _isSharded( ns ) )
             throw UserException( 8043 , "already sharded" );
 
         log() << "enable sharding on: " << ns << " with shard key: " << fieldsAndOrder << endl;
         _sharded[ns] = CollectionInfo( fieldsAndOrder , unique );
 
-        info = new ChunkManager( this , ns , fieldsAndOrder , unique );
+        info.reset( new ChunkManager( this , ns , fieldsAndOrder , unique ) );
         _shards[ns] = info;
         return info;
 
@@ -78,42 +95,46 @@ namespace mongo {
 
     bool DBConfig::removeSharding( const string& ns ){
         if ( ! _shardingEnabled ){
-            cout << "AAAA" << endl;
             return false;
         }
         
-        ChunkManager * info = _shards[ns];
+        scoped_lock lk( _lock );
+
+        ChunkManagerPtr info = _shards[ns];
         map<string,CollectionInfo>::iterator i = _sharded.find( ns );
 
         if ( info == 0 && i == _sharded.end() ){
-            cout << "BBBB" << endl;
             return false;
         }
         uassert( 10179 ,  "_sharded but no info" , info );
         uassert( 10180 ,  "info but no sharded" , i != _sharded.end() );
         
         _sharded.erase( i );
-        _shards.erase( ns ); // TODO: clean this up, maybe switch to shared_ptr
+        _shards.erase( ns );
         return true;
     }
 
-    ChunkManager* DBConfig::getChunkManager( const string& ns , bool reload ){
-        ChunkManager* m = _shards[ns];
+    ChunkManagerPtr DBConfig::getChunkManager( const string& ns , bool reload ){
+        scoped_lock lk( _lock );
+
+        ChunkManagerPtr m = _shards[ns];
         if ( m && ! reload )
             return m;
 
-        uassert( 10181 ,  (string)"not sharded:" + ns , isSharded( ns ) );
+        uassert( 10181 ,  (string)"not sharded:" + ns , _isSharded( ns ) );
         if ( m && reload )
             log() << "reloading shard info for: " << ns << endl;
-        m = new ChunkManager( this , ns , _sharded[ ns ].key , _sharded[ns].unique );
+        m.reset( new ChunkManager( this , ns , _sharded[ ns ].key , _sharded[ns].unique ) );
         _shards[ns] = m;
         return m;
     }
-
+    
     void DBConfig::serialize(BSONObjBuilder& to){
-        to.append("name", _name);
+        scoped_lock lk( _lock );
+
+        to.append("_id", _name);
         to.appendBool("partitioned", _shardingEnabled );
-        to.append("primary", _primary );
+        to.append("primary", _primary.getName() );
         
         if ( _sharded.size() > 0 ){
             BSONObjBuilder a;
@@ -128,11 +149,13 @@ namespace mongo {
     }
     
     void DBConfig::unserialize(const BSONObj& from){
-        _name = from.getStringField("name");
-        log(1) << "DBConfig unserialize: " << _name << " " << from << endl;
+        scoped_lock lk( _lock );
 
+        _name = from.getStringField("_id");
+        log(1) << "DBConfig unserialize: " << _name << " " << from << endl;
+        
         _shardingEnabled = from.getBoolField("partitioned");
-        _primary = from.getStringField("primary");
+        _primary.reset( from.getStringField("primary") );
         
         _sharded.clear();
         BSONObj sharded = from.getObjectField( "sharded" );
@@ -151,7 +174,9 @@ namespace mongo {
     
     void DBConfig::save( bool check ){
         Model::save( check );
-        for ( map<string,ChunkManager*>::iterator i=_shards.begin(); i != _shards.end(); i++)
+
+        scoped_lock lk( _lock );
+        for ( map<string,ChunkManagerPtr>::iterator i=_shards.begin(); i != _shards.end(); i++)
             i->second->save();
     }
 
@@ -162,7 +187,7 @@ namespace mongo {
     
     bool DBConfig::doload(){
         BSONObjBuilder b;
-        b.append("name", _name.c_str());
+        b.append("_id", _name.c_str());
         BSONObj q = b.done();
         return load(q);
     }
@@ -193,7 +218,7 @@ namespace mongo {
         }
         log(1) << "\t removed entry from config server for: " << _name << endl;
         
-        set<string> allServers;
+        set<Shard> allServers;
 
         // 3
         while ( true ){
@@ -217,9 +242,8 @@ namespace mongo {
         }
         
         // 5
-        for ( set<string>::iterator i=allServers.begin(); i!=allServers.end(); i++ ){
-            string s = *i;
-            ScopedDbConnection conn( s );
+        for ( set<Shard>::iterator i=allServers.begin(); i!=allServers.end(); i++ ){
+            ScopedDbConnection conn( *i );
             BSONObj res;
             if ( ! conn->dropDatabase( _name , &res ) ){
                 errmsg = res.toString();
@@ -233,11 +257,11 @@ namespace mongo {
         return true;
     }
 
-    bool DBConfig::_dropShardedCollections( int& num, set<string>& allServers , string& errmsg ){
+    bool DBConfig::_dropShardedCollections( int& num, set<Shard>& allServers , string& errmsg ){
         num = 0;
         set<string> seen;
         while ( true ){
-            map<string,ChunkManager*>::iterator i = _shards.begin();
+            map<string,ChunkManagerPtr>::iterator i = _shards.begin();
 
             if ( i == _shards.end() )
                 break;
@@ -250,8 +274,8 @@ namespace mongo {
             seen.insert( i->first );
             log(1) << "\t dropping sharded collection: " << i->first << endl;
 
-            i->second->getAllServers( allServers );
-            i->second->drop();
+            i->second->getAllShards( allServers );
+            i->second->drop( i->second );
             
             num++;
             uassert( 10184 ,  "_dropShardedCollections too many collections - bailing" , num < 100000 );
@@ -262,34 +286,14 @@ namespace mongo {
     
     /* --- Grid --- */
     
-    string Grid::pickShardForNewDB(){
-        ScopedDbConnection conn( configServer.getPrimary() );
-        
-        // TODO: this is temporary
-        
-        vector<string> all;
-        auto_ptr<DBClientCursor> c = conn->query( "config.shards" , Query() );
-        while ( c->more() ){
-            BSONObj s = c->next();
-            all.push_back( s["host"].valuestrsafe() );
-            // look at s["maxSize"] if exists
-        }
-        conn.done();
-        
-        if ( all.size() == 0 )
-            return "";
-        
-        return all[ rand() % all.size() ];
-    }
-
     bool Grid::knowAboutShard( string name ) const{
-        ScopedDbConnection conn( configServer.getPrimary() );
+        ShardConnection conn( configServer.getPrimary() , "" );
         BSONObj shard = conn->findOne( "config.shards" , BSON( "host" << name ) );
         conn.done();
         return ! shard.isEmpty();
     }
 
-    DBConfig* Grid::getDBConfig( string database , bool create ){
+    DBConfigPtr Grid::getDBConfig( string database , bool create ){
         {
             string::size_type i = database.find( "." );
             if ( i != string::npos )
@@ -297,13 +301,13 @@ namespace mongo {
         }
         
         if ( database == "config" )
-            return &configServer;
+            return configServerPtr;
 
         scoped_lock l( _lock );
 
-        DBConfig*& cc = _databases[database];
-        if ( cc == 0 ){
-            cc = new DBConfig( database );
+        DBConfigPtr& cc = _databases[database];
+        if ( !cc ){
+            cc.reset(new DBConfig( database ));
             if ( ! cc->doload() ){
                 if ( create ){
                     // note here that cc->primary == 0.
@@ -312,11 +316,11 @@ namespace mongo {
                     if ( database == "admin" )
                         cc->_primary = configServer.getPrimary();
                     else
-                        cc->_primary = pickShardForNewDB();
+                        cc->_primary = Shard::pick();
                     
-                    if ( cc->_primary.size() ){
+                    if ( cc->_primary.ok() ){
                         cc->save();
-                        log() << "\t put [" << database << "] on: " << cc->_primary << endl;
+                        log() << "\t put [" << database << "] on: " << cc->_primary.toString() << endl;
                     }
                     else {
                         log() << "\t can't find a shard to put new db on" << endl;
@@ -324,7 +328,7 @@ namespace mongo {
                     }
                 }
                 else {
-                    cc = 0;
+                    cc.reset();
                 }
             }
             
@@ -354,7 +358,6 @@ namespace mongo {
 
     ConfigServer::ConfigServer() {
         _shardingEnabled = false;
-        _primary = "";
         _name = "grid";
     }
     
@@ -398,7 +401,7 @@ namespace mongo {
                 return false;
         }
         
-        _primary = fullString.str();
+        _primary.setAddress( fullString.str() , true );
         log(1) << " config string : " << fullString.str() << endl;
         
         return true;
@@ -417,8 +420,8 @@ namespace mongo {
             return true;
         }
         catch ( DBException& ){
-            log() << "ConfigServer::allUp : " << _primary << " seems down!" << endl;
-            errmsg = _primary + " seems down";
+            log() << "ConfigServer::allUp : " << _primary.toString() << " seems down!" << endl;
+            errmsg = _primary.toString() + " seems down";
             return false;
         }
         
@@ -440,7 +443,7 @@ namespace mongo {
             uassert( 10189 ,  "should only have 1 thing in config.version" , ! c->more() );
         }
         else {
-            if ( conn.count( "config.shard" ) || conn.count( "config.databases" ) ){
+            if ( conn.count( ShardNS::shard ) || conn.count( ShardNS::database ) ){
                 version = 1;
             }
         }
@@ -448,29 +451,11 @@ namespace mongo {
         return version;
     }
     
-    int ConfigServer::checkConfigVersion(){
-        int cur = dbConfigVersion();
-        if ( cur == VERSION )
-            return 0;
-        
-        if ( cur == 0 ){
-            ScopedDbConnection conn( _primary );
-            conn->insert( "config.version" , BSON( "_id" << 1 << "version" << VERSION ) );
-            pool.flush();
-            assert( VERSION == dbConfigVersion( conn.conn() ) );
-            conn.done();
-            return 0;
-        }
-
-        log() << "don't know how to upgrade " << cur << " to " << VERSION << endl;
-        return -8;
-    }
-
     void ConfigServer::reloadSettings(){
         set<string> got;
         
         ScopedDbConnection conn( _primary );
-        auto_ptr<DBClientCursor> c = conn->query( "config.settings" , BSONObj() );
+        auto_ptr<DBClientCursor> c = conn->query( ShardNS::settings , BSONObj() );
         while ( c->more() ){
             BSONObj o = c->next();
             string name = o["_id"].valuestrsafe();
@@ -479,21 +464,29 @@ namespace mongo {
                 log(1) << "MaxChunkSize: " << o["value"] << endl;
                 Chunk::MaxChunkSize = o["value"].numberInt() * 1024 * 1024;
             }
+            else if ( name == "balancer" ){
+                // ones we ignore here
+            }
             else {
                 log() << "warning: unknown setting [" << name << "]" << endl;
             }
         }
 
         if ( ! got.count( "chunksize" ) ){
-            conn->insert( "config.settings" , BSON( "_id" << "chunksize"  <<
+            conn->insert( ShardNS::settings , BSON( "_id" << "chunksize"  <<
                                                     "value" << (Chunk::MaxChunkSize / ( 1024 * 1024 ) ) ) );
         }
+        
+        
+        // indexes
+        conn->ensureIndex( ShardNS::chunk , BSON( "ns" << 1 << "min" << 1 ) , true );
+        conn->ensureIndex( ShardNS::shard , BSON( "host" << 1 ) , true );
 
         conn.done();
     }
 
     string ConfigServer::getHost( string name , bool withPort ){
-        if ( name.find( ":" ) ){
+        if ( name.find( ":" ) != string::npos ){
             if ( withPort )
                 return name;
             return name.substr( 0 , name.find( ":" ) );
@@ -508,9 +501,32 @@ namespace mongo {
         return name;
     }
 
-    ConfigServer configServer;    
-    Grid grid;
+    void ConfigServer::logChange( const string& what , const string& ns , const BSONObj& detail ){
+        static bool createdCapped = false;
+        static AtomicUInt num;
+        
+        ScopedDbConnection conn( _primary );
+        
+        if ( ! createdCapped ){
+            conn->createCollection( "config.changelog" , 1024 * 1024 * 10 , true );
+            createdCapped = true;
+        }
+     
+        stringstream id;
+        id << ourHostname << "-" << terseCurrentTime() << "-" << num++;
 
+        conn->insert( "config.changelog" , BSON( "_id" << id.str() << 
+                                                 "server" << ourHostname <<
+                                                 "time" << DATENOW <<
+                                                 "what" << what <<
+                                                 "ns" << ns << 
+                                                 "details" << detail ) );
+        conn.done();
+    }
+
+    DBConfigPtr configServerPtr (new ConfigServer());    
+    ConfigServer& configServer = dynamic_cast<ConfigServer&>(*configServerPtr);    
+    Grid grid;
 
     class DBConfigUnitTest : public UnitTest {
     public:
@@ -525,7 +541,7 @@ namespace mongo {
                 return;
             
             log() << "DBConfig serialization broken\n" 
-                  << "in  : " << o.toString()  << "\n"
+                  << "in  : " << o.toString()  << '\n'
                   << "out : " << out.toString() 
                   << endl;
             assert(0);
@@ -533,7 +549,7 @@ namespace mongo {
 
         void a(){
             BSONObjBuilder b;
-            b << "name" << "abc";
+            b << "_id" << "abc";
             b.appendBool( "partitioned" , true );
             b << "primary" << "myserver";
             
@@ -543,7 +559,7 @@ namespace mongo {
 
         void b(){
             BSONObjBuilder b;
-            b << "name" << "abc";
+            b << "_id" << "abc";
             b.appendBool( "partitioned" , true );
             b << "primary" << "myserver";
             
@@ -551,7 +567,7 @@ namespace mongo {
             a << "abc.foo" << fromjson( "{ 'key' : { 'a' : 1 } , 'unique' : false }" );
             a << "abc.bar" << fromjson( "{ 'key' : { 'kb' : -1 } , 'unique' : true }" );
             
-            b.appendArray( "sharded" , a.obj() );
+            b.append( "sharded" , a.obj() );
 
             DBConfig c;
             testInOut( c , b.obj() );
@@ -560,6 +576,16 @@ namespace mongo {
         }
         
         void run(){
+            {
+                Shard s( "config" , "localhost" );
+                s.setAddress( "localhost" , true );
+            }
+
+            {
+                Shard s( "myserver" , "localhost" );
+                s.setAddress( "localhost" , true );
+            }
+            
             a();
             b();
         }

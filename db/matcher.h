@@ -24,7 +24,8 @@
 #include <pcrecpp.h>
 
 namespace mongo {
-
+    
+    class Cursor;
     class CoveredIndexMatcher;
     class Matcher;
 
@@ -133,20 +134,34 @@ namespace mongo {
             return op <= BSONObj::LTE ? -1 : 1;
         }
 
-        // Only specify constrainIndexKey if matches() will be called with
-        // index keys having empty string field names.
-        Matcher(const BSONObj &pattern, const BSONObj &constrainIndexKey = BSONObj());
+        Matcher(const BSONObj &pattern, bool subMatcher = false);
 
         ~Matcher();
 
         bool matches(const BSONObj& j, MatchDetails * details = 0 );
         
-        bool keyMatch() const { return !all && !haveSize && !hasArray && !haveNeg; }
+        // until SERVER-109 $or is opaque to indexes
+        bool keyMatch() const { return !all && !haveSize && !hasArray && !haveNeg && _orMatchers.size() == 0; }
 
         bool atomic() const { return _atomic; }
-
+        
         bool hasType( BSONObj::MatchType type ) const;
+
+        string toString() const {
+            return jsobj.toString();
+        }
+
+        void addOrConstraint( const BSONObj &o ) {
+            _norMatchers.push_back( shared_ptr< Matcher >( new Matcher( o ) ) );
+        }
+        
+        bool sameCriteriaCount( const Matcher &other ) const;
+        
     private:
+        // Only specify constrainIndexKey if matches() will be called with
+        // index keys having empty string field names.
+        Matcher( const Matcher &other, const BSONObj &constrainIndexKey );
+        
         void addBasic(const BSONElement &e, int c, bool isNot) {
             // TODO May want to selectively ignore these element types based on op type.
             if ( e.type() == MinKey || e.type() == MaxKey )
@@ -158,6 +173,9 @@ namespace mongo {
         bool addOp( const BSONElement &e, const BSONElement &fe, bool isNot, const char *& regex, const char *&flags );
         
         int valuesMatch(const BSONElement& l, const BSONElement& r, int op, const ElementMatcher& bm);
+
+        bool parseOrNor( const BSONElement &e, bool subMatcher );
+        void parseOr( const BSONElement &e, bool subMatcher, list< shared_ptr< Matcher > > &matchers );
 
         Where *where;                    // set if query uses $where
         BSONObj jsobj;                  // the query pattern.  e.g., { name: "joe" }
@@ -180,6 +198,8 @@ namespace mongo {
 
         // so we delete the mem when we're done:
         vector< shared_ptr< BSONObjBuilder > > _builders;
+        list< shared_ptr< Matcher > > _orMatchers;
+        list< shared_ptr< Matcher > > _norMatchers;
 
         friend class CoveredIndexMatcher;
     };
@@ -187,15 +207,27 @@ namespace mongo {
     // If match succeeds on index key, then attempt to match full document.
     class CoveredIndexMatcher : boost::noncopyable {
     public:
-        CoveredIndexMatcher(const BSONObj &pattern, const BSONObj &indexKeyPattern);
-        bool matches(const BSONObj &o){ return _docMatcher.matches( o ); }
+        CoveredIndexMatcher(const BSONObj &pattern, const BSONObj &indexKeyPattern , bool alwaysUseRecord=false );
+        bool matches(const BSONObj &o){ return _docMatcher->matches( o ); }
         bool matches(const BSONObj &key, const DiskLoc &recLoc , MatchDetails * details = 0 );
+        bool matchesCurrent( Cursor * cursor , MatchDetails * details = 0 );
         bool needRecord(){ return _needRecord; }
+        
+        Matcher& docMatcher() { return *_docMatcher; }
 
-        Matcher& docMatcher() { return _docMatcher; }
+        // once this is called, shouldn't use this matcher for matching any more
+        void addOrConstraint( const BSONObj &o ) {
+            _docMatcher->addOrConstraint( o );
+        }
+        
+        CoveredIndexMatcher *nextClauseMatcher( const BSONObj &indexKeyPattern, bool alwaysUseRecord=false ) {
+            return new CoveredIndexMatcher( _docMatcher, indexKeyPattern, alwaysUseRecord );
+        }
     private:
+        CoveredIndexMatcher(const shared_ptr< Matcher > &docMatcher, const BSONObj &indexKeyPattern , bool alwaysUseRecord=false );
+        void init( bool alwaysUseRecord );
+        shared_ptr< Matcher > _docMatcher;
         Matcher _keyMatcher;
-        Matcher _docMatcher;
         bool _needRecord;
     };
     

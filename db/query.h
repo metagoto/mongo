@@ -18,7 +18,7 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../util/message.h"
 #include "dbmessage.h"
 #include "jsobj.h"
@@ -75,7 +75,8 @@ namespace mongo {
 
     // for an existing query (ie a ClientCursor), send back additional information.
     struct GetMoreWaitException { };
-    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& op, int pass);
+
+    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& op, int pass );
 
     struct UpdateResult {
         bool existing;
@@ -103,16 +104,17 @@ namespace mongo {
     
     /* returns true if an existing object was updated, false if no existing object was found.
        multi - update multiple objects - mostly useful with things like $set
-       god - allow access to system namespaces and don't yield
+       god - allow access to system namespaces
     */
     UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj pattern, bool upsert, bool multi , bool logop , OpDebug& debug );
+    UpdateResult _updateObjects(bool god, const char *ns, const BSONObj& updateobj, BSONObj pattern, bool upsert, bool multi , bool logop , OpDebug& debug );
 
     // If justOne is true, deletedId is set to the id of the deleted object.
     long long deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop = false, bool god=false);
 
     long long runCount(const char *ns, const BSONObj& cmd, string& err);
     
-    auto_ptr< QueryResult > runQuery(Message& m, QueryMessage& q, CurOp& curop );
+    void runQuery(Message& m, QueryMessage& q, CurOp& curop, Message &result);
     
     /* This is for languages whose "objects" are not well ordered (JSON is well ordered).
        [ { a : ... } , { b : ... } ] -> { a : ..., b : ... }
@@ -158,6 +160,7 @@ namespace mongo {
         ~ParsedQuery(){}
 
         const char * ns() const { return _ns; }
+        bool isLocalDB() const { return strncmp(_ns, "local.", 6) == 0; }
 
         const BSONObj& getFilter() const { return _filter; }
         FieldMatcher* getFields() const { return _fields.get(); }
@@ -173,12 +176,14 @@ namespace mongo {
         bool isExplain() const { return _explain; }
         bool isSnapshot() const { return _snapshot; }
         bool returnKey() const { return _returnKey; }
+        bool showDiskLoc() const { return _showDiskLoc; }
 
         const BSONObj& getMin() const { return _min; }
         const BSONObj& getMax() const { return _max; }
         const BSONObj& getOrder() const { return _order; }
         const BSONElement& getHint() const { return _hint; }
-
+        int getMaxScan() const { return _maxScan; }
+        
         bool couldBeCommand() const {
             /* we assume you are using findOne() for running a cmd... */
             return _ntoreturn == 1 && strstr( _ns , ".$cmd" );
@@ -240,6 +245,8 @@ namespace mongo {
             _explain = false;
             _snapshot = false;
             _returnKey = false;
+            _showDiskLoc = false;
+            _maxScan = 0;
         }
 
         void _initTop( const BSONObj& top ){
@@ -269,6 +276,11 @@ namespace mongo {
                     _hint = e;
                 else if ( strcmp( "$returnKey" , name ) == 0 )
                     _returnKey = e.trueValue();
+                else if ( strcmp( "$maxScan" , name ) == 0 )
+                    _maxScan = e.numberInt();
+                else if ( strcmp( "$showDiskLoc" , name ) == 0 )
+                    _showDiskLoc = e.trueValue();
+                
 
             }
 
@@ -303,12 +315,14 @@ namespace mongo {
         bool _explain;
         bool _snapshot;
         bool _returnKey;
+        bool _showDiskLoc;
         BSONObj _min;
         BSONObj _max;
         BSONElement _hint;
         BSONObj _order;
+        int _maxScan;
     };
-
+    
 
 } // namespace mongo
 

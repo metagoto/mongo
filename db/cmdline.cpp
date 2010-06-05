@@ -16,14 +16,13 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "cmdline.h"
 #include "commands.h"
 
 namespace po = boost::program_options;
 
 namespace mongo {
-    CmdLine cmdLine;
 
     void setupSignals();
     BSONArray argvArray;
@@ -121,12 +120,34 @@ namespace mongo {
                 cout << "--fork has to be used with --logpath" << endl;
                 ::exit(-1);
             }
+            
+            cout.flush();
+            cerr.flush();
+
             pid_t c = fork();
             if ( c ){
-                cout << "forked process: " << c << endl;
-                ::exit(0);
+                _exit(0);
             }
+
+            chdir("/");
             setsid();
+            
+            pid_t c2 = fork();
+            if ( c2 ){
+                cout << "forked process: " << c2 << endl;
+                _exit(0);
+            }
+
+            // stdout handled in initLogging
+            //fclose(stdout);
+            //freopen("/dev/null", "w", stdout);
+
+            fclose(stderr);
+            freopen("/dev/null", "w", stderr);
+            fclose(stdin);
+            freopen("/dev/null", "r", stdin);
+
+            setupCoreSignals();
             setupSignals();
         }
 #endif
@@ -145,15 +166,26 @@ namespace mongo {
 
         return true;
     }
+    
+    void ignoreSignal( int signal ){
+    }
+
+    void setupCoreSignals(){
+#if !defined(_WIN32)
+        assert( signal(SIGUSR1 , rotateLogs ) != SIG_ERR );
+        assert( signal(SIGHUP , ignoreSignal ) != SIG_ERR );
+#endif
+    }
 
     class CmdGetCmdLineOpts : Command{
         public:
         CmdGetCmdLineOpts(): Command("getCmdLineOpts") {}
-        virtual LockType locktype() { return NONE; }
-        virtual bool adminOnly() { return true; }
-        virtual bool slaveOk() { return true; }
+        void help(stringstream& h) const { h << "get argv"; }
+        virtual LockType locktype() const { return NONE; }
+        virtual bool adminOnly() const { return true; }
+        virtual bool slaveOk() const { return true; }
 
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
+        virtual bool run(const string&, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
             result.append("argv", argvArray);
             return true;
         }

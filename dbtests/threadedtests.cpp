@@ -17,10 +17,10 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
-#include "../util/atomic_int.h"
-#include "../util/mvar.h"
-#include "../util/thread_pool.h"
+#include "pch.h"
+#include "../bson/util/atomic_int.h"
+#include "../util/concurrency/mvar.h"
+#include "../util/concurrency/thread_pool.h"
 #include <boost/thread.hpp>
 #include <boost/bind.hpp>
 

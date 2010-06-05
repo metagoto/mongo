@@ -16,11 +16,12 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
+#include "../util/version.h"
 #include <boost/program_options.hpp>
 
 #undef assert
-#define assert xassert
+#define assert MONGO_assert
 
 #include "framework.h"
 #include "../util/file_allocator.h"
@@ -34,6 +35,8 @@ namespace po = boost::program_options;
 
 namespace mongo {
     
+    CmdLine cmdLine;
+
     namespace regression {
 
         map<string,Suite*> * mongo::regression::Suite::_suites = 0;
@@ -51,7 +54,7 @@ namespace mongo {
                 ss << result;
 
                 for ( list<string>::iterator i=_messages.begin(); i!=_messages.end(); i++ ){
-                    ss << "\t" << *i << "\n";
+                    ss << "\t" << *i << '\n';
                 }
                 
                 return ss.str();
@@ -75,6 +78,8 @@ namespace mongo {
         Result * Result::cur = 0;
 
         Result * Suite::run(){
+            tlogLevel = -1;
+
             log(1) << "\t about to setupTests" << endl;
             setupTests();
             log(1) << "\t done setupTests" << endl;
@@ -325,22 +330,6 @@ namespace mongo {
 
         void fail( const char * exp , const char * file , unsigned line ){
             assert(0);
-        }
-
-        string demangleName( const type_info& typeinfo ){
-#ifdef _WIN32
-            return typeinfo.name();
-#else
-            int status;
-
-            char * niceName = abi::__cxa_demangle(typeinfo.name(), 0, 0, &status);
-            if ( ! niceName )
-                return typeinfo.name();
-
-            string s = niceName;
-            free(niceName);
-            return s;
-#endif
         }
 
         MyAssertionException * MyAsserts::getBase(){

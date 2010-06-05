@@ -259,7 +259,7 @@ DB.prototype.help = function() {
     print("\tdb.commandHelp(name) returns the help for the command");
     print("\tdb.copyDatabase(fromdb, todb, fromhost)");
     print("\tdb.createCollection(name, { size : ..., capped : ..., max : ... } )");
-    print("\tdb.currentOp() displays the current operation in the db" );
+    print("\tdb.currentOp() displays the current operation in the db");
     print("\tdb.dropDatabase()");
     print("\tdb.eval(func, args) run code server-side");
     print("\tdb.getCollection(cname) same as db['cname'] or db.cname");
@@ -273,8 +273,9 @@ DB.prototype.help = function() {
     print("\tdb.getProfilingLevel()");
     print("\tdb.getReplicationInfo()");
     print("\tdb.getSisterDB(name) get the db at the same server as this onew");
-    print("\tdb.killOp(opid) kills the current operation in the db" );
-    print("\tdb.printCollectionStats()" );
+    print("\tdb.killOp(opid) kills the current operation in the db");
+    print("\tdb.listCommands() lists all the db commands");
+    print("\tdb.printCollectionStats()");
     print("\tdb.printReplicationInfo()");
     print("\tdb.printSlaveReplicationInfo()");
     print("\tdb.printShardingStatus()");
@@ -286,7 +287,10 @@ DB.prototype.help = function() {
     print("\tdb.setProfilingLevel(level,<slowms>) 0=off 1=slow 2=all");
     print("\tdb.shutdownServer()");
     print("\tdb.stats()");
-    print("\tdb.version() current version of the server" );
+    print("\tdb.version() current version of the server");
+    print("\tdb.getMongo().setSlaveOk() allow queries on a replication slave server");
+
+    return __magicNoPrint;
 }
 
 DB.prototype.printCollectionStats = function(){
@@ -309,9 +313,10 @@ DB.prototype.printCollectionStats = function(){
  *  <p>Levels :</p>
  *   <ul>
  *    <li>0=off</li>
- *    <li>1=log very slow (>100ms) operations</li>
+ *    <li>1=log very slow operations; optional argument slowms specifies slowness threshold</li>
  *    <li>2=log all</li>
  *  @param {String} level Desired level of profiling
+ *  @param {String} slowms For slow logging, query duration that counts as slow (default 100ms)
  *  @return SOMETHING_FIXME or null on error
  */
 DB.prototype.setProfilingLevel = function(level,slowms) {
@@ -471,8 +476,14 @@ DB.prototype.forceError = function(){
     return this.runCommand( { forceerror : 1 } );
 }
 
-DB.prototype.getLastError = function(){
-    var res = this.runCommand( { getlasterror : 1 } );
+DB.prototype.getLastError = function( w , wtimeout ){
+    var cmd = { getlasterror : 1 };
+    if ( w ){
+        cmd.w = w;
+        if ( wtimeout )
+            cmd.wtimeout = wtimeout;
+    }
+    var res = this.runCommand( cmd );
     if ( ! res.ok )
         throw "getlasterror failed: " + tojson( res );
     return res.err;
@@ -502,17 +513,17 @@ DB.prototype.getCollectionNames = function(){
 
     var nsLength = this._name.length + 1;
     
-    this.getCollection( "system.namespaces" ).find().sort({name:1}).forEach(
-        function(z){
-            var name = z.name;
-            
-            if ( name.indexOf( "$" ) >= 0 && name != "local.oplog.$main" )
-                return;
-            
-            all.push( name.substring( nsLength ) );
-        }
-    );
-    return all;
+    var c = this.getCollection( "system.namespaces" ).find();
+    while ( c.hasNext() ){
+        var name = c.next().name;
+        
+        if ( name.indexOf( "$" ) >= 0 && name.indexOf( ".oplog.$" ) < 0 )
+            continue;
+        
+        all.push( name.substring( nsLength ) );
+    }
+    
+    return all.sort();
 }
 
 DB.prototype.tojson = function(){
@@ -615,13 +626,19 @@ DB.prototype.printReplicationInfo = function() {
 
 DB.prototype.printSlaveReplicationInfo = function() {
     function g(x) {
+        assert( x , "how could this be null (printSlaveReplicationInfo gx)" )
         print("source:   " + x.host);
-        var st = new Date( DB.tsToSeconds( x.syncedTo ) * 1000 );
-        var now = new Date();
-        print("syncedTo: " + st.toString() );
-        var ago = (now-st)/1000;
-        var hrs = Math.round(ago/36)/100;
-        print("          = " + Math.round(ago) + "secs ago (" + hrs + "hrs)"); 
+        if ( x.syncedTo ){
+            var st = new Date( DB.tsToSeconds( x.syncedTo ) * 1000 );
+            var now = new Date();
+            print("\t syncedTo: " + st.toString() );
+            var ago = (now-st)/1000;
+            var hrs = Math.round(ago/36)/100;
+            print("\t\t = " + Math.round(ago) + "secs ago (" + hrs + "hrs)"); 
+        }
+        else {
+            print( "\t doing initial sync" );
+        }
     }
     var L = this.getSisterDB("local");
     if( L.sources.count() == 0 ) { 
@@ -639,8 +656,34 @@ DB.prototype.serverStatus = function(){
     return this._adminCommand( "serverStatus" );
 }
 
+DB.prototype.serverCmdLineOpts = function(){
+    return this._adminCommand( "getCmdLineOpts" );
+}
+
 DB.prototype.version = function(){
     return this.serverBuildInfo().version;
+}
+
+DB.prototype.listCommands = function(){
+    var x = this.runCommand( "listCommands" );
+    for ( var name in x.commands ){
+        var c = x.commands[name];
+
+        var s = name + " lock: ";
+        
+        switch ( c.lockType ){
+        case -1: s += "read"; break;
+        case 0: s += "node"; break;
+        case 1: s += "write"; break;
+        default: s += c.lockType;
+        }
+        
+        s += " adminOnly: " + c.adminOnly;
+        s += " slaveOk: " + c.slaveOk;
+        s += " " + c.help;
+        
+        print( s )
+    }
 }
 
 DB.prototype.printShardingStatus = function(){

@@ -27,16 +27,22 @@
 *.idb
 *.pdb
 *.manifest
+*.user
 *.gch
+*.*sdf
+*.psess
 *#
 .#*
 shell/mongo.cpp
 shell/mongo-server.cpp
 
-db/Debug
-db/oplog*
+*/Debug/
+*/*/Debug/
+*/Release/
+*/*/Release/
 db/.gdb*
 db/makefile.local
+db/_ReSharper.db
 config.log
 settings.py
 buildinfo.cpp
@@ -74,10 +80,12 @@ mongostat
 *.tar.gz
 
 mongodb-*
+mongo-cxx-driver-*
 
 #libs
 libmongoclient.*
 libmongotestfiles.*
+libmongoshellfiles.*
 
 # examples
 firstExample

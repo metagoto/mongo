@@ -9,17 +9,17 @@ def getAllSourceFiles( arr=None , prefix="." ):
         arr = []
 
     for x in os.listdir( prefix ):
-        if x.startswith( "." ) or x.startswith( "pcre-" ) or x.startswith( "32bit" ) or x.startswith( "mongodb-" ):
+        if x.startswith( "." ) or x.startswith( "pcre-" ) or x.startswith( "32bit" ) or x.startswith( "mongodb-" ) or x.startswith("debian") or x.startswith( "mongo-cxx-driver" ):
             continue
         full = prefix + "/" + x
-        if os.path.isdir( full ):
+        if os.path.isdir( full ) and not os.path.islink( full ):
             getAllSourceFiles( arr , full )
         else:
             if full.endswith( ".cpp" ) or full.endswith( ".h" ) or full.endswith( ".c" ):
                 arr.append( full )
 
     return arr
-    
+
 assertNames = [ "uassert" , "massert" ]
 
 def assignErrorCodes():

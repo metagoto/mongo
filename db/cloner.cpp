@@ -16,10 +16,10 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "pdfile.h"
 #include "../client/dbclient.h"
-#include "../util/builder.h"
+#include "../bson/util/builder.h"
 #include "jsobj.h"
 #include "query.h"
 #include "commands.h"
@@ -136,7 +136,7 @@ namespace mongo {
             }
 
             try { 
-                theDataFileMgr.insert(to_collection, js);
+                theDataFileMgr.insertWithObjMod(to_collection, js);
                 if ( logForRepl )
                     logOp("i", to_collection, js);
             }
@@ -154,7 +154,7 @@ namespace mongo {
             for ( list<BSONObj>::iterator i = storedForLater.begin(); i!=storedForLater.end(); i++ ){
                 BSONObj js = *i;
                 try { 
-                    theDataFileMgr.insert(to_collection, js);
+                    theDataFileMgr.insertWithObjMod(to_collection, js);
                     if ( logForRepl )
                         logOp("i", to_collection, js);
                 }
@@ -413,46 +413,57 @@ namespace mongo {
     */
     class CmdClone : public Command {
     public:
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         virtual void help( stringstream &help ) const {
             help << "clone this database from an instance of the db on another host\n";
-            help << "example: { clone : \"host13\" }";
+            help << "{ clone : \"host13\" }";
         }
         CmdClone() : Command("clone") { }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             string from = cmdObj.getStringField("clone");
             if ( from.empty() )
                 return false;
             /* replication note: we must logOp() not the command, but the cloned data -- if the slave
                were to clone it would get a different point-in-time and not match.
                */
-            return cloneFrom(from.c_str(), errmsg, cc().database()->name, 
+            return cloneFrom(from.c_str(), errmsg, dbname, 
                              /*logForReplication=*/!fromRepl, /*slaveok*/false, /*usereplauth*/false, /*snapshot*/true);
         }
     } cmdclone;
     
     class CmdCloneCollection : public Command {
     public:
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         CmdCloneCollection() : Command("cloneCollection") { }
         virtual void help( stringstream &help ) const {
-            help << " example: { cloneCollection: <collection ns>, from: <hostname>, query: <query> }";
+            help << "{ cloneCollection: <namespace>, from: <host> [,query: <query_filter>] [,copyIndexes:<bool>] }"
+                "\nCopies a collection from one server to another. Do not use on a single server as the destination "
+                "is placed at the same db.collection (namespace) as the source.\n"
+                "Warning: the local copy of 'ns' is emptied before the copying begins. Any existing data will be lost there."
+                ;
         }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             string fromhost = cmdObj.getStringField("from");
             if ( fromhost.empty() ) {
-                errmsg = "missing from spec";
+                errmsg = "missing 'from' parameter";
                 return false;
+            }
+            {
+                HostAndPort h(fromhost);
+                if( h.isSelf() ) { 
+                    errmsg = "can't copy from self";
+                    return false;
+                }
             }
             string collection = cmdObj.getStringField("cloneCollection");
             if ( collection.empty() ) {
-                errmsg = "missing cloneCollection spec";
+                errmsg = "bad 'cloneCollection' value";
                 return false;
             }
             BSONObj query = cmdObj.getObjectField("query");
@@ -468,7 +479,7 @@ namespace mongo {
              */
             Client::Context ctx( collection );
             
-            log() << "cloneCollection.  db:" << ns << " collection:" << collection << " from: " << fromhost << " query: " << query << " logSizeMb: " << logSizeMb << ( copyIndexes ? "" : ", not copying indexes" ) << endl;
+            log() << "cloneCollection.  db:" << dbname << " collection:" << collection << " from: " << fromhost << " query: " << query << " logSizeMb: " << logSizeMb << ( copyIndexes ? "" : ", not copying indexes" ) << endl;
             
             Cloner c;
             long long cursorId;
@@ -480,16 +491,16 @@ namespace mongo {
 
     class CmdStartCloneCollection : public Command {
     public:
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         CmdStartCloneCollection() : Command("startCloneCollection") { }
         virtual void help( stringstream &help ) const {
             help << " example: { startCloneCollection: <collection ns>, from: <hostname>, query: <query> }";
             help << ", returned object includes a finishToken field, the value of which may be passed to the finishCloneCollection command";
         }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             string fromhost = cmdObj.getStringField("from");
             if ( fromhost.empty() ) {
                 errmsg = "missing from spec";
@@ -513,7 +524,7 @@ namespace mongo {
              */
             Client::Context ctx(collection);
             
-            log() << "startCloneCollection.  db:" << ns << " collection:" << collection << " from: " << fromhost << " query: " << query << endl;
+            log() << "startCloneCollection.  db:" << dbname << " collection:" << collection << " from: " << fromhost << " query: " << query << endl;
             
             Cloner c;
             long long cursorId;
@@ -534,15 +545,15 @@ namespace mongo {
     
     class CmdFinishCloneCollection : public Command {
     public:
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         CmdFinishCloneCollection() : Command("finishCloneCollection") { }
         virtual void help( stringstream &help ) const {
             help << " example: { finishCloneCollection: <finishToken> }";
         }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             BSONObj fromToken = cmdObj.getObjectField("finishCloneCollection");
             if ( fromToken.isEmpty() ) {
                 errmsg = "missing finishCloneCollection finishToken spec";
@@ -570,7 +581,7 @@ namespace mongo {
             
             Client::Context ctx( collection );
             
-            log() << "finishCloneCollection.  db:" << ns << " collection:" << collection << " from: " << fromhost << " query: " << query << endl;
+            log() << "finishCloneCollection.  db:" << dbname << " collection:" << collection << " from: " << fromhost << " query: " << query << endl;
             
             Cloner c;
             return c.finishCloneCollection( fromhost.c_str(), collection.c_str(), query, cursorId, errmsg );
@@ -584,18 +595,18 @@ namespace mongo {
     class CmdCopyDbGetNonce : public Command {
     public:
         CmdCopyDbGetNonce() : Command("copydbgetnonce") { }
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         virtual void help( stringstream &help ) const {
             help << "get a nonce for subsequent copy db request from secure server\n";
             help << "usage: {copydbgetnonce: 1, fromhost: <hostname>}";
         }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             string fromhost = cmdObj.getStringField("fromhost");
             if ( fromhost.empty() ) {
                 /* copy from self */
@@ -625,18 +636,18 @@ namespace mongo {
     class CmdCopyDb : public Command {
     public:
         CmdCopyDb() : Command("copydb") { }
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         virtual void help( stringstream &help ) const {
             help << "copy a database from another host to this host\n";
             help << "usage: {copydb: 1, fromhost: <hostname>, fromdb: <db>, todb: <db>[, username: <username>, nonce: <nonce>, key: <key>]}";
         }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             string fromhost = cmdObj.getStringField("fromhost");
             if ( fromhost.empty() ) {
                 /* copy from self */
@@ -675,20 +686,20 @@ namespace mongo {
     class CmdRenameCollection : public Command {
     public:
         CmdRenameCollection() : Command( "renameCollection" ) {}
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         virtual bool logTheOp() {
             return true; // can't log steps when doing fast rename within a db, so always log the op rather than individual steps comprising it.
         }
         virtual void help( stringstream &help ) const {
             help << " example: { renameCollection: foo.a, to: bar.b }";
         }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             string source = cmdObj.getStringField( name.c_str() );
             string target = cmdObj.getStringField( "to" );
             if ( source.empty() || target.empty() ) {
@@ -750,7 +761,7 @@ namespace mongo {
                         break;
                 }
                 BSONObj o = c->next();
-                theDataFileMgr.insert( target.c_str(), o );
+                theDataFileMgr.insertWithObjMod( target.c_str(), o );
             }
             
             char cl[256];
@@ -780,7 +791,7 @@ namespace mongo {
                     }
                 }
                 BSONObj n = b.done();
-                theDataFileMgr.insert( targetIndexes.c_str(), n );
+                theDataFileMgr.insertWithObjMod( targetIndexes.c_str(), n );
             }
 
             {

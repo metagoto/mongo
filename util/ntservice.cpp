@@ -15,8 +15,10 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "ntservice.h"
+#include "text.h"
+#include <direct.h>
 
 #if defined(_WIN32)
 
@@ -24,41 +26,55 @@ namespace mongo {
 
 	void shutdown();
 
-	SERVICE_STATUS_HANDLE ServiceController::_statusHandle = null;
+	SERVICE_STATUS_HANDLE ServiceController::_statusHandle = NULL;
 	std::wstring ServiceController::_serviceName;
-	ServiceCallback ServiceController::_serviceCallback = null;
+	ServiceCallback ServiceController::_serviceCallback = NULL;
 
 	ServiceController::ServiceController() {
     }
     
     bool ServiceController::installService( const std::wstring& serviceName, const std::wstring& displayName, const std::wstring& serviceDesc, int argc, char* argv[] ) {
+        assert(argc >= 1);
+
+        stringstream commandLine;
+
+        if ( strchr(argv[0], ':') ) { // a crude test for fully qualified path
+            commandLine << '"' << argv[0] << "\" ";
+        } else {
+            char buffer[256];
+            assert( _getcwd(buffer, 256) );
+            commandLine << '"' << buffer << '\\' << argv[0] << "\" ";
+        }
         
-        std::string commandLine;
-        
-        for ( int i = 0; i < argc; i++ ) {
+        for ( int i = 1; i < argc; i++ ) {
 			std::string arg( argv[ i ] );
 			
 			// replace install command to indicate process is being started as a service
-			if ( arg == "--install" )
+			if ( arg == "--install" ) {
 				arg = "--service";
+			}
 				
-			commandLine += arg + " ";
+			commandLine << arg << "  ";
 		}
 		
-		SC_HANDLE schSCManager = ::OpenSCManager( null, null, SC_MANAGER_ALL_ACCESS );
-		if ( schSCManager == null )
+		SC_HANDLE schSCManager = ::OpenSCManager( NULL, NULL, SC_MANAGER_ALL_ACCESS );
+		if ( schSCManager == NULL ) {
 			return false;
+		}
 		
 		std::basic_ostringstream< TCHAR > commandLineWide;
-        commandLineWide << commandLine.c_str();
+        commandLineWide << commandLine.str().c_str();
+
+		log() << "Creating service " << toUtf8String(serviceName) << "." << endl;
 
 		// create new service
 		SC_HANDLE schService = ::CreateService( schSCManager, serviceName.c_str(), displayName.c_str(),
 												SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
 												SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-												commandLineWide.str().c_str(), null, null, L"\0\0", null, null );
+												commandLineWide.str().c_str(), NULL, NULL, L"\0\0", NULL, NULL );
 
-		if ( schService == null ) {
+		if ( schService == NULL ) {
+			log() << "Error creating service." << endl;
 			::CloseServiceHandle( schSCManager );
 			return false;
 		}
@@ -79,8 +95,13 @@ namespace mongo {
 			
 			// set service recovery options
 			serviceInstalled = ::ChangeServiceConfig2( schService, SERVICE_CONFIG_FAILURE_ACTIONS, &serviceFailure );
+
+			log() << "Service creation successful." << endl;
 		}
-		
+		else {
+			log() << "Service creation seems to have partially failed. Check the event log for more details." << endl;
+		}
+
 		::CloseServiceHandle( schService );
 		::CloseServiceHandle( schSCManager );
 		
@@ -88,31 +109,45 @@ namespace mongo {
     }
     
     bool ServiceController::removeService( const std::wstring& serviceName ) {
-		SC_HANDLE schSCManager = ::OpenSCManager( null, null, SC_MANAGER_ALL_ACCESS );
-		if ( schSCManager == null )
+		SC_HANDLE schSCManager = ::OpenSCManager( NULL, NULL, SC_MANAGER_ALL_ACCESS );
+		if ( schSCManager == NULL ) {
 			return false;
+		}
 
 		SC_HANDLE schService = ::OpenService( schSCManager, serviceName.c_str(), SERVICE_ALL_ACCESS );
-
-		if ( schService == null ) {
+		if ( schService == NULL ) {
+			log() << "Could not get a service handle for " << toUtf8String(serviceName) << "." << endl;
 			::CloseServiceHandle( schSCManager );
 			return false;
 		}
 
 		SERVICE_STATUS serviceStatus;
 		
-		// stop service if running
+		// stop service if its running
 		if ( ::ControlService( schService, SERVICE_CONTROL_STOP, &serviceStatus ) ) {
+			log() << "Service " << toUtf8String(serviceName) << " is currently running. Stopping service." << endl;
 			while ( ::QueryServiceStatus( schService, &serviceStatus ) ) {
 				if ( serviceStatus.dwCurrentState == SERVICE_STOP_PENDING )
-					Sleep( 1000 );
+				{
+				  Sleep( 1000 );
+				}
+				else { break; }
 			}
+			log() << "Service stopped." << endl;
 		}
 
+		log() << "Deleting service " << toUtf8String(serviceName) << "." << endl;
 		bool serviceRemoved = ::DeleteService( schService );
 		
 		::CloseServiceHandle( schService );
 		::CloseServiceHandle( schSCManager );
+
+		if (serviceRemoved) {
+			log() << "Service deleted successfully." << endl;
+		}
+		else {
+			log() << "Failed to delete service." << endl;
+		}
 
 		return serviceRemoved;
     }
@@ -123,14 +158,14 @@ namespace mongo {
 	
         SERVICE_TABLE_ENTRY dispTable[] = {
 			{ (LPTSTR)serviceName.c_str(), (LPSERVICE_MAIN_FUNCTION)ServiceController::initService },
-			{ null, null }
+			{ NULL, NULL }
 		};
 
 		return StartServiceCtrlDispatcher( dispTable );
     }
     
     bool ServiceController::reportStatus( DWORD reportState, DWORD waitHint ) {
-		if ( _statusHandle == null )
+		if ( _statusHandle == NULL )
 			return false;
 
 		static DWORD checkPoint = 1;

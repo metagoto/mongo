@@ -15,22 +15,24 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../db/pdfile.h"
 #include "dbclient.h"
-#include "../util/builder.h"
+#include "../bson/util/builder.h"
 #include "../db/jsobj.h"
 #include "../db/json.h"
 #include "../db/instance.h"
 #include "../util/md5.hpp"
 #include "../db/dbmessage.h"
 #include "../db/cmdline.h"
+#include "connpool.h"
+#include "../s/util.h"
 
 namespace mongo {
 
     Query& Query::where(const string &jscode, BSONObj scope) { 
         /* use where() before sort() and hint() and explain(), else this will assert. */
-        assert( !obj.hasField("query") );
+        assert( ! isComplex() );
         BSONObjBuilder b;
         b.appendElements(obj);
         b.appendWhere(jscode, scope);
@@ -39,7 +41,7 @@ namespace mongo {
     }
 
     void Query::makeComplex() {
-        if ( obj.hasElement( "query" ) )
+        if ( isComplex() )
             return;
         BSONObjBuilder b;
         b.append( "query", obj );
@@ -76,19 +78,36 @@ namespace mongo {
         return *this; 
     }
 
-    bool Query::isComplex() const{
-        return obj.hasElement( "query" );
+    bool Query::isComplex( bool * hasDollar ) const{
+        if ( obj.hasElement( "query" ) ){
+            if ( hasDollar )
+                hasDollar[0] = false;
+            return true;
+        }
+
+        if ( obj.hasElement( "$query" ) ){
+            if ( hasDollar )
+                hasDollar[0] = true;
+            return true;
+        }
+
+        return false;
     }
         
     BSONObj Query::getFilter() const {
-        if ( ! isComplex() )
+        bool hasDollar;
+        if ( ! isComplex( &hasDollar ) )
             return obj;
-        return obj.getObjectField( "query" );
+        
+        return obj.getObjectField( hasDollar ? "$query" : "query" );
     }
     BSONObj Query::getSort() const {
         if ( ! isComplex() )
             return BSONObj();
-        return obj.getObjectField( "orderby" );
+        BSONObj ret = obj.getObjectField( "orderby" );
+        if (ret.isEmpty())
+            ret = obj.getObjectField( "$orderby" );
+        return ret;
     }
     BSONObj Query::getHint() const {
         if ( ! isComplex() )
@@ -106,7 +125,7 @@ namespace mongo {
     /* --- dbclientcommands --- */
 
     bool DBClientWithCommands::isOk(const BSONObj& o) {
-        return o.getIntField("ok") == 1;
+        return o["ok"].trueValue();
     }
 
     inline bool DBClientWithCommands::runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options) {
@@ -146,10 +165,14 @@ namespace mongo {
 
     string DBClientWithCommands::getLastError() { 
         BSONObj info = getLastErrorDetailed();
+        return getLastErrorString( info );
+    }
+    
+    string DBClientWithCommands::getLastErrorString( const BSONObj& info ){
         BSONElement e = info["err"];
         if( e.eoo() ) return "";
         if( e.type() == Object ) return e.toString();
-        return e.str();
+        return e.str();        
     }
 
     BSONObj getpreverrorcmdobj = fromjson("{getpreverror:1}");
@@ -426,12 +449,15 @@ namespace mongo {
         auto_ptr<DBClientCursor> c =
             this->query(ns, query, 1, 0, fieldsToReturn, queryOptions);
 
-        massert( 10276 ,  "DBClientBase::findOne: transport error", c.get() );
+        uassert( 10276 ,  "DBClientBase::findOne: transport error", c.get() );
+
+        if ( c->hasResultFlag( QueryResult::ResultFlag_ShardConfigStale ) )
+            throw StaleConfigException( ns , "findOne has stale config" );
 
         if ( !c->more() )
             return BSONObj();
 
-        return c->next().copy();
+        return c->nextSafe().copy();
     }
 
     bool DBClientConnection::connect(const string &_serverAddress, string& errmsg) {
@@ -439,31 +465,28 @@ namespace mongo {
 
         string ip;
         int port;
-        size_t idx = serverAddress.find( ":" );
+        size_t idx = serverAddress.rfind( ":" );
         if ( idx != string::npos ) {
             port = strtol( serverAddress.substr( idx + 1 ).c_str(), 0, 10 );
             ip = serverAddress.substr( 0 , idx );
-            ip = hostbyname(ip.c_str());
         } else {
             port = CmdLine::DefaultDBPort;
-            ip = hostbyname( serverAddress.c_str() );
-        }
-        if( ip.empty() ) {
-            stringstream ss;
-            ss << "client connect: couldn't parse/resolve hostname: " << _serverAddress;
-            errmsg = ss.str();
-            failed = true;
-            return false;
+            ip = serverAddress;
         }
 
         // we keep around SockAddr for connection life -- maybe MessagingPort
         // requires that?
-        server = auto_ptr<SockAddr>(new SockAddr(ip.c_str(), port));
-        p = auto_ptr<MessagingPort>(new MessagingPort());
+        server.reset(new SockAddr(ip.c_str(), port));
+        p.reset(new MessagingPort( _timeout, _logLevel ));
+
+        if (server->getAddr() == "0.0.0.0"){
+            failed = true;
+            return false;
+        }
 
         if ( !p->connect(*server) ) {
             stringstream ss;
-            ss << "couldn't connect to server " << serverAddress << " " << ip << ":" << port;
+            ss << "couldn't connect to server {ip: \"" << ip <<  "\", port: " << port << '}';
             errmsg = ss.str();
             failed = true;
             return false;
@@ -480,22 +503,22 @@ namespace mongo {
             return;
 
         lastReconnectTry = time(0);
-        log() << "trying reconnect to " << serverAddress << endl;
+        log(_logLevel) << "trying reconnect to " << serverAddress << endl;
         string errmsg;
         string tmp = serverAddress;
         failed = false;
         if ( !connect(tmp.c_str(), errmsg) ) { 
-            log() << "reconnect " << serverAddress << " failed " << errmsg << endl;
+            log(_logLevel) << "reconnect " << serverAddress << " failed " << errmsg << endl;
 			return;
 		}
 
-		log() << "reconnect " << serverAddress << " ok" << endl;
+		log(_logLevel) << "reconnect " << serverAddress << " ok" << endl;
 		for( map< string, pair<string,string> >::iterator i = authCache.begin(); i != authCache.end(); i++ ) { 
 			const char *dbname = i->first.c_str();
 			const char *username = i->second.first.c_str();
 			const char *password = i->second.second.c_str();
 			if( !DBClientBase::auth(dbname, username, password, errmsg, false) )
-				log() << "reconnect: auth failed db:" << dbname << " user:" << username << ' ' << errmsg << '\n';
+				log(_logLevel) << "reconnect: auth failed db:" << dbname << " user:" << username << ' ' << errmsg << '\n';
 		}
     }
 
@@ -599,7 +622,7 @@ namespace mongo {
         if ( ! runCommand( nsToDatabase( ns.c_str() ) , 
                            BSON( "deleteIndexes" << NamespaceString( ns ).coll << "index" << indexName ) , 
                            info ) ){
-            log() << "dropIndex failed: " << info << endl;
+            log(_logLevel) << "dropIndex failed: " << info << endl;
             uassert( 10007 ,  "dropIndex failed" , 0 );
         }
         resetIndexCache();
@@ -684,6 +707,12 @@ namespace mongo {
 
     /* -- DBClientCursor ---------------------------------------------- */
 
+#ifdef _DEBUG
+#define CHECK_OBJECT( o , msg ) massert( 10337 ,  (string)"object not valid" + (msg) , (o).isValid() )
+#else
+#define CHECK_OBJECT( o , msg )
+#endif
+
     void assembleRequest( const string &ns, BSONObj query, int nToReturn, int nToSkip, const BSONObj *fieldsToReturn, int queryOptions, Message &toSend ) {
         CHECK_OBJECT( query , "assembleRequest query" );
         // see query.h for the protocol we are using here.
@@ -722,7 +751,7 @@ namespace mongo {
             if ( !port().call(toSend, response) ) {
                 failed = true;
                 if ( assertOk )
-                    massert( 10278 , "dbclient error communicating with server", false);
+                    uassert( 10278 , "dbclient error communicating with server", false);
                 return false;
             }
         }
@@ -746,124 +775,16 @@ namespace mongo {
         }
     }
 
-    int DBClientCursor::nextBatchSize(){
-        if ( nToReturn == 0 )
-            return batchSize;
-        if ( batchSize == 0 )
-            return nToReturn;
-        
-        return batchSize < nToReturn ? batchSize : nToReturn;
-    }
-
-    bool DBClientCursor::init() {
-        Message toSend;
-        if ( !cursorId ) {
-            assembleRequest( ns, query, nextBatchSize() , nToSkip, fieldsToReturn, opts, toSend );
-        } else {
-            BufBuilder b;
-            b.append( opts );
-            b.append( ns.c_str() );
-            b.append( nToReturn );
-            b.append( cursorId );
-            toSend.setData( dbGetMore, b.buf(), b.len() );
-        }
-        if ( !connector->call( toSend, *m, false ) )
-            return false;
-        dataReceived();
-        return true;
-    }
-
-    void DBClientCursor::requestMore() {
-        assert( cursorId && pos == nReturned );
-
-        if (haveLimit){
-            nToReturn -= nReturned;
-            assert(nToReturn > 0);
-        }
+    void DBClientConnection::killCursor( long long cursorId ){
         BufBuilder b;
-        b.append(opts);
-        b.append(ns.c_str());
-        b.append(nextBatchSize());
-        b.append(cursorId);
-
-        Message toSend;
-        toSend.setData(dbGetMore, b.buf(), b.len());
-        auto_ptr<Message> response(new Message());
-        connector->call( toSend, *response );
-
-        m = response;
-        dataReceived();
-    }
-
-    void DBClientCursor::dataReceived() {
-        QueryResult *qr = (QueryResult *) m->data;
-        resultFlags = qr->resultFlags();
-        if ( qr->resultFlags() & QueryResult::ResultFlag_CursorNotFound ) {
-            // cursor id no longer valid at the server.
-            assert( qr->cursorId == 0 );
-            cursorId = 0; // 0 indicates no longer valid (dead)
-            // TODO: should we throw a UserException here???
-        }
-        if ( cursorId == 0 || ! ( opts & QueryOption_CursorTailable ) ) {
-            // only set initially: we don't want to kill it on end of data
-            // if it's a tailable cursor
-            cursorId = qr->cursorId;
-        }
-        nReturned = qr->nReturned;
-        pos = 0;
-        data = qr->data();
-
-        connector->checkResponse( data, nReturned );
-        /* this assert would fire the way we currently work:
-            assert( nReturned || cursorId == 0 );
-        */
-    }
-
-    /** If true, safe to call next().  Requests more from server if necessary. */
-    bool DBClientCursor::more() {
-        if ( !_putBack.empty() )
-            return true;
+        b.append( (int)0 ); // reserved
+        b.append( (int)1 ); // number
+        b.append( cursorId );
         
-        if (haveLimit && pos >= nToReturn)
-            return false;
-
-        if ( pos < nReturned )
-            return true;
-
-        if ( cursorId == 0 )
-            return false;
-
-        requestMore();
-        return pos < nReturned;
-    }
-
-    BSONObj DBClientCursor::next() {
-        assert( more() );
-        if ( !_putBack.empty() ) {
-            BSONObj ret = _putBack.top();
-            _putBack.pop();
-            return ret;
-        }
-        pos++;
-        BSONObj o(data);
-        data += o.objsize();
-        return o;
-    }
-
-    DBClientCursor::~DBClientCursor() {
-        DESTRUCTOR_GUARD (
-            if ( cursorId && _ownCursor ) {
-                BufBuilder b;
-                b.append( (int)0 ); // reserved
-                b.append( (int)1 ); // number
-                b.append( cursorId );
-
-                Message m;
-                m.setData( dbKillCursors , b.buf() , b.len() );
-
-                connector->sayPiggyBack( m );
-            }
-        );
+        Message m;
+        m.setData( dbKillCursors , b.buf() , b.len() );
+        
+        sayPiggyBack( m );
     }
 
     /* --- class dbclientpaired --- */
@@ -895,7 +816,7 @@ namespace mongo {
                     BSONObj o;
                     c.isMaster(im, &o);
                     if ( retry )
-                        log() << "checkmaster: " << c.toString() << ' ' << o.toString() << '\n';
+                        log(_logLevel) << "checkmaster: " << c.toString() << ' ' << o.toString() << '\n';
                     if ( im ) {
                         master = (State) (x + 2);
                         return;
@@ -903,7 +824,7 @@ namespace mongo {
                 }
                 catch (AssertionException&) {
                     if ( retry )
-                        log() << "checkmaster: caught exception " << c.toString() << '\n';
+                        log(_logLevel) << "checkmaster: caught exception " << c.toString() << '\n';
                 }
                 x = x^1;
             }
@@ -1009,4 +930,14 @@ namespace mongo {
 		}
 	}
 
+    bool serverAlive( const string &uri ) {
+        DBClientConnection c( false, 0, 20 ); // potentially the connection to server could fail while we're checking if it's alive - so use timeouts
+        string err;
+        if ( !c.connect( uri, err ) )
+            return false;
+        if ( !c.simpleCommand( "admin", 0, "ping" ) )
+            return false;
+        return true;
+    }
+    
 } // namespace mongo

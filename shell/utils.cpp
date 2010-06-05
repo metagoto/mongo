@@ -16,7 +16,7 @@
  */
 
 
-#include "../stdafx.h"
+#include "../pch.h"
 
 #include <boost/thread/xtime.hpp>
 
@@ -183,7 +183,7 @@ namespace mongo {
         map< pid_t, HANDLE > handles;
 #endif
         
-        mongo::mutex mongoProgramOutputMutex;
+        mongo::mutex mongoProgramOutputMutex("mongoProgramOutputMutex");
         stringstream mongoProgramOutput_;
 
         void writeMongoProgramOutputLine( int port, int pid, const char *line ) {
@@ -229,6 +229,17 @@ namespace mongo {
                 boost::filesystem::path programPath = program;
 
                 if (isMongoProgram){
+#if 0
+                    if (program == "mongos") {
+                        argv_.push_back("valgrind");
+                        argv_.push_back("--log-file=/tmp/mongos-%p.valgrind");
+                        argv_.push_back("--leak-check=yes");
+                        argv_.push_back("--suppressions=valgrind.suppressions");
+                        //argv_.push_back("--error-exitcode=1");
+                        argv_.push_back("--");
+                    }
+#endif
+
                     programPath = boost::filesystem::initial_path() / programPath;
 #ifdef _WIN32
                     programPath = change_extension(programPath, ".exe");
@@ -379,13 +390,13 @@ namespace mongo {
                     if ( dup2( child_stdout, STDOUT_FILENO ) == -1 ||
                          dup2( child_stdout, STDERR_FILENO ) == -1 )
                     {
-                        cout << "Unable to dup2 child output: " << OUTPUT_ERRNO << endl;
+                        cout << "Unable to dup2 child output: " << errnoWithDescription() << endl;
                         ::_Exit(-1); //do not pass go, do not call atexit handlers
                     }
 
                     execvp( argv[ 0 ], const_cast<char**>(argv) );
 
-                    cout << "Unable to start program: " << OUTPUT_ERRNO << endl;
+                    cout << "Unable to start program: " << errnoWithDescription() << endl;
                     ::_Exit(-1);
                 }
 
@@ -421,6 +432,16 @@ namespace mongo {
                 
 #endif
         }
+
+        BSONObj WaitProgram( const BSONObj& a ){
+            int pid = a.firstElement().numberInt();
+            BSONObj x = BSON( "" << wait_for_pid( pid ) );
+            shells.erase( pid );
+            return x;
+        }
+
+
+
         BSONObj StartMongoProgram( const BSONObj &a ) {
             _nokillop = true;
             ProgramRunner r( a );
@@ -506,7 +527,16 @@ namespace mongo {
                 }
             }
 #else
-            assert( 0 == kill( pid, sig ) );
+            int x = kill( pid, sig );
+            if ( x ){
+                if ( errno == ESRCH ){
+                }
+                else {
+                    cout << "killFailed: " << errnoWithDescription() << endl;
+                    assert( x == 0 );
+                }
+            }
+
 #endif
         }
             
@@ -661,6 +691,7 @@ namespace mongo {
             scope.injectNative( "stopMongoProgramByPid", StopMongoProgramByPid );        
             scope.injectNative( "rawMongoProgramOutput", RawMongoProgramOutput );
             scope.injectNative( "clearRawMongoProgramOutput", ClearRawMongoProgramOutput );
+            scope.injectNative( "waitProgram" , WaitProgram );
 
             //can't access filesystem
             scope.injectNative( "removeFile" , removeFile );

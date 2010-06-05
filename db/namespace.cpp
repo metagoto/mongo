@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "pdfile.h"
 #include "db.h"
 #include "../util/mmap.h"
@@ -42,8 +42,34 @@ namespace mongo {
         0x400000, 0x800000
     };
 
+    NamespaceDetails::NamespaceDetails( const DiskLoc &loc, bool _capped ) {
+        /* be sure to initialize new fields here -- doesn't default to zeroes the way we use it */
+        firstExtent = lastExtent = capExtent = loc;
+        datasize = nrecords = 0;
+        lastExtentSize = 0;
+        nIndexes = 0;
+        capped = _capped;
+        max = 0x7fffffff;
+        paddingFactor = 1.0;
+        flags = 0;
+        capFirstNewRecord = DiskLoc();
+        // Signal that we are on first allocation iteration through extents.
+        capFirstNewRecord.setInvalid();
+        // For capped case, signal that we are doing initial extent allocation.
+        if ( capped )
+            deletedList[ 1 ].setInvalid();
+		assert( sizeof(dataFileVersion) == 2 );
+		dataFileVersion = 0;
+		indexFileVersion = 0;
+        multiKeyIndexBits = 0;
+        reservedA = 0;
+        extraOffset = 0;
+        backgroundIndexBuildInProgress = 0;
+        memset(reserved, 0, sizeof(reserved));
+    }
+
     bool NamespaceIndex::exists() const {
-        return !boost::filesystem::exists(path());
+        return !MMF::exists(path());
     }
     
     boost::filesystem::path NamespaceIndex::path() const {
@@ -78,7 +104,7 @@ namespace mongo {
         }
     }
 
-    static void callback(const Namespace& k, NamespaceDetails& v) { 
+    static void namespaceOnLoadCallback(const Namespace& k, NamespaceDetails& v) { 
         v.onLoad(k);
     }
 
@@ -100,10 +126,10 @@ namespace mongo {
 		int len = -1;
         boost::filesystem::path nsPath = path();
         string pathString = nsPath.string();
-		void *p;
-        if( boost::filesystem::exists(nsPath) ) { 
+        MMF::Pointer p;
+        if( MMF::exists(nsPath) ) { 
 			p = f.map(pathString.c_str());
-            if( p ) {
+            if( !p.isNull() ) {
                 len = f.length();
                 if ( len % (1024*1024) != 0 ){
                     log() << "bad .ns file: " << pathString << endl;
@@ -117,22 +143,38 @@ namespace mongo {
             maybeMkdir();
 			long l = lenForNewNsFiles;
 			p = f.map(pathString.c_str(), l);
-            if( p ) { 
+            if( !p.isNull() ) {
                 len = (int) l;
                 assert( len == lenForNewNsFiles );
             }
 		}
 
-        if ( p == 0 ) {
+        if ( p.isNull() ) {
             problem() << "couldn't open file " << pathString << " terminating" << endl;
             dbexit( EXIT_FS );
         }
-        ht = new HashTable<Namespace,NamespaceDetails>(p, len, "namespace index");
+
+        ht = new HashTable<Namespace,NamespaceDetails,MMF::Pointer>(p, len, "namespace index");
         if( checkNsFilesOnLoad )
-            ht->iterAll(callback);
+            ht->iterAll(namespaceOnLoadCallback);
+    }
+    
+    static void namespaceGetNamespacesCallback( const Namespace& k , NamespaceDetails& v , void * extra ) {
+        list<string> * l = (list<string>*)extra;
+        if ( ! k.hasDollarSign() )
+            l->push_back( (string)k );
+    }
+
+    void NamespaceIndex::getNamespaces( list<string>& tofill , bool onlyCollections ) const {
+        assert( onlyCollections ); // TODO: need to implement this
+        //                                  need boost::bind or something to make this less ugly
+        
+        if ( ht )
+            ht->iterAll( namespaceGetNamespacesCallback , (void*)&tofill );
     }
 
     void NamespaceDetails::addDeletedRec(DeletedRecord *d, DiskLoc dloc) {
+		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails) );
         {
             // defensive code: try to make us notice if we reference a deleted record
             (unsigned&) (((Record *) d)->data) = 0xeeeeeeee;
@@ -186,15 +228,17 @@ namespace mongo {
         if ( capped == 0 ) {
             if ( left < 24 || left < (lenToAlloc >> 3) ) {
                 // you get the whole thing.
+				DataFileMgr::grow(loc, regionlen);
                 return loc;
             }
         }
 
         /* split off some for further use. */
         r->lengthWithHeaders = lenToAlloc;
+		DataFileMgr::grow(loc, lenToAlloc);
         DiskLoc newDelLoc = loc;
         newDelLoc.inc(lenToAlloc);
-        DeletedRecord *newDel = newDelLoc.drec();
+        DeletedRecord *newDel = DataFileMgr::makeDeletedRecord(newDelLoc, left);
         newDel->extentOfs = r->extentOfs;
         newDel->lengthWithHeaders = left;
         newDel->nextDeleted.Null();
@@ -551,28 +595,76 @@ namespace mongo {
         return loc;
     }
 
+    /* extra space for indexes when more than 10 */
+    NamespaceDetails::Extra* NamespaceIndex::newExtra(const char *ns, int i, NamespaceDetails *d) {
+        assert( i >= 0 && i <= 1 );
+        Namespace n(ns);
+        Namespace extra(n.extraName(i).c_str()); // throws userexception if ns name too long
+        
+        massert( 10350 ,  "allocExtra: base ns missing?", d );
+        massert( 10351 ,  "allocExtra: extra already exists", ht->get(extra) == 0 );
+
+        NamespaceDetails::Extra temp;
+        temp.init();
+        uassert( 10082 ,  "allocExtra: too many namespaces/collections", ht->put(extra, (NamespaceDetails&) temp));
+        NamespaceDetails::Extra *e = (NamespaceDetails::Extra *) ht->get(extra);
+        return e;
+    }
+    NamespaceDetails::Extra* NamespaceDetails::allocExtra(const char *ns, int nindexessofar) {
+        NamespaceIndex *ni = nsindex(ns);
+        int i = (nindexessofar - NIndexesBase) / NIndexesExtra;
+        Extra *e = ni->newExtra(ns, i, this);
+        long ofs = e->ofsFrom(this);
+        if( i == 0 ) {
+            assert( extraOffset == 0 );
+            extraOffset = ofs;
+            assert( extra() == e );
+        }
+        else { 
+            Extra *hd = extra();
+            assert( hd->next(this) == 0 );
+            hd->setNext(ofs);
+        }
+        return e;
+    }
+
     /* you MUST call when adding an index.  see pdfile.cpp */
     IndexDetails& NamespaceDetails::addIndex(const char *thisns, bool resetTransient) {
         assert( nsdetails(thisns) == this );
 
-        if( nIndexes == NIndexesBase && extraOffset == 0 ) { 
-            nsindex(thisns)->allocExtra(thisns);
+        IndexDetails *id;
+        try {
+            id = &idx(nIndexes);
+        }
+        catch(DBException&) { 
+            allocExtra(thisns, nIndexes);
+            id = &idx(nIndexes);
         }
 
-        IndexDetails& id = idx(nIndexes);
         nIndexes++;
         if ( resetTransient )
             NamespaceDetailsTransient::get_w(thisns).addedIndex();
-        return id;
+        return *id;
     }
 
     // must be called when renaming a NS to fix up extra
     void NamespaceDetails::copyingFrom(const char *thisns, NamespaceDetails *src) { 
-        if( extraOffset ) {
-            extraOffset = 0; // so allocExtra() doesn't assert.
-            Extra *e = nsindex(thisns)->allocExtra(thisns);
-            memcpy(e, src->extra(), sizeof(Extra));
-        } 
+        extraOffset = 0; // we are a copy -- the old value is wrong.  fixing it up below.
+        Extra *se = src->extra();
+        int n = NIndexesBase;
+        if( se ) {
+            Extra *e = allocExtra(thisns, n);
+            while( 1 ) {
+                n += NIndexesExtra;
+                e->copy(this, *se);
+                se = se->next(src);
+                if( se == 0 ) break;
+                Extra *nxt = allocExtra(thisns, n);
+                e->setNext( nxt->ofsFrom(this) );
+                e = nxt;
+            } 
+            assert( extraOffset );
+        }
     }
 
     /* returns index of the first index in which the field is present. -1 if not present.
@@ -610,8 +702,8 @@ namespace mongo {
     
     /* ------------------------------------------------------------------------- */
 
-    mongo::mutex NamespaceDetailsTransient::_qcMutex;
-    mongo::mutex NamespaceDetailsTransient::_isMutex;
+    mongo::mutex NamespaceDetailsTransient::_qcMutex("qc");
+    mongo::mutex NamespaceDetailsTransient::_isMutex("is");
     map< string, shared_ptr< NamespaceDetailsTransient > > NamespaceDetailsTransient::_map;
     typedef map< string, shared_ptr< NamespaceDetailsTransient > >::iterator ouriter;
 

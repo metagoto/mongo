@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../client/dbclient.h"
 #include "tool.h"
 
@@ -39,7 +39,7 @@ public:
         
         ofstream out;
         out.open( outputFile.string().c_str() , ios_base::out | ios_base::binary  );
-        ASSERT_STREAM_GOOD( 10262 ,  "couldn't open file" , out );
+        assertStreamGood( 10262 ,  "couldn't open file" , out );
 
         ProgressMeter m( conn( true ).count( coll.c_str() , BSONObj() , QueryOption_SlaveOk ) );
 

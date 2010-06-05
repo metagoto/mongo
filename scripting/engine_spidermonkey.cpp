@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "engine_spidermonkey.h"
 
 #include "../client/dbclient.h"
@@ -23,7 +23,7 @@
 #ifndef _WIN32
 #include <boost/date_time/posix_time/posix_time.hpp>
 #undef assert
-#define assert xassert
+#define assert MONGO_assert
 #endif
 
 #define smuassert( cx , msg , val ) \
@@ -38,6 +38,12 @@
     }
 
 namespace mongo {
+    
+    class InvalidUTF8Exception : public UserException {
+    public:
+        InvalidUTF8Exception() : UserException( 9006 , "invalid utf8" ){
+        }
+    };
 
     string trim( string s ){
         while ( s.size() && isspace( s[0] ) )
@@ -128,6 +134,54 @@ namespace mongo {
         return new BSONFieldIterator( this );
     }
 
+    class TraverseStack {
+    public:
+        TraverseStack(){
+            _o = 0;
+            _parent = 0;
+        }
+
+        TraverseStack( JSObject * o , const TraverseStack * parent ){
+            _o = o;
+            _parent = parent;
+        }
+
+        TraverseStack dive( JSObject * o ) const {
+            if ( o ){
+                uassert( 13076 , (string)"recursive toObject" , ! has( o ) );
+            }
+            return TraverseStack( o , this );
+        }
+
+        int depth() const {
+            int d = 0;
+            const TraverseStack * s = _parent;
+            while ( s ){
+                s = s->_parent;
+                d++;
+            }
+            return d;
+        }
+
+        bool isTop() const {
+            return _parent == 0;
+        }
+        
+        bool has( JSObject * o ) const {
+            if ( ! o )
+                return false;
+            const TraverseStack * s = this;
+            while ( s ){
+                if ( s->_o == o )
+                    return true;
+                s = s->_parent;
+            }
+            return false;
+        }
+
+        JSObject * _o;
+        const TraverseStack * _parent;
+    };
 
     class Convertor : boost::noncopyable {
     public:
@@ -171,7 +225,7 @@ namespace mongo {
                 ( (boost::uint64_t)(boost::uint32_t)getNumber( o , "top" ) << 32 ) +
                 ( boost::uint32_t)( getNumber( o , "bottom" ) );
             } else {
-                val = (boost::uint64_t) getNumber( o, "floatApprox" );
+                val = (boost::uint64_t)(boost::int64_t) getNumber( o, "floatApprox" );
             }
             return val;
         }
@@ -198,7 +252,7 @@ namespace mongo {
             return oid;
         }
 
-        BSONObj toObject( JSObject * o , int depth = 0){
+        BSONObj toObject( JSObject * o , const TraverseStack& stack=TraverseStack() ){
             if ( ! o )
                 return BSONObj();
 
@@ -222,10 +276,10 @@ namespace mongo {
 
             if ( ! appendSpecialDBObject( this , b , "value" , OBJECT_TO_JSVAL( o ) , o ) ){
 
-                if ( depth == 0 ){
+                if ( stack.isTop() ){
                     jsval theid = getProperty( o , "_id" );
                     if ( ! JSVAL_IS_VOID( theid ) ){
-                        append( b , "_id" , theid , EOO , depth + 1 );
+                        append( b , "_id" , theid , EOO , stack.dive( o ) );
                     }
                 }
                 
@@ -237,10 +291,10 @@ namespace mongo {
                     jsval nameval;
                     assert( JS_IdToValue( _context ,id , &nameval ) );
                     string name = toString( nameval );
-                    if ( depth == 0 && name == "_id" )
+                    if ( stack.isTop() && name == "_id" )
                         continue;
                     
-                    append( b , name , getProperty( o , name.c_str() ) , orig[name].type() , depth + 1 );
+                    append( b , name , getProperty( o , name.c_str() ) , orig[name].type() , stack.dive( o ) );
                 }
 
                 JS_DestroyIdArray( _context , properties );
@@ -274,7 +328,7 @@ namespace mongo {
             b.appendRegex( name.c_str() , s.substr( 0 , end ).c_str() , s.substr( end + 1 ).c_str() );
         }
 
-        void append( BSONObjBuilder& b , string name , jsval val , BSONType oldType = EOO , int depth=0 ){
+        void append( BSONObjBuilder& b , string name , jsval val , BSONType oldType = EOO , const TraverseStack& stack=TraverseStack() ){
             //cout << "name: " << name << "\t" << typeString( val ) << " oldType: " << oldType << endl;
             switch ( JS_TypeOfValue( _context , val ) ){
 
@@ -298,7 +352,7 @@ namespace mongo {
                     b.appendNull( name.c_str() );
                 }
                 else if ( ! appendSpecialDBObject( this , b , name , val , o ) ){
-                    BSONObj sub = toObject( o , depth );
+                    BSONObj sub = toObject( o , stack );
                     if ( JS_IsArrayObject( _context , o ) ){
                         b.appendArray( name.c_str() , sub );
                     }
@@ -334,7 +388,7 @@ namespace mongo {
         }
 
         bool isSimpleStatement( const string& code ){
-            if ( code.find( "return" ) != string::npos )
+            if ( hasJSReturn( code ) )
                 return false;
 
             if ( code.find( ";" ) != string::npos &&
@@ -416,7 +470,7 @@ namespace mongo {
             JSFunction * func = JS_CompileFunction( _context , assoc , fname.str().c_str() , params.size() , paramArray.get() , code.c_str() , strlen( code.c_str() ) , "nofile_b" , 0 );
 
             if ( ! func ){
-                cout << "compile failed for: " << raw << endl;
+                log() << "compile failed for: " << raw << endl;
                 return 0;
             }
             gcName = "cf normal";
@@ -449,11 +503,11 @@ namespace mongo {
             free( dst );
 
             if ( ! res ){
-                cout << "decode failed. probably invalid utf-8 string [" << c << "]" << endl;
+                tlog() << "decode failed. probably invalid utf-8 string [" << c << "]" << endl;
                 jsval v;
                 if ( JS_GetPendingException( _context , &v ) )
-                    cout << "\t why: " << toString( v ) << endl;
-                throw UserException( 9006 , "invalid utf8" );
+                    tlog() << "\t why: " << toString( v ) << endl;
+                throw InvalidUTF8Exception();
             }
 
             assert( s );
@@ -615,7 +669,7 @@ namespace mongo {
             }
             }
 
-            cout << "toval: unknown type: " << e.type() << endl;
+            log() << "toval: unknown type: " << (int) e.type() << endl;
             uassert( 10218 ,  "not done: toval" , 0 );
             return 0;
         }
@@ -934,7 +988,15 @@ namespace mongo {
             return JS_TRUE;
         }
 
-        jsval val = c.toval( e );
+        jsval val;
+        try {
+            val = c.toval( e );
+        }
+        catch ( InvalidUTF8Exception& ) {
+            JS_LeaveLocalRootScope( cx );
+            JS_ReportError( cx , "invalid utf8" );
+            return JS_FALSE;
+        }
 
         assert( ! holder->_inResolve );
         holder->_inResolve = true;
@@ -1432,7 +1494,7 @@ namespace mongo {
             ss << " " << report->filename << ":" << report->lineno;
         }
 
-        log() << ss.str() << endl;
+        tlog() << ss.str() << endl;
 
         if ( currentScope.get() ){
             currentScope->gotError( ss.str() );

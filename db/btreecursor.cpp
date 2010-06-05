@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "btree.h"
 #include "pdfile.h"
 #include "jsobj.h"
@@ -41,6 +41,7 @@ namespace mongo {
     {
         audit();
         init();
+        DEV assert( dups.size() == 0 );
     }
 
     BtreeCursor::BtreeCursor( NamespaceDetails *_d, int _idxNo, const IndexDetails& _id, const vector< pair< BSONObj, BSONObj > > &_bounds, int _direction )
@@ -58,6 +59,7 @@ namespace mongo {
         assert( !bounds_.empty() );
         audit();
         initInterval();
+        DEV assert( dups.size() == 0 );
     }
 
     void BtreeCursor::audit() {
@@ -82,7 +84,7 @@ namespace mongo {
         }
         bool found;
         bucket = indexDetails.head.btree()->
-        locate(indexDetails, indexDetails.head, startKey, order, keyOfs, found, direction > 0 ? minDiskLoc : maxDiskLoc, direction);
+            locate(indexDetails, indexDetails.head, startKey, Ordering::make(order), keyOfs, found, direction > 0 ? minDiskLoc : maxDiskLoc, direction);
         skipUnusedKeys();
         checkEnd();        
     }
@@ -173,15 +175,25 @@ namespace mongo {
 
             // Note keyAt() returns an empty BSONObj if keyOfs is now out of range,
             // which is possible as keys may have been deleted.
-            if ( b->keyAt(keyOfs).woEqual(keyAtKeyOfs) &&
+            int x = 0;
+            while( 1 ) {
+                if ( b->keyAt(keyOfs).woEqual(keyAtKeyOfs) &&
                     b->k(keyOfs).recordLoc == locAtKeyOfs ) {
-                if ( !b->k(keyOfs).isUsed() ) {
-                    /* we were deleted but still exist as an unused
-                       marker key. advance.
-                    */
-                    skipUnusedKeys();
+                        if ( !b->k(keyOfs).isUsed() ) {
+                            /* we were deleted but still exist as an unused
+                            marker key. advance.
+                            */
+                            skipUnusedKeys();
+                        }
+                        return;
                 }
-                return;
+
+                /* we check one key earlier too, in case a key was just deleted.  this is 
+                   important so that multi updates are reasonably fast.
+                   */
+                if( keyOfs == 0 || x++ )
+                    break;
+                keyOfs--;
             }
         }
 
@@ -192,7 +204,7 @@ namespace mongo {
         bool found;
 
         /* TODO: Switch to keep indexdetails and do idx.head! */
-        bucket = indexDetails.head.btree()->locate(indexDetails, indexDetails.head, keyAtKeyOfs, order, keyOfs, found, locAtKeyOfs, direction);
+        bucket = indexDetails.head.btree()->locate(indexDetails, indexDetails.head, keyAtKeyOfs, Ordering::make(order), keyOfs, found, locAtKeyOfs, direction);
         RARELY log() << "  key seems to have moved in the index, refinding. found:" << found << endl;
         if ( ! bucket.isNull() )
             skipUnusedKeys();

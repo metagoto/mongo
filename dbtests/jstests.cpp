@@ -17,10 +17,10 @@
  *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "../db/instance.h"
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../scripting/engine.h"
 
 #include "dbtests.h"
@@ -531,7 +531,12 @@ namespace JSTests {
             ASSERT( s->exec( "printjson( a ); b = {b:a.a}", "foo", false, true, false ) );
             out = s->getObject( "b" );
             ASSERT_EQUALS( mongo::NumberLong, out.firstElement().type() );
-            ASSERT_EQUALS( val, out.firstElement().numberLong() );
+            if( val != out.firstElement().numberLong() ) {
+                cout << val << endl;
+                cout << out.firstElement().numberLong() << endl;
+                cout << out.toString() << endl;
+                ASSERT_EQUALS( val, out.firstElement().numberLong() );
+            }
             
             ASSERT( s->exec( "c = {c:a.a.toString()}", "foo", false, true, false ) );
             out = s->getObject( "c" );
@@ -652,6 +657,37 @@ namespace JSTests {
         }        
         static const char *ns() { return "unittest.jstests.longutf8string"; }
     };
+
+    class InvalidUTF8Check {
+    public:
+        void run(){
+            if( !globalScriptEngine->utf8Ok() )
+                return;
+
+            auto_ptr<Scope> s;
+            s.reset( globalScriptEngine->newScope() );
+
+            BSONObj b;
+            {
+                char crap[5];
+
+                crap[0] = (char) 128;
+                crap[1] = 17;
+                crap[2] = (char) 128;
+                crap[3] = 17;
+                crap[4] = 0;
+                
+                BSONObjBuilder bb;
+                bb.append( "x" , crap );
+                b = bb.obj();
+            }
+            
+            //cout << "ELIOT: " << b.jsonString() << endl;
+            s->setThis( &b );
+            // its ok  if this is handled by js, just can't create a c++ exception
+            s->invoke( "x=this.x.length;" , BSONObj() ); 
+        }
+    };
     
     class CodeTests {
     public:
@@ -701,7 +737,8 @@ namespace JSTests {
             
             {
                 BSONObj fromA = client.findOne( _a , BSONObj() );
-                cout << "Froma : " << fromA << endl;
+                assert( fromA.valid() );
+                //cout << "Froma : " << fromA << endl;
                 BSONObjBuilder b;
                 b.append( "b" , 18 );
                 b.appendDBRef( "c" , "dbref.a" , fromA["_id"].__oid() );
@@ -857,7 +894,7 @@ namespace JSTests {
             add< ResetScope >();
             add< FalseTests >();
             add< SimpleFunctions >();
-
+            
             add< ObjectMapping >();
             add< ObjectDecoding >();
             add< JSOIDTests >();
@@ -867,10 +904,8 @@ namespace JSTests {
             add< SpecialDBTypes >();
             add< TypeConservation >();
             add< NumberLong >();
-
+            
             add< WeirdObjects >();
-            add< Utf8Check >();
-            add< LongUtf8String >();
             add< CodeTests >();
             add< DBRefTest >();
             add< InformalDBRef >();
@@ -879,6 +914,10 @@ namespace JSTests {
             add< VarTests >();
             
             add< Speed1 >();
+
+            add< InvalidUTF8Check >();
+            add< Utf8Check >();
+            add< LongUtf8String >();
         }
     } myall;
     

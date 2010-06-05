@@ -15,12 +15,14 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 
 #ifndef USE_ASIO
 
 #include "message.h"
 #include "message_server.h"
+
+#include "../db/cmdline.h"
 
 namespace mongo {
 
@@ -28,40 +30,52 @@ namespace mongo {
 
         MessagingPort * grab = 0;
         MessageHandler * handler;
-
+        
         void threadRun(){
+            TicketHolderReleaser connTicketReleaser( &connTicketHolder );
+        
             assert( grab );
-            MessagingPort * p = grab;
+            auto_ptr<MessagingPort> p( grab );
             grab = 0;
-            
+        
+            string otherSide;
+    
             Message m;
             try {
+                otherSide = p->farEnd.toString();
+
                 while ( 1 ){
                     m.reset();
 
                     if ( ! p->recv(m) ) {
-                        log() << "end connection " << p->farEnd.toString() << endl;
+                        if( !cmdLine.quiet )
+                            log() << "end connection " << otherSide << endl;
                         p->shutdown();
                         break;
                     }
                     
-                    handler->process( m , p );
+                    handler->process( m , p.get() );
                 }
+            }
+            catch ( const SocketException& ){
+                log() << "unclean socket shutdown from: " << otherSide << endl;
+            }
+            catch ( const std::exception& e ){
+                problem() << "uncaught exception (" << e.what() << ")(" << demangleName( typeid(e) ) <<") in PortMessageServer::threadRun, closing connection" << endl;
             }
             catch ( ... ){
                 problem() << "uncaught exception in PortMessageServer::threadRun, closing connection" << endl;
-                delete p;
             }            
             
+            handler->disconnected( p.get() );
         }
 
     }
 
     class PortMessageServer : public MessageServer , public Listener {
     public:
-        PortMessageServer( int port , MessageHandler * handler ) :
-            MessageServer( port , handler ) , 
-            Listener( "", port ){
+            PortMessageServer(  const MessageServer::Options& opts, MessageHandler * handler ) :
+            Listener( opts.ipList, opts.port ){
             
             uassert( 10275 ,  "multiple PortMessageServer not supported" , ! pms::handler );
             pms::handler = handler;
@@ -70,23 +84,44 @@ namespace mongo {
         virtual void accepted(MessagingPort * p) {
             assert( ! pms::grab );
             pms::grab = p;
-            boost::thread thr( pms::threadRun );
-            while ( pms::grab )
-                sleepmillis(1);
+            
+            if ( ! connTicketHolder.tryAcquire() ){
+                log() << "connection refused because too many open connections" << endl;
+
+                // TODO: would be nice if we notified them...
+                p->shutdown();
+                
+                pms::grab = 0;
+                sleepmillis(2); // otherwise we'll hard loop
+                return;
+            }
+
+            try {
+                boost::thread thr( pms::threadRun );
+                while ( pms::grab ){
+                    sleepmillis(1);
+                }
+            }
+            catch ( boost::thread_resource_error& ){
+                log() << "can't create new thread, closing connection" << endl;
+                p->shutdown();
+                pms::grab = 0;
+                sleepmillis(2);
+            }
         }
         
         void run(){
-            assert( init() );
-            listen();
+            initAndListen();
         }
 
     };
 
 
-    MessageServer * createServer( int port , MessageHandler * handler ){
-        return new PortMessageServer( port , handler );
+    MessageServer * createServer( const MessageServer::Options& opts , MessageHandler * handler ){
+        return new PortMessageServer( opts , handler );
     }    
 
+    TicketHolder connTicketHolder(20000);
 }
 
 #endif

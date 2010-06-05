@@ -29,23 +29,12 @@
 
 #pragma once
 
-#if BOOST_VERSION >= 103500
-#include <boost/thread/shared_mutex.hpp>
-#undef assert
-#define assert xassert
-#define HAVE_READLOCK
-#else
-#warning built with boost version 1.34 or older - limited concurrency
-#endif
+#include "../util/concurrency/locks.h"
 
 namespace mongo {
 
     inline bool readLockSupported(){
-#ifdef HAVE_READLOCK
         return true;
-#else
-        return false;
-#endif
     }
 
     string sayClientState();
@@ -87,11 +76,9 @@ namespace mongo {
         }
     };
 
-#ifdef HAVE_READLOCK
-//#if 0
     class MongoMutex {
         MutexInfo _minfo;
-        boost::shared_mutex _m;
+        RWLock _m;
         ThreadLocalValue<int> _state;
 
         /* we use a separate TLS value for releasedEarly - that is ok as 
@@ -99,6 +86,8 @@ namespace mongo {
         */
         ThreadLocalValue<bool> _releasedEarly;
     public:
+        MongoMutex(const char * name) : _m(name) { }
+
         /**
          * @return
          *    > 0  write lock
@@ -113,16 +102,25 @@ namespace mongo {
         bool atLeastReadLocked() { return _state.get() != 0; }
         void assertAtLeastReadLocked() { assert(atLeastReadLocked()); }
 
-        void lock() { 
+        bool _checkWriteLockAlready(){
             //DEV cout << "LOCK" << endl;
             DEV assert( haveClient() );
                 
             int s = _state.get();
             if( s > 0 ) {
                 _state.set(s+1);
-                return;
+                return true;
             }
+
             massert( 10293 , (string)"internal error: locks are not upgradeable: " + sayClientState() , s == 0 );
+
+            return false;
+        }
+
+        void lock() { 
+            if ( _checkWriteLockAlready() )
+                return;
+            
             _state.set(1);
 
             curopWaitingForLock( 1 );
@@ -131,6 +129,24 @@ namespace mongo {
 
             _minfo.entered();
         }
+
+        bool lock_try( int millis ) { 
+            if ( _checkWriteLockAlready() )
+                return true;
+
+            curopWaitingForLock( 1 );
+            bool got = _m.lock_try( millis ); 
+            curopGotLock();
+            
+            if ( got ){
+                _minfo.entered();
+                _state.set(1);
+            }                
+            
+            return got;
+        }
+
+
         void unlock() { 
             //DEV cout << "UNLOCK" << endl;
             int s = _state.get();
@@ -188,10 +204,8 @@ namespace mongo {
                 lock_shared();
                 return true;
             }
-            
-            boost::system_time until = get_system_time();
-            until += boost::posix_time::milliseconds(2);
-            bool got = _m.timed_lock_shared( until );
+
+            bool got = _m.lock_shared_try( millis );
             if ( got )
                 _state.set(-1);
             return got;
@@ -216,76 +230,11 @@ namespace mongo {
         
         MutexInfo& info() { return _minfo; }
     };
-#else
-    /* this will be for old versions of boost */
-    class MongoMutex { 
-        MutexInfo _minfo;
-        boost::recursive_mutex m;
-        ThreadLocalValue<bool> _releasedEarly;
-    public:
-        MongoMutex() { }
-        void lock() { 
-#ifdef HAVE_READLOCK
-            m.lock();
-#else
-            boost::detail::thread::lock_ops<boost::recursive_mutex>::lock(m);
-#endif
-            _minfo.entered();
-        }
-
-        void releaseEarly() {
-            assertWriteLocked(); // aso must not be recursive, although we don't verify that in the old boost version
-            assert( !_releasedEarly.get() );
-            _releasedEarly.set(true);
-            _unlock();
-        }
-
-        void _unlock() {
-            _minfo.leaving();
-#ifdef HAVE_READLOCK
-            m.unlock();
-#else
-            boost::detail::thread::lock_ops<boost::recursive_mutex>::unlock(m);
-#endif
-        }
-        void unlock() { 
-            if( _releasedEarly.get() ) { 
-                _releasedEarly.set(false);
-                return;
-            }
-            _unlock();
-        }
-
-        void lock_shared() { lock(); }
-        bool lock_shared_try( int millis ) {
-            while ( millis-- ){
-                if ( getState() ){
-                    sleepmillis(1);
-                    continue;
-                }
-                lock_shared();
-                return true;
-            }
-            return false;
-        }
-                    
-        void unlock_shared() { unlock(); }
-        MutexInfo& info() { return _minfo; }
-        void assertWriteLocked() { 
-            assert( info().isLocked() );
-        }
-        void assertAtLeastReadLocked() { 
-            assert( info().isLocked() );
-        }
-        bool atLeastReadLocked() { return info().isLocked(); }
-        int getState(){ return info().isLocked() ? 1 : 0; }
-    };
-#endif
 
     extern MongoMutex &dbMutex;
 
-	void dbunlocking_write();
-	void dbunlocking_read();
+    inline void dbunlocking_write() { }
+    inline void dbunlocking_read() { }
 
     struct writelock {
         writelock(const string& ns) {
@@ -321,12 +270,37 @@ namespace mongo {
                 dbMutex.unlock_shared();
             }
         }
-        bool got(){
-            return _got;
-        }
+        bool got() const { return _got; }
+    private:
         bool _got;
     };
-    
+
+    struct writelocktry {
+        writelocktry( const string&ns , int tryms ){
+            _got = dbMutex.lock_try( tryms );
+        }
+        ~writelocktry() {
+            if ( _got ){
+                dbunlocking_read();
+                dbMutex.unlock();
+            }
+        }
+        bool got() const { return _got; }
+    private:
+        bool _got;
+    };
+
+
+    struct readlocktryassert : public readlocktry { 
+        readlocktryassert(const string& ns, int tryms) : 
+          readlocktry(ns,tryms) { 
+              uassert(13142, "timeout getting readlock", got());
+        }
+    };
+
+    /** assure we have at least a read lock - they key with this being
+        if you have a write lock, that's ok too.
+    */
     struct atleastreadlock {
         atleastreadlock( const string& ns ){
             _prev = dbMutex.getState();
@@ -337,7 +311,7 @@ namespace mongo {
             if ( _prev == 0 )
                 dbMutex.unlock_shared();
         }
-
+    private:
         int _prev;
     };
 
@@ -366,11 +340,9 @@ namespace mongo {
         void releaseAndWriteLock();
     };
     
-	/* use writelock and readlock instead */
+    /* use writelock and readlock instead */
     struct dblock : public writelock {
         dblock() : writelock("") { }
-        ~dblock() { 
-        }
     };
 
     // eliminate

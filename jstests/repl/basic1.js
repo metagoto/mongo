@@ -7,22 +7,8 @@ var rt = new ReplTest( "basic1" );
 m = rt.start( true );
 s = rt.start( false );
 
-function hash( db ){
-    var s = "";
-    var a = db.getCollectionNames();
-    a = a.sort();
-    a.forEach(
-        function(cn){
-            var c = db.getCollection( cn );
-            s += cn + "\t" + c.find().count() + "\n";
-            c.find().sort( { _id : 1 } ).forEach(
-                function(o){
-                    s += tojson( o , "" , true ) + "\n";
-                }
-            );
-        }
-    );
-    return s;
+function block(){
+    am.runCommand( { getlasterror : 1 , w : 2 , wtimeout : 3000 } )
 }
 
 am = m.getDB( "foo" );
@@ -32,13 +18,13 @@ function check( note ){
     var start = new Date();
     var x,y;
     while ( (new Date()).getTime() - start.getTime() < 30000 ){
-        x = hash( am );
-        y = hash( as );
-        if ( x == y )
+        x = am.runCommand( "dbhash" );
+        y = as.runCommand( "dbhash" );
+        if ( x.md5 == y.md5 )
             return;
         sleep( 200 );
     }
-    assert.eq( x , y , note );
+    assert.eq( x.md5 , y.md5 , note );
 }
 
 am.a.save( { x : 1 } );
@@ -90,12 +76,56 @@ checkMR( am.mr );
 checkMR( as.mr );
 checkNumCollections( "MR2" );
 
-sleep( 3000 );
+block();
 checkNumCollections( "MR3" );
 
 var res = am.mr.mapReduce( m , r , { out : "xyz" } );
-sleep( 3000 );
+block();
+
 checkNumCollections( "MR4" );
+
+
+t = am.rpos;
+t.insert( { _id : 1 , a : [ { n : "a" , c : 1 } , { n : "b" , c : 1 } , { n : "c" , c : 1 } ] , b : [ 1 , 2 , 3 ] } )
+block();
+check( "after pos 1 " );
+
+t.update( { "a.n" : "b" } , { $inc : { "a.$.c" : 1 } } )
+block();
+check( "after pos 2 " );
+
+t.update( { "b" : 2 } , { $inc : { "b.$" : 1 } } )
+block();
+check( "after pos 3 " );
+
+t.update( { "b" : 3} , { $set : { "b.$" : 17 } } )
+block();
+check( "after pos 4 " );
+
+
+printjson( am.rpos.findOne() )
+printjson( as.rpos.findOne() )
+
+//am.getSisterDB( "local" ).getCollection( "oplog.$main" ).find().limit(10).sort( { $natural : -1 } ).forEach( printjson )
+
+t = am.b;
+t.update( { "_id" : "fun"}, { $inc : {"a.b.c.x" : 6743} } , true, false)
+block()
+check( "b 1" );
+
+t.update( { "_id" : "fun"}, { $inc : {"a.b.c.x" : 5} } , true, false)
+block()
+check( "b 2" );
+
+t.update( { "_id" : "fun"}, { $inc : {"a.b.c.x" : 100, "a.b.c.y" : 911} } , true, false)
+block()
+assert.eq( { _id : "fun" , a : { b : { c : { x : 6848 , y : 911 } } } } , as.b.findOne() , "b 3" );
+//printjson( t.findOne() )
+//printjson( as.b.findOne() )
+//am.getSisterDB( "local" ).getCollection( "oplog.$main" ).find().sort( { $natural : -1 } ).limit(3).forEach( printjson )
+check( "b 4" );
+
+
 
 rt.stop();
 

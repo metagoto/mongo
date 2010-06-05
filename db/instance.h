@@ -29,9 +29,6 @@ namespace mongo {
 
     extern string dbExecCommand;
 
-#define OPWRITE if( _diaglog.level & 1 ) _diaglog.write((char *) m.data, m.data->len);
-#define OPREAD if( _diaglog.level & 2 ) _diaglog.readop((char *) m.data, m.data->len);
-
     struct DiagLog {
         ofstream *f;
         /* 0 = off; 1 = writes, 2 = reads, 3 = both
@@ -40,7 +37,7 @@ namespace mongo {
         int level;
         mongo::mutex mutex;
 
-        DiagLog() : f(0) , level(0) { }
+        DiagLog() : f(0) , level(0), mutex("DiagLog") { }
         void init() {
             if ( ! f && level ){
                 log() << "diagLogging = " << level << endl;
@@ -105,10 +102,8 @@ namespace mongo {
             delete response;
         }
     };
-
-    static SockAddr unknownAddress( "0.0.0.0", 0 );
     
-    bool assembleResponse( Message &m, DbResponse &dbresponse, const sockaddr_in &client = unknownAddress.sa );
+    bool assembleResponse( Message &m, DbResponse &dbresponse, const SockAddr &client = unknownAddress );
 
     void getDatabaseNames( vector< string > &names );
 
@@ -135,6 +130,8 @@ namespace mongo {
             // don't need to piggy back when connected locally
             return say( toSend );
         }
+
+        virtual void killCursor( long long cursorID );
     };
 
     extern int lockFile;

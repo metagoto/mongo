@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "../util/message.h"
 #include "../db/jsobj.h"
 #include "../db/json.h"
@@ -59,7 +59,13 @@ namespace mongo {
         /** Use with QueryOption_CursorTailable.  If we are at the end of the data, block for a while rather 
             than returning no data. After a timeout period, we do return as normal.
         */
-        QueryOption_AwaitData = 1 << 5
+        QueryOption_AwaitData = 1 << 5,
+
+        /** Stream the data down full blast in multiple "more" packages, on the assumption that the client 
+            will fully read all data queried.  Faster when you are pulling a lot of data and know you want to 
+            pull it all down.  Note: it is not allowed to not read all the data unless you close the connection.
+            */
+        QueryOption_Exhaust = 1 << 6
 
     };
 
@@ -72,7 +78,19 @@ namespace mongo {
         UpdateOption_Multi = 1 << 1
     };
 
+    /**
+     * controls how much a clients cares about writes
+     * default is NORMAL
+     */
+    enum WriteConcern {
+        W_NONE = 0 , // TODO: not every connection type fully supports this
+        W_NORMAL = 1
+        // TODO SAFE = 2
+    };
+
     class BSONObj;
+    class ScopedDbConnection;
+    class DBClientCursor;
 
     /** Represents a Mongo query expression.  Typically one uses the QUERY(...) macro to construct a Query object. 
         Examples:
@@ -160,7 +178,7 @@ namespace mongo {
         /**
          * if this query has an orderby, hint, or some other field
          */
-        bool isComplex() const;
+        bool isComplex( bool * hasDollar = 0 ) const;
         
         BSONObj getFilter() const;
         BSONObj getSort() const;
@@ -198,143 +216,6 @@ namespace mongo {
         virtual void checkResponse( const string &data, int nReturned ) {}
     };
 
-	/** Queries return a cursor object */
-    class DBClientCursor : boost::noncopyable {
-        friend class DBClientBase;
-        bool init();
-    public:
-		/** If true, safe to call next().  Requests more from server if necessary. */
-        bool more();
-
-        /** If true, there is more in our local buffers to be fetched via next(). Returns 
-            false when a getMore request back to server would be required.  You can use this 
-            if you want to exhaust whatever data has been fetched to the client already but 
-            then perhaps stop.
-        */
-        bool moreInCurrentBatch() { return !_putBack.empty() || pos < nReturned; }
-
-        /** next
-		   @return next object in the result cursor.
-           on an error at the remote server, you will get back:
-             { $err: <string> }
-           if you do not want to handle that yourself, call nextSafe().
-        */
-        BSONObj next();
-        
-        /** 
-            restore an object previously returned by next() to the cursor
-         */
-        void putBack( const BSONObj &o ) { _putBack.push( o.getOwned() ); }
-
-		/** throws AssertionException if get back { $err : ... } */
-        BSONObj nextSafe() {
-            BSONObj o = next();
-            BSONElement e = o.firstElement();
-            assert( strcmp(e.fieldName(), "$err") != 0 );
-            return o;
-        }
-
-        /**
-           iterate the rest of the cursor and return the number if items
-         */
-        int itcount(){
-            int c = 0;
-            while ( more() ){
-                next();
-                c++;
-            }
-            return c;
-        }
-
-        /** cursor no longer valid -- use with tailable cursors.
-           note you should only rely on this once more() returns false;
-           'dead' may be preset yet some data still queued and locally
-           available from the dbclientcursor.
-        */
-        bool isDead() const {
-            return cursorId == 0;
-        }
-
-        bool tailable() const {
-            return (opts & QueryOption_CursorTailable) != 0;
-        }
-        
-        /** see QueryResult::ResultFlagType (db/dbmessage.h) for flag values 
-            mostly these flags are for internal purposes - 
-            ResultFlag_ErrSet is the possible exception to that
-        */
-        bool hasResultFlag( int flag ){
-            return (resultFlags & flag) != 0;
-        }
-
-        DBClientCursor( DBConnector *_connector, const string &_ns, BSONObj _query, int _nToReturn,
-                        int _nToSkip, const BSONObj *_fieldsToReturn, int queryOptions , int bs ) :
-                connector(_connector),
-                ns(_ns),
-                query(_query),
-                nToReturn(_nToReturn),
-                haveLimit( _nToReturn > 0 && !(queryOptions & QueryOption_CursorTailable)),
-                nToSkip(_nToSkip),
-                fieldsToReturn(_fieldsToReturn),
-                opts(queryOptions),
-                batchSize(bs),
-                m(new Message()),
-                cursorId(),
-                nReturned(),
-                pos(),
-                data(),
-                _ownCursor( true ) {
-        }
-        
-        DBClientCursor( DBConnector *_connector, const string &_ns, long long _cursorId, int _nToReturn, int options ) :
-                connector(_connector),
-                ns(_ns),
-                nToReturn( _nToReturn ),
-                haveLimit( _nToReturn > 0 && !(options & QueryOption_CursorTailable)),
-                opts( options ),
-                m(new Message()),
-                cursorId( _cursorId ),
-                nReturned(),
-                pos(),
-                data(),
-                _ownCursor( true ) {
-        }            
-
-        virtual ~DBClientCursor();
-
-        long long getCursorId() const { return cursorId; }
-
-        /** by default we "own" the cursor and will send the server a KillCursor
-            message when ~DBClientCursor() is called. This function overrides that.
-        */
-        void decouple() { _ownCursor = false; }
-        
-    private:
-        
-        int nextBatchSize();
-
-        DBConnector *connector;
-        string ns;
-        BSONObj query;
-        int nToReturn;
-        bool haveLimit;
-        int nToSkip;
-        const BSONObj *fieldsToReturn;
-        int opts;
-        int batchSize;
-        auto_ptr<Message> m;
-        stack< BSONObj > _putBack;
-
-        int resultFlags;
-        long long cursorId;
-        int nReturned;
-        int pos;
-        const char *data;
-        void dataReceived();
-        void requestMore();
-        bool _ownCursor; // see decouple()
-    };
-    
     /**
        The interface that any db connection should implement
      */
@@ -371,33 +252,38 @@ namespace mongo {
     class DBClientWithCommands : public DBClientInterface {
         set<string> _seenIndexes;
     public:
+        /** controls how chatty the client is about network errors & such.  See log.h */
+        int _logLevel;
 
-		/** helper function.  run a simple command where the command expression is simply
-			  { command : 1 }
+        DBClientWithCommands() : _logLevel(0) { }
+
+        /** helper function.  run a simple command where the command expression is simply
+              { command : 1 }
             @param info -- where to put result object.  may be null if caller doesn't need that info
             @param command -- command name
-			@return true if the command returned "ok".
-		*/
+            @return true if the command returned "ok".
+         */
         bool simpleCommand(const string &dbname, BSONObj *info, const string &command);
 
         /** Run a database command.  Database commands are represented as BSON objects.  Common database
             commands have prebuilt helper functions -- see below.  If a helper is not available you can
-			directly call runCommand.
+            directly call runCommand.
 
             @param dbname database name.  Use "admin" for global administrative commands.
 			@param cmd  the command object to execute.  For example, { ismaster : 1 }
 			@param info the result object the database returns. Typically has { ok : ..., errmsg : ... } fields
 			       set.
-			@return true if the command returned "ok".
+            @param options see enum QueryOptions - normally not needed to run a command
+            @return true if the command returned "ok".
         */
         virtual bool runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options=0);
 
         /** Authorize access to a particular database.
-			Authentication is separate for each database on the server -- you may authenticate for any 
-			number of databases on a single connection.
-			The "admin" database is special and once authenticated provides access to all databases on the 
-			server.
-			@param digestPassword if password is plain text, set this to true.  otherwise assumed to be pre-digested
+            Authentication is separate for each database on the server -- you may authenticate for any 
+            number of databases on a single connection.
+            The "admin" database is special and once authenticated provides access to all databases on the 
+            server.
+            @param digestPassword if password is plain text, set this to true.  otherwise assumed to be pre-digested
             @return true if successful
         */
         virtual bool auth(const string &dbname, const string &username, const string &pwd, string& errmsg, bool digestPassword = true);
@@ -445,6 +331,8 @@ namespace mongo {
 			@return full error object.
 		*/
 		BSONObj getLastErrorDetailed();
+
+        static string getLastErrorString( const BSONObj& res );
 
         /** Return the last error which has occurred, even if not the very last operation.
 
@@ -673,18 +561,28 @@ namespace mongo {
      abstract class that implements the core db operations
      */
     class DBClientBase : public DBClientWithCommands, public DBConnector {
+
+    protected:
+        WriteConcern _writeConcern;
+
     public:
+        DBClientBase(){
+            _writeConcern = W_NORMAL;
+        }
+        
+        WriteConcern getWriteConcern() const { return _writeConcern; }
+        void setWriteConcern( WriteConcern w ){ _writeConcern = w; }
+        
         /** send a query to the database.
-         ns:            namespace to query, format is <dbname>.<collectname>[.<collectname>]*
-         query:         query to perform on the collection.  this is a BSONObj (binary JSON)
+         @param ns namespace to query, format is <dbname>.<collectname>[.<collectname>]*
+         @param query query to perform on the collection.  this is a BSONObj (binary JSON)
          You may format as
            { query: { ... }, orderby: { ... } }
          to specify a sort order.
-         nToReturn:     n to return.  0 = unlimited
-         nToSkip:       start with the nth item
-         fieldsToReturn:
-         optional template of which fields to select. if unspecified, returns all fields
-         queryOptions:  see options enum at top of this file
+         @param nToReturn n to return.  0 = unlimited
+         @param nToSkip start with the nth item
+         @param fieldsToReturn optional template of which fields to select. if unspecified, returns all fields
+         @param queryOptions see options enum at top of this file
 
          @return    cursor.   0 if error (connection failure)
          @throws AssertionException
@@ -717,11 +615,13 @@ namespace mongo {
         /**
            updates objects matching query
          */
-        virtual void update( const string &ns , Query query , BSONObj obj , bool upsert = 0 , bool multi = 0 );
+        virtual void update( const string &ns , Query query , BSONObj obj , bool upsert = false , bool multi = false );
         
         virtual string getServerAddress() const = 0;
         
         virtual bool isFailed() const = 0;
+        
+        virtual void killCursor( long long cursorID ) = 0;
 
         static int countCommas( const string& s ){
             int n = 0;
@@ -730,7 +630,7 @@ namespace mongo {
                     n++;
             return n;
         }
-    };
+    }; // end DBClientBase
     
     class DBClientPaired;
     
@@ -745,8 +645,8 @@ namespace mongo {
     */
     class DBClientConnection : public DBClientBase {
         DBClientPaired *clientPaired;
-        auto_ptr<MessagingPort> p;
-        auto_ptr<SockAddr> server;
+        boost::scoped_ptr<MessagingPort> p;
+        boost::scoped_ptr<SockAddr> server;
         bool failed; // true if some sort of fatal error has ever happened
         bool autoReconnect;
         time_t lastReconnectTry;
@@ -754,14 +654,17 @@ namespace mongo {
         void _checkConnection();
         void checkConnection() { if( failed ) _checkConnection(); }
 		map< string, pair<string,string> > authCache;
+        int _timeout;
     public:
 
         /**
            @param _autoReconnect if true, automatically reconnect on a connection failure
            @param cp used by DBClientPaired.  You do not need to specify this parameter
+           @param timeout tcp timeout in seconds - this is for read/write, not connect.  
+           Connect timeout is fixed, but short, at 5 seconds.
          */
-        DBClientConnection(bool _autoReconnect=false,DBClientPaired* cp=0) :
-                clientPaired(cp), failed(false), autoReconnect(_autoReconnect), lastReconnectTry(0) { }
+        DBClientConnection(bool _autoReconnect=false, DBClientPaired* cp=0, int timeout=0) :
+                clientPaired(cp), failed(false), autoReconnect(_autoReconnect), lastReconnectTry(0), _timeout(timeout) { }
 
         /** Connect to a Mongo database server.
 
@@ -769,6 +672,7 @@ namespace mongo {
            false was returned -- it will try to connect again.
 
            @param serverHostname host to connect to.  can include port number ( 127.0.0.1 , 127.0.0.1:5555 )
+                                 If you use IPv6 you must add a port number ( ::1:27017 )
            @param errmsg any relevant error message will appended to the string
            @return false if fails to connect.
         */
@@ -790,7 +694,7 @@ namespace mongo {
 
         virtual bool auth(const string &dbname, const string &username, const string &pwd, string& errmsg, bool digestPassword = true);
 
-        virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
+        virtual auto_ptr<DBClientCursor> query(const string &ns, Query query=Query(), int nToReturn = 0, int nToSkip = 0,
                                                const BSONObj *fieldsToReturn = 0, int queryOptions = 0 , int batchSize = 0 ) {
             checkConnection();
             return DBClientBase::query( ns, query, nToReturn, nToSkip, fieldsToReturn, queryOptions , batchSize );
@@ -805,7 +709,7 @@ namespace mongo {
         }
 
         MessagingPort& port() {
-            return *p.get();
+            return *p;
         }
 
         string toStringLong() const {
@@ -823,6 +727,8 @@ namespace mongo {
         string getServerAddress() const {
             return serverAddress;
         }
+        
+        virtual void killCursor( long long cursorID );
 
         virtual bool call( Message &toSend, Message &response, bool assertOk = true );
         virtual void say( Message &toSend );
@@ -897,6 +803,10 @@ namespace mongo {
             return checkMaster().update(ns, query, obj, upsert,multi);
         }
         
+        virtual void killCursor( long long cursorID ){
+            checkMaster().killCursor( cursorID );
+        }
+
         string toString();
 
         /* this is the callback from our underlying connections to notify us that we got a "not master" error.
@@ -908,7 +818,7 @@ namespace mongo {
         string getServerAddress() const {
             return left.getServerAddress() + "," + right.getServerAddress();
         }
-
+        
         DBClientConnection& slaveConn();
 
         /* TODO - not yet implemented. mongos may need these. */
@@ -919,11 +829,17 @@ namespace mongo {
         
         bool isFailed() const {
             // TODO: this really should check isFailed on current master as well
-            return master > NotSetR;
+            return master < Left;
         }
     };
     
+    /** pings server to check if it's up
+     */
+    bool serverAlive( const string &uri );
 
     DBClientBase * createDirectClient();
     
 } // namespace mongo
+
+#include "dbclientcursor.h"
+#include "undef_macros.h"

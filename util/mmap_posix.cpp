@@ -15,7 +15,7 @@
  *    limitations under the License.
  */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "mmap.h"
 #include "file_allocator.h"
 
@@ -51,6 +51,7 @@ namespace mongo {
 
     void* MemoryMappedFile::map(const char *filename, long &length, int options) {
         // length may be updated by callee.
+        _filename = filename;
         theFileAllocator().allocateAsap( filename, length );
         len = length;
 
@@ -59,7 +60,7 @@ namespace mongo {
         
         fd = open(filename, O_RDWR | O_NOATIME);
         if ( fd <= 0 ) {
-            out() << "couldn't open " << filename << ' ' << OUTPUT_ERRNO << endl;
+            out() << "couldn't open " << filename << ' ' << errnoWithDescription() << endl;
             return 0;
         }
 
@@ -73,7 +74,7 @@ namespace mongo {
         
         view = mmap(NULL, length, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
         if ( view == MAP_FAILED ) {
-            out() << "  mmap() failed for " << filename << " len:" << length << " " << OUTPUT_ERRNO << endl;
+            out() << "  mmap() failed for " << filename << " len:" << length << " " << errnoWithDescription() << endl;
             if ( errno == ENOMEM ){
                 out() << "     mmap failed with out of memory, if you're using 32-bits, then you probably need to upgrade to 64" << endl;
             }
@@ -85,7 +86,7 @@ namespace mongo {
 #else
         if ( options & SEQUENTIAL ){
             if ( madvise( view , length , MADV_SEQUENTIAL ) ){
-                out() << " madvise failed for " << filename << " " << OUTPUT_ERRNO << endl;
+                out() << " madvise failed for " << filename << " " << errnoWithDescription() << endl;
             }
         }
 #endif
@@ -96,7 +97,7 @@ namespace mongo {
         if ( view == 0 || fd == 0 )
             return;
         if ( msync(view, len, sync ? MS_SYNC : MS_ASYNC) )
-            problem() << "msync " << OUTPUT_ERRNO << endl;
+            problem() << "msync " << errnoWithDescription() << endl;
     }
     
 

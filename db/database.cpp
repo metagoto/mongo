@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "pdfile.h"
 #include "database.h"
 
@@ -59,6 +59,11 @@ namespace mongo {
         
         string errmsg;
         massert( 12506 , errmsg , setProfilingLevel( cmdLine.defaultProfile , errmsg ) );
+    }
+
+    bool Database::validDBName( const string& ns ){
+        size_t good = strcspn( ns.c_str() , "/\\." );
+        return good == ns.size();
     }
 
 } // namespace mongo

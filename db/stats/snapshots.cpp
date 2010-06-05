@@ -16,7 +16,7 @@
 *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "snapshots.h"
 #include "../client.h"
 #include "../clientcursor.h"
@@ -55,7 +55,7 @@ namespace mongo {
     }
 
     Snapshots::Snapshots(int n)
-        : _n(n)
+        : _lock("Snapshots"), _n(n)
         , _snapshots(new SnapshotData[n])
         , _loc(0)
         , _stored(0)
@@ -95,7 +95,7 @@ namespace mongo {
             ss << "<tr>"
                << "<td>" << ( d.elapsed() / 1000 ) << "</td>"
                << "<td>" << (unsigned)(100*d.percentWriteLocked()) << "%</td>"
-               << "</tr>"
+               << "</tr>\n"
                 ;
         }
         
@@ -122,8 +122,6 @@ namespace mongo {
                         log() << "cpu: elapsed:" << (elapsed/1000) <<"  writelock: " << (int)(100*d.percentWriteLocked()) << "%" << endl;
                     }
 
-                    // TODO: this should really be somewhere else, like in a special ClientCursor thread
-                    ClientCursor::idleTimeReport( (unsigned)(elapsed/1000) );
                 }
 
                 prev = s;

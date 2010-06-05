@@ -18,7 +18,7 @@
  */
 
 // Where IndexDetails defined.
-#include "stdafx.h"
+#include "pch.h"
 #include "../db/namespace.h"
 
 #include "../db/db.h"
@@ -741,7 +741,7 @@ namespace NamespaceTests {
         //        private:
         //            virtual string spec() const {
         //                // NOTE 256 added to size in _userCreateNS()
-        //                long long big = MongoDataFile::maxSize() - MDFHeader::headerSize();
+        //                long long big = MongoDataFile::maxSize() - DataFileHeader::HeaderSize;
         //                stringstream ss;
         //                ss << "{\"capped\":true,\"size\":" << big << "}";
         //                return ss.str();

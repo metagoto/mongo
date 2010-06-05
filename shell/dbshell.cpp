@@ -30,6 +30,8 @@ jmp_buf jbuf;
 #include "../util/unittest.h"
 #include "../db/cmdline.h"
 #include "utils.h"
+#include "../util/password.h"
+#include "../util/version.h"
 
 using namespace std;
 using namespace boost::filesystem;
@@ -41,6 +43,12 @@ bool inMultiLine = 0;
 #if defined(USE_READLINE) && !defined(__freebsd__) && !defined(_WIN32)
 #define CTRLC_HANDLE
 #endif
+
+static char** my_completion(const char* text , int start ,int end ){
+    cout << "YO [" << text << "] " << start << " " << end << endl;
+    return 0;
+}
+
 
 void shellHistoryInit(){
 #ifdef USE_READLINE
@@ -54,6 +62,9 @@ void shellHistoryInit(){
     using_history();
     read_history( historyFile.c_str() );
 
+    // TODO: do auto-completion
+    //rl_attempted_completion_function = my_completion;
+        
 #else
     cout << "type \"exit\" to exit" << endl;
 #endif
@@ -173,8 +184,8 @@ string fixHost( string url , string host , string port ){
             if ( url.find( "." ) != string::npos )
                 return url + "/test";
 
-            if ( url.find( ":" ) != string::npos &&
-                 isdigit( url[url.find(":")+1] ) )
+            if ( url.rfind( ":" ) != string::npos &&
+                 isdigit( url[url.rfind(":")+1] ) )
                 return url + "/test";
         }
         return url;
@@ -191,6 +202,10 @@ string fixHost( string url , string host , string port ){
     string newurl = host;
     if ( port.size() > 0 )
         newurl += ":" + port;
+    else if (host.find(':') == string::npos){
+        // need to add port with IPv6 addresses
+        newurl += ":27017";
+    }
 
     newurl += "/" + url;
 
@@ -314,9 +329,11 @@ int _main(int argc, char* argv[]) {
         ("host", po::value<string>(&dbhost), "server to connect to")
         ("eval", po::value<string>(&script), "evaluate javascript")
         ("username,u", po::value<string>(&username), "username for authentication")
-        ("password,p", po::value<string>(&password), "password for authentication")
+        ("password,p", new mongo::PasswordValue(&password),
+         "password for authentication")
         ("help,h", "show this usage information")
         ("version", "show version information")
+        ("ipv6", "enable IPv6 support (disabled by default)")
         ;
 
     hidden_options.add_options()
@@ -348,6 +365,16 @@ int _main(int argc, char* argv[]) {
         cout << "ERROR: " << e.what() << endl << endl;
         show_help_text(argv[0], shell_options);
         return mongo::EXIT_BADOPTIONS;
+    }
+
+    // hide password from ps output
+    for (int i=0; i < (argc-1); ++i){
+        if (!strcmp(argv[i], "-p") || !strcmp(argv[i], "--password")){
+            char* arg = argv[i+1];
+            while (*arg){
+                *arg++ = 'x';
+            }
+        }
     }
 
     if (params.count("shell")) {
@@ -395,6 +422,9 @@ int _main(int argc, char* argv[]) {
             }
         }
     }
+    if (params.count("ipv6")){
+        mongo::enableIPv6();
+    }
     
     if ( ! mongo::cmdLine.quiet ) 
         cout << "MongoDB shell version: " << mongo::versionString << endl;
@@ -410,6 +440,11 @@ int _main(int argc, char* argv[]) {
         ss << "db = connect( \"" << fixHost( url , dbhost , port ) << "\")";
         
         mongo::shellUtils::_dbConnect = ss.str();
+
+        if ( params.count( "password" )
+             && ( password.empty() ) ) {
+            password = mongo::askPassword();
+        }
 
         if ( username.size() && password.size() ){
             stringstream ss;
@@ -510,8 +545,8 @@ int _main(int argc, char* argv[]) {
 
             if ( ! wascmd ){
                 try {
-                    scope->exec( code.c_str() , "(shell)" , false , true , false );
-                    scope->exec( "shellPrintHelper( __lastres__ );" , "(shell2)" , true , true , false );
+                    if ( scope->exec( code.c_str() , "(shell)" , false , true , false ) )
+                        scope->exec( "shellPrintHelper( __lastres__ );" , "(shell2)" , true , true , false );
                 }
                 catch ( std::exception& e ){
                     cout << "error:" << e.what() << endl;

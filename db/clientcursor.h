@@ -24,10 +24,11 @@
 
 #pragma once
 
-#include "../stdafx.h"
+#include "../pch.h"
 #include "cursor.h"
 #include "jsobj.h"
 #include "../util/message.h"
+#include "../util/background.h"
 #include "diskloc.h"
 #include "dbhelpers.h"
 #include "matcher.h"
@@ -38,6 +39,7 @@ namespace mongo {
     typedef long long CursorId; /* passed to the client so it can send back on getMore */
     class Cursor; /* internal server cursor base class */
     class ClientCursor;
+    class ParsedQuery;
 
     /* todo: make this map be per connection.  this will prevent cursor hijacking security attacks perhaps.
     */
@@ -101,13 +103,13 @@ namespace mongo {
 
         /*const*/ CursorId cursorid;
         string ns;
-        auto_ptr<CoveredIndexMatcher> matcher;
-        auto_ptr<Cursor> c;
+        shared_ptr<Cursor> c;
         int pos;                                 // # objects into the cursor so far 
         BSONObj query;
         int _queryOptions;
+        OpTime _slaveReadTill;
 
-        ClientCursor(int queryOptions, auto_ptr<Cursor>& _c, const char *_ns) :
+        ClientCursor(int queryOptions, shared_ptr<Cursor>& _c, const char *_ns) :
             _idleAgeMillis(0), _pinValue(0), 
             _doingDeletes(false), 
             ns(_ns), c(_c), 
@@ -125,6 +127,7 @@ namespace mongo {
             return _lastLoc;
         }
 
+        shared_ptr< ParsedQuery > pq;
         shared_ptr< FieldMatcher > fields; // which fields query wants returned
         Message originalMessage; // this is effectively an auto ptr for data the matcher points to
 
@@ -143,6 +146,66 @@ namespace mongo {
          *         in fact, the whole database could be gone.
          */
         bool yield();
+
+        struct YieldLock : boost::noncopyable {
+            explicit YieldLock( ptr<ClientCursor> cc )
+                : _cc( cc ) , _id( cc->cursorid ) , _doingDeletes( cc->_doingDeletes ) {
+                cc->updateLocation();
+                _unlock.reset(new dbtempreleasecond());
+            }
+            ~YieldLock(){
+                assert( ! _unlock );
+            }
+
+            bool stillOk(){
+                relock();
+                
+                if ( ClientCursor::find( _id , false ) == 0 ){
+                    // i was deleted
+                    return false;
+                }
+                
+                _cc->_doingDeletes = _doingDeletes;
+                return true;
+            }
+
+            void relock(){
+                _unlock.reset();
+            }
+            
+        private:
+            ClientCursor * _cc;
+            CursorId _id;
+            bool _doingDeletes;
+
+            scoped_ptr<dbtempreleasecond> _unlock;
+
+        };
+
+        // --- some pass through helpers for Cursor ---
+
+        BSONObj indexKeyPattern() {
+            return c->indexKeyPattern();
+        }
+
+        bool ok(){
+            return c->ok();
+        }
+
+        bool advance(){
+            return c->advance();
+        }
+
+        bool currentMatches(){
+            if ( ! c->matcher() )
+                return true;
+            return c->matcher()->matchesCurrent( c.get() );
+        }
+
+        BSONObj current(){
+            return c->current();
+        }
+
     private:
         void setLastLoc_inlock(DiskLoc);
 
@@ -182,8 +245,6 @@ namespace mongo {
            */
         void updateLocation();
 
-        void cleanupByLocation(DiskLoc loc);
-        
         void mayUpgradeStorage() {
             /* if ( !ids_.get() )
                 return;
@@ -199,6 +260,9 @@ namespace mongo {
             _idleAgeMillis += millis;
             return _idleAgeMillis > 600000 && _pinValue == 0;
         }
+
+        void storeOpForSlave( DiskLoc last );
+        void updateSlaveLocation( CurOp& curop );
         
         unsigned idleTime(){
             return _idleAgeMillis;
@@ -222,5 +286,12 @@ public:
         static void aboutToDelete(const DiskLoc& dl);
     };
 
+    class ClientCursorMonitor : public BackgroundJob {
+    public:
+        void run();
+        string name() { return "ClientCursorMonitor"; }
+    };
+
+    extern ClientCursorMonitor clientCursorMonitor;
     
 } // namespace mongo

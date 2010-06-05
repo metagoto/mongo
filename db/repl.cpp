@@ -31,11 +31,12 @@
    local.pair.sync       - { initialsynccomplete: 1 }
 */
 
-#include "stdafx.h"
+#include "pch.h"
 #include "jsobj.h"
 #include "../util/goodies.h"
 #include "repl.h"
 #include "../util/message.h"
+#include "../util/background.h"
 #include "../client/dbclient.h"
 #include "../client/connpool.h"
 #include "pdfile.h"
@@ -44,6 +45,8 @@
 #include "commands.h"
 #include "security.h"
 #include "cmdline.h"
+#include "repl_block.h"
+#include "repl/rs.h"
 
 namespace mongo {
     
@@ -53,7 +56,8 @@ namespace mongo {
     void ensureHaveIdIndex(const char *ns);
 
     /* if 1 sync() is running */
-    int syncing = 0;
+    volatile int syncing = 0;
+	static volatile int relinquishSyncingSome = 0;
 
     /* if true replace our peer in a replication pair -- don't worry about if his
        local.oplog.$main is empty.
@@ -69,11 +73,9 @@ namespace mongo {
     
     IdTracker &idTracker = *( new IdTracker() );
     
-    int __findingStartInitialTimeout = 5; // configurable for testing    
-
 } // namespace mongo
 
-#include "replset.h"
+#include "replpair.h"
 
 namespace mongo {
 
@@ -102,7 +104,7 @@ namespace mongo {
             return;
         info = _comment;
         if ( n != state && !cmdLine.quiet )
-            log() << "pair: setting master=" << n << " was " << state << '\n';
+            tlog() << "pair: setting master=" << n << " was " << state << endl;
         state = n;
     }
 
@@ -119,7 +121,7 @@ namespace mongo {
         auto_ptr<DBClientConnection> conn( newClientConnection() );
         string errmsg;
         if ( !conn->connect(arbHost.c_str(), errmsg) ) {
-            log() << "repl:   cantconn arbiter " << errmsg << endl;
+            tlog() << "repl:   cantconn arbiter " << errmsg << endl;
             setMasterLocked(State_CantArb, "can't connect to arb");
             return;
         }
@@ -131,18 +133,19 @@ namespace mongo {
 
     class CmdReplacePeer : public Command {
     public:
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
         virtual bool logTheOp() {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
-        CmdReplacePeer() : Command("replacepeer") { }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual LockType locktype() const { return WRITE; }
+        void help(stringstream&h) const { h << "replace a node in a replica pair"; }
+        CmdReplacePeer() : Command("replacePeer", false, "replacepeer") { }
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if ( replPair == 0 ) {
                 errmsg = "not paired";
                 return false;
@@ -157,11 +160,12 @@ namespace mongo {
             }
             Timer t;
             while ( 1 ) {
-                if ( syncing == 0 || t.millis() > 20000 )
+                if ( syncing == 0 || t.millis() > 30000 )
                     break;
                 {
                     dbtemprelease t;
-                    sleepmillis(10);
+					relinquishSyncingSome = 1;
+					sleepmillis(1);
                 }
             }
             if ( syncing ) {
@@ -191,18 +195,19 @@ namespace mongo {
 
     class CmdForceDead : public Command {
     public:
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
         virtual bool logTheOp() {
             return false;   
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual void help(stringstream& h) const { h << "internal"; }
+        virtual LockType locktype() const { return WRITE; }
         CmdForceDead() : Command("forcedead") { }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             replAllDead = "replication forced to stop by 'forcedead' command";
             log() << "*********************************************************\n";
             log() << "received 'forcedead' command, replication forced to stop" << endl;
@@ -213,18 +218,19 @@ namespace mongo {
     /* operator requested resynchronization of replication (on the slave).  { resync : 1 } */
     class CmdResync : public Command {
     public:
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
         virtual bool logTheOp() {
             return false;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
+        void help(stringstream&h) const { h << "resync (from scratch) an out of date replica slave.\nhttp://www.mongodb.org/display/DOCS/Master+Slave"; }
         CmdResync() : Command("resync") { }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             if ( cmdObj.getBoolField( "force" ) ) {
                 if ( !waitForSyncToFinish( errmsg ) )
                     return false;
@@ -246,11 +252,12 @@ namespace mongo {
             // reloaded with new saved state on next pass.
             Timer t;
             while ( 1 ) {
-                if ( syncing == 0 || t.millis() > 20000 )
+                if ( syncing == 0 || t.millis() > 30000 )
                     break;
                 {
                     dbtemprelease t;
-                    sleepmillis(10);
+					relinquishSyncingSome = 1;
+                    sleepmillis(1);
                 }
             }
             if ( syncing ) {
@@ -268,7 +275,7 @@ namespace mongo {
     void appendReplicationInfo( BSONObjBuilder& result , bool authed , int level ){
         
         if ( replAllDead ) {
-            result.append("ismaster", 0.0);
+            result.append("ismaster", 0);
             if( authed ) { 
                 if ( replPair )
                     result.append("remote", replPair->remote);
@@ -294,7 +301,7 @@ namespace mongo {
             
             readlock lk( "local.sources" );
             Client::Context ctx( "local.sources" );
-            auto_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
+            shared_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
             int n = 0;
             while ( c->ok() ){
                 BSONObj s = c->current();
@@ -336,17 +343,32 @@ namespace mongo {
     class CmdIsMaster : public Command {
     public:
         virtual bool requiresAuth() { return false; }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype(){ return NONE; }
-        CmdIsMaster() : Command("ismaster") { }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
+        virtual void help( stringstream &help ) const {
+            help << "Check if this server is primary for a replica pair/set; also if it is --master or --slave in simple master/slave setups.\n";
+            help << "{ isMaster : 1 }";
+        }
+        virtual LockType locktype() const { return NONE; }
+        CmdIsMaster() : Command("isMaster", true, "ismaster") { }
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
 			/* currently request to arbiter is (somewhat arbitrarily) an ismaster request that is not 
 			   authenticated.
 			   we allow unauthenticated ismaster but we aren't as verbose informationally if 
 			   one is not authenticated for admin db to be safe.
 			*/
+
+            if( replSet ) {
+                if( theReplSet == 0 ) { 
+                    result.append("ismaster", false);
+                    errmsg = "replSet still trying to initialize";
+                    result.append("info", ReplSet::startupStatusMsg);
+                    return false;
+                }
+                theReplSet->fillIsMaster(result);
+                return true;
+            }
             
 			bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
             appendReplicationInfo( result , authed );
@@ -357,12 +379,12 @@ namespace mongo {
     class CmdIsInitialSyncComplete : public Command {
     public:
         virtual bool requiresAuth() { return false; }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype(){ return WRITE; }
+        virtual LockType locktype() const { return WRITE; }
         CmdIsInitialSyncComplete() : Command( "isinitialsynccomplete" ) {}
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
+        virtual bool run(const string&, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
             result.appendBool( "initialsynccomplete", getInitialSyncCompleted() );
             return true;
         }
@@ -388,14 +410,14 @@ namespace mongo {
     class CmdNegotiateMaster : public Command {
     public:
         CmdNegotiateMaster() : Command("negotiatemaster") { }
-        virtual bool slaveOk() {
+        virtual bool slaveOk() const {
             return true;
         }
-        virtual bool adminOnly() {
+        virtual bool adminOnly() const {
             return true;
         }
-        virtual LockType locktype(){ return WRITE; }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+        virtual LockType locktype() const { return WRITE; }
+        virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
             if ( replPair == 0 ) {
                 massert( 10383 ,  "Another mongod instance believes incorrectly that this node is its peer", !cmdObj.getBoolField( "fromArbiter" ) );
                 // assume that we are an arbiter and should forward the request
@@ -430,7 +452,7 @@ namespace mongo {
                     if ( e.fieldName() != string( "ok" ) )
                         result.append( e );
                 }
-                return ( ret.getIntField("ok") == 1 );
+                return ret["ok"].trueValue();
             }
 
             int was = cmdObj.getIntField("i_was");
@@ -476,7 +498,7 @@ namespace mongo {
         b.append("your_port", remotePort);
         BSONObj cmd = b.done();
         BSONObj res = conn->findOne("admin.$cmd", cmd);
-        if ( res.getIntField("ok") != 1 ) {
+        if ( ! res["ok"].trueValue() ){
             string message = method + " negotiate failed";
             problem() << message << ": " << res.toString() << '\n';
             setMasterLocked(State_Confused, message.c_str());
@@ -494,20 +516,6 @@ namespace mongo {
         }
         return remote;
     }
-
-    struct TestOpTime {
-        TestOpTime() {
-            OpTime t;
-            for ( int i = 0; i < 10; i++ ) {
-                OpTime s = OpTime::now();
-                assert( s != t );
-                t = s;
-            }
-            OpTime q = t;
-            assert( q == t );
-            assert( !(q != t) );
-        }
-    } testoptime;
 
     /* --------------------------------------------------------------*/
 
@@ -650,7 +658,7 @@ namespace mongo {
             // --source <host> specified.
             // check that no items are in sources other than that
             // add if missing
-            auto_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
+            shared_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
             int n = 0;
             while ( c->ok() ) {
                 n++;
@@ -694,7 +702,7 @@ namespace mongo {
             }
             // check that no items are in sources other than that
             // add if missing
-            auto_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
+            shared_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
             int n = 0;
             while ( c->ok() ) {
                 n++;
@@ -716,7 +724,7 @@ namespace mongo {
             }
         }
 
-        auto_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
+        shared_ptr<Cursor> c = findTableScan("local.sources", BSONObj());
         while ( c->ok() ) {
             ReplSource tmp(c->current());
             if ( replPair && tmp.hostName == replPair->remote && tmp.sourceName() == "main" ) {
@@ -732,7 +740,7 @@ namespace mongo {
                 ( replPair && replSettings.fastsync ) ) {
                 DBDirectClient c;
                 if ( c.exists( "local.oplog.$main" ) ) {
-                    BSONObj op = c.findOne( "local.oplog.$main", Query().sort( BSON( "$natural" << -1 ) ) );
+                    BSONObj op = c.findOne( "local.oplog.$main", QUERY( "op" << NE << "n" ).sort( BSON( "$natural" << -1 ) ) );
                     if ( !op.isEmpty() ) {
                         tmp.syncedTo = op[ "ts" ].date();
                         tmp._lastSavedLocalTs = op[ "ts" ].date();
@@ -804,11 +812,9 @@ namespace mongo {
 
     string ReplSource::resyncDrop( const char *db, const char *requester ) {
         log() << "resync: dropping database " << db << endl;
-        string dummyns = string( db ) + ".";
-        Client::Context ctx(dummyns);
-        assert( cc().database()->name == db );
-        dropDatabase(dummyns.c_str());
-        return dummyns;
+        Client::Context ctx(db);
+        dropDatabase(db);
+        return db;
     }
     
     /* grab initial copy of a database from the master */
@@ -881,12 +887,17 @@ namespace mongo {
             else if ( *opType == 'n' ) {
                 // no op
             }
-            else {
+            else if ( *opType == 'c' ){
                 BufBuilder bb;
                 BSONObjBuilder ob;
-                assert( *opType == 'c' );
                 _runCommands(ns, o, bb, ob, true, 0);
             }
+            else {
+                stringstream ss;
+                ss << "unknown opType [" << opType << "]";
+                throw MsgAssertionException( 13141 , ss.str() );
+            }
+            
         }
         catch ( UserException& e ) {
             log() << "sync: caught user assertion " << e << " while applying op: " << op << endl;;
@@ -1053,14 +1064,14 @@ namespace mongo {
         BSONObj last = conn->findOne( _ns.c_str(), Query( b.done() ).sort( BSON( "$natural" << -1 ) ) );
         if ( !last.isEmpty() ) {
             BSONElement ts = last.getField( "ts" );
-            massert( 10386 ,  "non Date ts found", ts.type() == Date || ts.type() == Timestamp );
+            massert( 10386 ,  "non Date ts found: " + last.toString(), ts.type() == Date || ts.type() == Timestamp );
             syncedTo = OpTime( ts.date() );
         }        
     }
     
     OpTime ReplSource::nextLastSavedLocalTs() const {
         Client::Context ctx( "local.oplog.$main" );
-        auto_ptr< Cursor > c = findTableScan( "local.oplog.$main", BSON( "$natural" << -1 ) );
+        shared_ptr<Cursor> c = findTableScan( "local.oplog.$main", BSON( "$natural" << -1 ) );
         if ( c->ok() )
             return OpTime( c->current().getField( "ts" ).date() );        
         return OpTime();
@@ -1088,7 +1099,7 @@ namespace mongo {
     
     bool ReplSource::updateSetsWithLocalOps( OpTime &localLogTail, bool mayUnlock ) {
         Client::Context ctx( "local.oplog.$main" );
-        auto_ptr< Cursor > localLog = findTableScan( "local.oplog.$main", BSON( "$natural" << -1 ) );
+        shared_ptr<Cursor> localLog = findTableScan( "local.oplog.$main", BSON( "$natural" << -1 ) );
         OpTime newTail;
         for( ; localLog->ok(); localLog->advance() ) {
             BSONObj op = localLog->current();
@@ -1318,7 +1329,9 @@ namespace mongo {
                     {
                         dbtemprelease t;
                         if ( c->more() ) {
-                            continue;
+                            if ( getInitialSyncCompleted() ) { // if initial sync hasn't completed, break out of loop so we can set to completed or clone more dbs
+                                continue;
+                            }
                         } else {
                             setLastSavedLocalTs( nextLastSaved );
                         }
@@ -1387,7 +1400,7 @@ namespace mongo {
     }
 
 	BSONObj userReplQuery = fromjson("{\"user\":\"repl\"}");
-
+    
 	bool replAuthenticate(DBClientConnection *conn) {
 		if( ! cc().isAdmin() ){
 			log() << "replauthenticate: requires admin permissions, failing\n";
@@ -1408,6 +1421,7 @@ namespace mongo {
 					return false;
 				}
 			}
+            
 		}
 
 		string u = user.getStringField("user");
@@ -1422,12 +1436,37 @@ namespace mongo {
 		return true;
 	}
 
+    bool replHandshake(DBClientConnection *conn) {
+        
+        BSONObj me;
+        {
+            dblock l;
+            if ( ! Helpers::getSingleton( "local.me" , me ) ){
+                BSONObjBuilder b;
+                b.appendOID( "_id" , 0 , true );
+                me = b.obj();
+                Helpers::putSingleton( "local.me" , me );
+            }
+        }
+        
+        BSONObjBuilder cmd;
+        cmd.appendAs( me["_id"] , "handshake" );
+
+        BSONObj res;
+        bool ok = conn->runCommand( "admin" , cmd.obj() , res );
+        // ignoring for now on purpose for older versions
+        log(ok) << "replHandshake res not: " << ok << " res: " << res << endl;
+        return true;
+    }
+
     bool ReplSource::connect() {
         if ( conn.get() == 0 ) {
-            conn = auto_ptr<DBClientConnection>(new DBClientConnection());
+            conn = auto_ptr<DBClientConnection>(new DBClientConnection( false, 0, replPair ? 20 : 0 /* tcp timeout */));
             string errmsg;
             ReplInfo r("trying to connect to sync source");
-            if ( !conn->connect(hostName.c_str(), errmsg) || !replAuthenticate(conn.get()) ) {
+            if ( !conn->connect(hostName.c_str(), errmsg) || 
+                 !replAuthenticate(conn.get()) ||
+                 !replHandshake(conn.get()) ) {
                 resetConnection();
                 log() << "repl:  " << errmsg << endl;
                 return false;
@@ -1494,112 +1533,6 @@ namespace mongo {
         return sync_pullOpLog(nApplied);
     }
 
-    /* -- Logging of operations -------------------------------------*/
-
-// cached copies of these...so don't rename them
-    NamespaceDetails *localOplogMainDetails = 0;
-    Database *localOplogDB = 0;
-
-    void replCheckCloseDatabase( Database * db ){
-        localOplogDB = 0;
-        localOplogMainDetails = 0;
-    }
-
-    /* we write to local.opload.$main:
-         { ts : ..., op: ..., ns: ..., o: ... }
-       ts: an OpTime timestamp
-       op:
-        "i" insert
-        "u" update
-        "d" delete
-        "c" db cmd
-        "db" declares presence of a database (ns is set to the db name + '.')
-        "n" no op
-       logNS - e.g. "local.oplog.$main"
-       bb:
-         if not null, specifies a boolean to pass along to the other side as b: param.
-         used for "justOne" or "upsert" flags on 'd', 'u'
-       first: true
-         when set, indicates this is the first thing we have logged for this database.
-         thus, the slave does not need to copy down all the data when it sees this.
-    */
-    static void _logOp(const char *opstr, const char *ns, const char *logNS, const BSONObj& obj, BSONObj *o2, bool *bb, const OpTime &ts ) {
-        if ( strncmp(ns, "local.", 6) == 0 )
-            return;
-
-        DEV assertInWriteLock();
-
-        Client::Context context;
-
-        /* we jump through a bunch of hoops here to avoid copying the obj buffer twice --
-           instead we do a single copy to the destination position in the memory mapped file.
-        */
-
-        BSONObjBuilder b;
-        b.appendTimestamp("ts", ts.asDate());
-        b.append("op", opstr);
-        b.append("ns", ns);
-        if ( bb )
-            b.appendBool("b", *bb);
-        if ( o2 )
-            b.append("o2", *o2);
-        BSONObj partial = b.done();
-        int posz = partial.objsize();
-        int len = posz + obj.objsize() + 1 + 2 /*o:*/;
-
-        Record *r;
-        if ( strncmp( logNS, "local.", 6 ) == 0 ) { // For now, assume this is olog main
-            if ( localOplogMainDetails == 0 ) {
-                Client::Context ctx("local.", dbpath, 0, false);
-                localOplogDB = ctx.db();
-                localOplogMainDetails = nsdetails(logNS);
-            }
-            Client::Context ctx( "" , localOplogDB, false );
-            r = theDataFileMgr.fast_oplog_insert(localOplogMainDetails, logNS, len);
-        } else {
-            Client::Context ctx( logNS, dbpath, 0, false );
-            assert( nsdetails( logNS ) );
-            r = theDataFileMgr.fast_oplog_insert( nsdetails( logNS ), logNS, len);
-        }
-
-        char *p = r->data;
-        memcpy(p, partial.objdata(), posz);
-        *((unsigned *)p) += obj.objsize() + 1 + 2;
-        p += posz - 1;
-        *p++ = (char) Object;
-        *p++ = 'o';
-        *p++ = 0;
-        memcpy(p, obj.objdata(), obj.objsize());
-        p += obj.objsize();
-        *p = EOO;
-        
-        if ( logLevel >= 6 ) {
-            BSONObj temp(r);
-            log( 6 ) << "logging op:" << temp << endl;
-        }
-    }
-
-    static void logKeepalive() { 
-        BSONObj obj;
-        _logOp("n", "", "local.oplog.$main", obj, 0, 0, OpTime::now());
-    }
-
-    void logOp(const char *opstr, const char *ns, const BSONObj& obj, BSONObj *patt, bool *b) {
-        if ( replSettings.master ) {
-            _logOp(opstr, ns, "local.oplog.$main", obj, patt, b, OpTime::now());
-            char cl[ 256 ];
-            nsToDatabase( ns, cl );
-        }
-        NamespaceDetailsTransient &t = NamespaceDetailsTransient::get_w( ns );
-        if ( t.cllEnabled() ) {
-            try {
-                _logOp(opstr, ns, t.cllNS().c_str(), obj, patt, b, OpTime::now());
-            } catch ( const DBException & ) {
-                t.cllInvalidate();
-            }
-        }
-    }    
-    
     /* --------------------------------------------------------------*/
 
     /*
@@ -1617,6 +1550,7 @@ namespace mongo {
             ReplInfo r("replMain load sources");
             dblock lk;
             ReplSource::loadAll(sources);
+            replSettings.fastsync = false; // only need this param for initial reset
         }
 
         if ( sources.empty() ) {
@@ -1713,6 +1647,12 @@ namespace mongo {
                 assert( syncing == 1 );
                 syncing--;
             }
+
+			if( relinquishSyncingSome )  { 
+				relinquishSyncingSome = 0;
+				s = 1; // sleep before going back in to syncing=1
+			}
+
             if ( s ) {
                 stringstream ss;
                 ss << "repl: sleep " << s << "sec before next pass";
@@ -1730,23 +1670,30 @@ namespace mongo {
     static void replMasterThread() {
         sleepsecs(4);
         Client::initThread("replmaster");
+        int toSleep = 10;
         while( 1 ) {
-            {
-                dblock lk;
-                cc().getAuthenticationInfo()->authorize("admin");   
-            }
-            sleepsecs(10);
+
+            sleepsecs( toSleep );
             /* write a keep-alive like entry to the log.  this will make things like 
                printReplicationStatus() and printSlaveReplicationStatus() stay up-to-date
                even when things are idle.
             */
             {
-                writelock lk("");
-                try { 
-                    logKeepalive();
+                writelocktry lk("",1);
+                if ( lk.got() ){
+                    toSleep = 10;
+                    
+                    cc().getAuthenticationInfo()->authorize("admin");   
+                        
+                    try { 
+                        logKeepalive();
+                    }
+                    catch(...) { 
+                        log() << "caught exception in replMasterThread()" << endl;
+                    }
                 }
-                catch(...) { 
-                    log() << "caught exception in replMasterThread()" << endl;
+                else {
+                    toSleep = 1;
                 }
             }
         }
@@ -1790,64 +1737,28 @@ namespace mongo {
         }
     }
 
-    void createOplog() {
-        dblock lk;
-
-        const char * ns = "local.oplog.$main";
-        Client::Context ctx(ns);
-        
-        if ( nsdetails( ns ) ) {
-            DBDirectClient c;
-            BSONObj lastOp = c.findOne( ns, Query().sort( BSON( "$natural" << -1 ) ) );
-            if ( !lastOp.isEmpty() ) {
-                OpTime::setLast( lastOp[ "ts" ].date() );
+    void newRepl();
+    void oldRepl();
+    void startReplication() {
+        /* if we are going to be a replica set, we aren't doing other forms of replication. */
+        if( !cmdLine.replSet.empty() ) {
+            if( replSettings.slave || replSettings.master || replPair ) { 
+                log() << "***" << endl;
+                log() << "ERROR: can't use --slave or --master replication options with --replSet" << endl;
+                log() << "***" << endl;
             }
+            newRepl();
             return;
         }
-        
-        /* create an oplog collection, if it doesn't yet exist. */
-        BSONObjBuilder b;
-        double sz;
-        if ( cmdLine.oplogSize != 0 )
-            sz = (double)cmdLine.oplogSize;
-        else {
-			/* not specified. pick a default size */
-            sz = 50.0 * 1000 * 1000;
-            if ( sizeof(int *) >= 8 ) {
-#if defined(__APPLE__)
-				// typically these are desktops (dev machines), so keep it smallish
-				sz = (256-64) * 1000 * 1000;
-#else
-                sz = 990.0 * 1000 * 1000;
-                boost::intmax_t free = freeSpace(); //-1 if call not supported.
-                double fivePct = free * 0.05;
-                if ( fivePct > sz )
-                    sz = fivePct;
-#endif
-            }
-        }
 
-        log() << "******\n";
-        log() << "creating replication oplog of size: " << (int)( sz / ( 1024 * 1024 ) ) << "MB (use --oplogSize to change)\n";
-        log() << "******" << endl;
+        oldRepl();
 
-        b.append("size", sz);
-        b.appendBool("capped", 1);
-        b.appendBool("autoIndexId", false);
-
-        string err;
-        BSONObj o = b.done();
-        userCreateNS(ns, o, err, false);
-        logOp( "n", "dummy", BSONObj() );
-    }
-    
-    void startReplication() {
         /* this was just to see if anything locks for longer than it should -- we need to be careful
            not to be locked when trying to connect() or query() the other side.
            */
         //boost::thread tempt(tempThread);
 
-        if ( !replSettings.slave && !replSettings.master && !replPair )
+        if( !replSettings.slave && !replSettings.master && !replPair )
             return;
 
         {
@@ -1858,11 +1769,11 @@ namespace mongo {
 
         if ( replSettings.slave || replPair ) {
             if ( replSettings.slave ) {
-				assert( replSettings.slave == SimpleSlave );
+                assert( replSettings.slave == SimpleSlave );
                 log(1) << "slave=true" << endl;
-			}
-			else
-				replSettings.slave = ReplPairSlave;
+            }
+            else
+                replSettings.slave = ReplPairSlave;
             boost::thread repl_thread(replSlaveThread);
         }
 
@@ -1873,6 +1784,9 @@ namespace mongo {
             createOplog();
             boost::thread t(replMasterThread);
         }
+        
+        while( replSettings.fastsync ) // don't allow writes until we've set up from log
+            sleepmillis( 50 );
     }
 
     /* called from main at server startup */
@@ -1880,56 +1794,5 @@ namespace mongo {
         replPair = new ReplPair(remoteEnd, arb);
     }
 
-    class CmdLogCollection : public Command {
-    public:
-        virtual bool slaveOk() {
-            return false;
-        }
-        virtual LockType locktype(){ return WRITE; }
-        CmdLogCollection() : Command( "logCollection" ) {}
-        virtual void help( stringstream &help ) const {
-            help << "examples: { logCollection: <collection ns>, start: 1 }, "
-                 << "{ logCollection: <collection ns>, validateComplete: 1 }";
-        }
-        virtual bool run(const char *ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            string logCollection = cmdObj.getStringField( "logCollection" );
-            if ( logCollection.empty() ) {
-                errmsg = "missing logCollection spec";
-                return false;
-            }
-            bool start = !cmdObj.getField( "start" ).eoo();
-            bool validateComplete = !cmdObj.getField( "validateComplete" ).eoo();
-            if ( start ? validateComplete : !validateComplete ) {
-                errmsg = "Must specify exactly one of start:1 or validateComplete:1";
-                return false;
-            }
-            int logSizeMb = cmdObj.getIntField( "logSizeMb" );
-            NamespaceDetailsTransient &t = NamespaceDetailsTransient::get_w( logCollection.c_str() );
-            if ( start ) {
-                if ( t.cllNS().empty() ) {
-                    if ( logSizeMb == INT_MIN ) {
-                        t.cllStart();
-                    } else {
-                        t.cllStart( logSizeMb );
-                    }
-                } else {
-                    errmsg = "Log already started for ns: " + logCollection;
-                    return false;
-                }
-            } else {
-                if ( t.cllNS().empty() ) {
-                    errmsg = "No log to validateComplete for ns: " + logCollection;
-                    return false;
-                } else {
-                    if ( !t.cllValidateComplete() ) {
-                        errmsg = "Oplog failure, insufficient space allocated";
-                        return false;
-                    }
-                }
-            }
-            log() << "started logCollection with cmd obj: " << cmdObj << endl;
-            return true;
-        }
-    } cmdlogcollection;
     
 } // namespace mongo
