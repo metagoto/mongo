@@ -217,6 +217,12 @@ AddOption( "--libpath",
            action="store",
            help="Library path if you have libraries in a nonstandard directory" )
 
+AddOption( "--install-headers",
+           dest="installHeaders",
+           type="string",
+           nargs=0,
+           action="store",
+           help="whether to install headers files at the --prefix location" )
 # 
 # to use CPUPROFILE=/tmp/profile
 # to view pprof -gv mongod /tmp/profile
@@ -480,6 +486,8 @@ if GetOption( "prefix" ):
     installDir = GetOption( "prefix" )
     if installDir.find( "mongo-cxx-driver" ) >= 0:
         installSetup.justClient()
+    if not GetOption( "installHeaders" ) is None:
+        installSetup.headers = True;
 
 
 def findVersion( root , choices ):
