@@ -22,6 +22,9 @@
 #include <stdio.h>
 #include <boost/shared_ptr.hpp>
 
+#include "../inline_decls.h"
+#include "../stringdata.h"
+
 namespace mongo {
 
     class StringBuilder;
@@ -67,40 +70,44 @@ namespace mongo {
         char* buf() { return data; }
         const char* buf() const { return data; }
 
-        /* assume ownership of the buffer - you must then free it */
-        void decouple() {
-            data = 0;
+        /* assume ownership of the buffer - you must then free() it */
+        void decouple() { data = 0; }
+
+        void appendChar(char j){
+            *((char*)grow(sizeof(char))) = j;
+        }
+        void appendNum(char j){
+            *((char*)grow(sizeof(char))) = j;
+        }
+        void appendNum(short j) {
+            *((short*)grow(sizeof(short))) = j;
+        }
+        void appendNum(int j) {
+            *((int*)grow(sizeof(int))) = j;
+        }
+        void appendNum(unsigned j) {
+            *((unsigned*)grow(sizeof(unsigned))) = j;
+        }
+        void appendNum(bool j) {
+            *((bool*)grow(sizeof(bool))) = j;
+        }
+        void appendNum(double j) {
+            *((double*)grow(sizeof(double))) = j;
+        }
+        void appendNum(long long j) {
+            *((long long*)grow(sizeof(long long))) = j;
+        }
+        void appendNum(unsigned long long j) {
+            *((unsigned long long*)grow(sizeof(unsigned long long))) = j;
         }
 
-        template<class T> void append(T j) {
-            *((T*)grow(sizeof(T))) = j;
-        }
-        void append(short j) {
-            append<short>(j);
-        }
-        void append(int j) {
-            append<int>(j);
-        }
-        void append(unsigned j) {
-            append<unsigned>(j);
-        }
-        void append(bool j) {
-            append<bool>(j);
-        }
-        void append(double j) {
-            append<double>(j);
-        }
-
-        void append(const void *src, size_t len) {
+        void appendBuf(const void *src, size_t len) {
             memcpy(grow((int) len), src, len);
         }
 
-        void append(const char *str) {
-            append((void*) str, strlen(str)+1);
-        }
-        
-        void append(const std::string &str) {
-            append( (void *)str.c_str(), str.length() + 1 );
+        void appendStr(const StringData &str , bool includeEOO = true ) {
+            const int len = str.size() + ( includeEOO ? 1 : 0 );
+            memcpy(grow(len), str.data(), len);
         }
 
         int len() const {
@@ -112,24 +119,31 @@ namespace mongo {
         }
 
         /* returns the pre-grow write position */
-        char* grow(int by) {
+        inline char* grow(int by) {
             int oldlen = l;
             l += by;
             if ( l > size ) {
-                int a = size * 2;
-                if ( a == 0 )
-                    a = 512;
-                if ( l > a )
-                    a = l + 16 * 1024;
-                if( a > 64 * 1024 * 1024 )
-                    msgasserted(10000, "BufBuilder grow() > 64MB");
-                data = (char *) realloc(data, a);
-                size= a;
+                grow_reallocate();
             }
             return data + oldlen;
         }
 
+        int getSize() const { return size; }
+
     private:
+        /* "slow" portion of 'grow()'  */
+        void NOINLINE_DECL grow_reallocate(){
+            int a = size * 2;
+            if ( a == 0 )
+                a = 512;
+            if ( l > a )
+                a = l + 16 * 1024;
+            if( a > 64 * 1024 * 1024 )
+                msgasserted(10000, "BufBuilder grow() > 64MB");
+            data = (char *) realloc(data, a);
+            size= a;
+        }
+
         char *data;
         int l;
         int size;
@@ -150,6 +164,7 @@ namespace mongo {
 #define SBNUM(val,maxSize,macro) \
             int prev = _buf.l; \
             int z = sprintf( _buf.grow(maxSize) , macro , (val) );  \
+            assert( z >= 0 ); \
             _buf.l = prev + z; \
             return *this; 
 
@@ -183,16 +198,26 @@ namespace mongo {
         }
 #undef SBNUM
 
-        void append( const char * str ){
-            int x = (int) strlen( str );
-            memcpy( _buf.grow( x ) , str , x );
+        void appendDoubleNice( double x ){
+            int prev = _buf.l;
+            char * start = _buf.grow( 32 );
+            int z = sprintf( start , "%.16g" , x );
+            assert( z >= 0 );
+            _buf.l = prev + z;
+            if( strchr(start, '.') == 0 && strchr(start, 'E') == 0 && strchr(start, 'N') == 0 ){
+                write( ".0" , 2 );
+            }
         }
-        StringBuilder& operator<<( const char * str ){
+
+        void write( const char* buf, int len){
+            memcpy( _buf.grow( len ) , buf , len );
+        }
+
+        void append( const StringData& str ){
+            memcpy( _buf.grow( str.size() ) , str.data() , str.size() );
+        }
+        StringBuilder& operator<<( const StringData& str ){
             append( str );
-            return *this;
-        }
-        StringBuilder& operator<<( const std::string& s ){
-            append( s.c_str() );
             return *this;
         }
         

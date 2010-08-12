@@ -29,13 +29,10 @@
 
 #pragma once
 
-#include "../util/concurrency/locks.h"
+#include "../util/concurrency/rwlock.h"
+#include "../util/mmap.h"
 
 namespace mongo {
-
-    inline bool readLockSupported(){
-        return true;
-    }
 
     string sayClientState();
     bool haveClient();
@@ -94,7 +91,8 @@ namespace mongo {
          *    = 0  no lock
          *    < 0  read lock
          */
-        int getState(){ return _state.get(); }
+        int getState() { return _state.get(); }
+        bool isWriteLocked() { return getState() > 0; }
         void assertWriteLocked() { 
             assert( getState() > 0 ); 
             DEV assert( !_releasedEarly.get() );
@@ -128,6 +126,8 @@ namespace mongo {
             curopGotLock();
 
             _minfo.entered();
+
+            MongoFile::lockAll();
         }
 
         bool lock_try( int millis ) { 
@@ -141,6 +141,7 @@ namespace mongo {
             if ( got ){
                 _minfo.entered();
                 _state.set(1);
+                MongoFile::lockAll();
             }                
             
             return got;
@@ -161,6 +162,9 @@ namespace mongo {
                 }
                 massert( 12599, "internal error: attempt to unlock when wasn't in a write lock", false);
             }
+
+            MongoFile::unlockAll();
+
             _state.set(0);
             _minfo.leaving();
             _m.unlock(); 
@@ -289,7 +293,6 @@ namespace mongo {
     private:
         bool _got;
     };
-
 
     struct readlocktryassert : public readlocktry { 
         readlocktryassert(const string& ns, int tryms) : 

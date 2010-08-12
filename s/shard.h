@@ -29,10 +29,11 @@ namespace mongo {
     class Shard {
     public:
         Shard()
-            : _name(""), _addr(""), _maxSize(0){
+            : _name("") , _addr("") , _maxSize(0) , _isDraining( false ){
         }
-        Shard( const string& name , const string& addr, unsigned long maxSize = 0)
-            : _name(name), _addr( addr ), _maxSize( maxSize ){
+
+        Shard( const string& name , const string& addr, long long maxSize = 0 , bool isDraining = false )
+            : _name(name) , _addr( addr ) , _maxSize( maxSize ) , _isDraining( isDraining ){
         }
 
         Shard( const string& ident ){
@@ -40,11 +41,11 @@ namespace mongo {
         }
 
         Shard( const Shard& other )
-            : _name( other._name ) , _addr( other._addr ), _maxSize( other._maxSize ){
+            : _name( other._name ) , _addr( other._addr ) , _maxSize( other._maxSize ) , _isDraining( other._isDraining ){
         }
 
         Shard( const Shard* other )
-            : _name( other->_name ) ,_addr( other->_addr ), _maxSize( other->_maxSize ){
+            : _name( other->_name ) , _addr( other->_addr ), _maxSize( other->_maxSize ) , _isDraining( other->_isDraining ){
         }
         
         static Shard make( const string& ident ){
@@ -52,6 +53,8 @@ namespace mongo {
             s.reset( ident );
             return s;
         }
+
+        static bool isAShard( const string& ident );
         
         /**
          * @param ident either name or address
@@ -70,8 +73,12 @@ namespace mongo {
             return _addr;
         }
 
-        unsigned long getMaxSize() const {
+        long long getMaxSize() const {
             return _maxSize;
+        }
+
+        bool isDraining() const {
+            return _isDraining;
         }
 
         string toString() const {
@@ -121,7 +128,8 @@ namespace mongo {
         ShardStatus getStatus() const ;
         
         static void getAllShards( vector<Shard>& all );
-        
+        static void printShardInfo( ostream& out );
+
         /**
          * picks a Shard for more load
          */
@@ -129,12 +137,17 @@ namespace mongo {
         
         static void reloadShardInfo();
 
+        static void removeShard( const string& name );
+
+        static bool isMember( const string& addr );
+
         static Shard EMPTY;
 
     private:
-        string        _name;
-        string        _addr;
-        unsigned long _maxSize;  // in MBytes, 0 is unlimited 
+        string    _name;
+        string    _addr;
+        long long _maxSize;    // in MBytes, 0 is unlimited 
+        bool      _isDraining; // shard is currently being removed
     };
 
     class ShardStatus {
@@ -143,11 +156,11 @@ namespace mongo {
         ShardStatus( const Shard& shard , const BSONObj& obj );
 
         friend ostream& operator << (ostream& out, const ShardStatus& s) {
-            out << (string)s;
+            out << s.toString();
             return out;
         }
 
-        operator string() const {
+        string toString() const {
             stringstream ss;
             ss << "shard: " << _shard << " mapped: " << _mapped << " writeLock: " << _writeLock; 
             return ss.str();
@@ -161,13 +174,17 @@ namespace mongo {
             return _shard;
         }
 
+        long long mapped() const {
+            return _mapped;
+        }
+
     private:
         Shard _shard;
         long long _mapped;
         double _writeLock;
     };
 
-    class ShardConnection : boost::noncopyable{
+    class ShardConnection : public AScopedConnection {
     public:
         ShardConnection( const Shard * s , const string& ns );
         ShardConnection( const Shard& s , const string& ns );
@@ -179,16 +196,19 @@ namespace mongo {
         void kill();
 
         DBClientBase& conn(){
+            _finishInit();
             assert( _conn );
             return *_conn;
         }
         
         DBClientBase* operator->(){
+            _finishInit();
             assert( _conn );
             return _conn;
         }
 
         DBClientBase* get(){
+            _finishInit();
             assert( _conn );
             return _conn;
         }
@@ -197,13 +217,35 @@ namespace mongo {
             return _addr;
         }
 
+        bool setVersion() {
+            _finishInit();
+            return _setVersion;
+        }
+
         static void sync();
+
+        void donotCheckVersion(){
+            _setVersion = false;
+            _finishedInit = true;
+        }
+
+        /**
+           this just passes through excpet it checks for stale configs
+         */
+        bool runCommand( const string& db , const BSONObj& cmd , BSONObj& res );
+
+        /** checks all of my thread local connections for the version of this ns */
+        static void checkMyConnectionVersions( const string & ns );
         
     private:
         void _init();
+        void _finishInit();
         
+        bool _finishedInit;
+
         string _addr;
         string _ns;
         DBClientBase* _conn;
+        bool _setVersion;
     };
 }

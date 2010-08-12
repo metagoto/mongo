@@ -19,6 +19,7 @@
 
 #include "pch.h"
 #include "rs.h"
+#include "../client.h"
 
 namespace mongo {
 
@@ -32,7 +33,7 @@ namespace mongo {
         Member *m = rs->head();
         Member *p = 0;
         while( m ) {
-            if( m->state() == PRIMARY ) {
+            if( m->state().primary() && m->hbinfo().up() ) {
                 if( p ) throw "twomasters"; // our polling is asynchronous, so this is often ok.
                 p = m;
             }
@@ -44,59 +45,135 @@ namespace mongo {
     }
 
     Manager::Manager(ReplSetImpl *_rs) : 
-      task::Server("Manager"), rs(_rs), _primary(NOPRIMARY)
+    task::Server("rs Manager"), rs(_rs), busyWithElectSelf(false), _primary(NOPRIMARY)
     { 
     }
- 
+    
+    Manager::~Manager() { 
+        log() << "ERROR: ~Manager should never be called" << rsLog;
+        rs->mgr = 0;
+        assert(false);
+    }
+
+    void Manager::starting() { 
+        Client::initThread("rs Manager");
+    }
+
     void Manager::noteARemoteIsPrimary(const Member *m) { 
-        rs->_currentPrimary = m;
+        if( rs->box.getPrimary() == m )
+            return;
         rs->_self->lhb() = "";
-        rs->_myState = RECOVERING;
+        rs->box.set(rs->iAmArbiterOnly() ? MemberState::RS_ARBITER : MemberState::RS_RECOVERING, m);
     }
 
     /** called as the health threads get new results */
     void Manager::msgCheckNewState() {
-        const Member *p = rs->currentPrimary();
-        const Member *p2;
-        try { p2 = findOtherPrimary(); }
-        catch(string s) { 
-            /* two other nodes think they are primary (asynchronously polled) -- wait for things to settle down. */
-            log() << "replSet warning DIAG TODO 2primary" << s << rsLog;
-            return;
-        }
+        {
+            theReplSet->assertValid();
+            rs->assertValid();
 
-        if( p == p2 && p ) return;
+            RSBase::lock lk(rs);
 
-        if( p2 ) { 
-            /* someone else thinks they are primary. */
-            if( p == p2 ) // already match
+            if( busyWithElectSelf ) return;
+
+            const Member *p = rs->box.getPrimary();
+            if( p && p != rs->_self ) {
+                if( !p->hbinfo().up() || 
+                    !p->hbinfo().hbstate.primary() ) 
+                {
+                    p = 0;
+                    rs->box.setOtherPrimary(0);
+                }
+            }
+
+            const Member *p2;
+            try { p2 = findOtherPrimary(); }
+            catch(string s) { 
+                /* two other nodes think they are primary (asynchronously polled) -- wait for things to settle down. */
+                log() << "replSet warning DIAG 2 primary" << s << rsLog;
                 return;
-            if( p == 0 )
-                noteARemoteIsPrimary(p2); return;
-            if( p != rs->_self )
-                noteARemoteIsPrimary(p2); return;
-            /* we thought we were primary, yet now someone else thinks they are. */
-            if( !rs->elect.aMajoritySeemsToBeUp() )
-                noteARemoteIsPrimary(p2); return;
-            /* ignore for now, keep thinking we are master */
-            return;
-        }
+            }
 
-        if( p ) { 
-            /* we are already primary, and nothing significant out there has changed. */
-            /* todo: if !aMajoritySeemsToBeUp, relinquish */
-            assert( p == rs->_self );
-            return;
-        }
+            if( p2 ) {
+                /* someone else thinks they are primary. */
+                if( p == p2 ) { 
+                    // we thought the same; all set.
+                    return;
+                }
+                if( p == 0 ) {
+                    noteARemoteIsPrimary(p2); 
+                    return;
+                }
+                // todo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+                if( p != rs->_self ) {
+                    // switch primary from oldremotep->newremotep2
+                    noteARemoteIsPrimary(p2); 
+                    return;
+                }
+                /* we thought we were primary, yet now someone else thinks they are. */
+                if( !rs->elect.aMajoritySeemsToBeUp() ) {
+                    /* we can't see a majority.  so the other node is probably the right choice. */
+                    noteARemoteIsPrimary(p2); 
+                    return;
+                }
+                /* ignore for now, keep thinking we are master. 
+                   this could just be timing (we poll every couple seconds) or could indicate 
+                   a problem?  if it happens consistently for a duration of time we should 
+                   alert the sysadmin.
+                */
+                return;
+            }
 
-        /* no one seems to be primary.  shall we try to elect ourself? */
-        if( !rs->elect.aMajoritySeemsToBeUp() ) { 
-            rs->_self->lhb() = "can't see a majority, won't consider electing self";
-            return;
-        }
+            /* didn't find anyone who wants to be primary */
 
-        rs->_self->lhb() = "";
-        rs->elect.electSelf();
+            if( p ) { 
+                /* we are already primary */
+
+                if( p != rs->_self ) { 
+                    rs->sethbmsg("error p != rs->self in checkNewState");
+                    log() << "replSet " << p->fullName() << rsLog;
+                    log() << "replSet " << rs->_self->fullName() << rsLog;
+                    return;
+                }
+
+                if( rs->elect.shouldRelinquish() ) { 
+                    log() << "replSet can't see a majority of the set, relinquishing primary" << rsLog;
+                    rs->relinquish();
+                }
+
+                return;
+            }
+
+            if( !rs->iAmPotentiallyHot() ) // if not we never try to be primary
+                return;
+
+            /* TODO : CHECK PRIORITY HERE.  can't be elected if priority zero. */
+
+            /* no one seems to be primary.  shall we try to elect ourself? */
+            if( !rs->elect.aMajoritySeemsToBeUp() ) { 
+                static time_t last;
+                static int n;
+                int ll = 0;
+                if( ++n > 5 ) ll++;
+                if( last + 60 > time(0 ) ) ll++;
+                log(ll) << "replSet can't see a majority, will not try to elect self" << rsLog;
+                last = time(0);
+                return;
+            }
+
+            busyWithElectSelf = true; // don't try to do further elections & such while we are already working on one.
+        }
+        try { 
+            rs->elect.electSelf(); 
+        }
+        catch(RetryAfterSleepException&) {
+            /* we want to process new inbounds before trying this again.  so we just put a checkNewstate in the queue for eval later. */
+            requeue();
+        }
+        catch(...) { 
+            log() << "replSet error unexpected assertion in rs manager" << rsLog; 
+        }
+        busyWithElectSelf = false;
     }
 
 }

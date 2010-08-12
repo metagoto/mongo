@@ -52,7 +52,7 @@ namespace mongo {
             BSONObj key;
 
             BSONObjBuilder reduceArgs( sizeEstimate );
-            BSONArrayBuilder * valueBuilder = 0;
+            boost::scoped_ptr<BSONArrayBuilder>  valueBuilder;
             
             int sizeSoFar = 0;
             unsigned n = 0;
@@ -62,8 +62,8 @@ namespace mongo {
                 if ( n == 0 ){
                     reduceArgs.append( keyE );
                     key = keyE.wrap();
-                    valueBuilder = new BSONArrayBuilder( reduceArgs.subarrayStart( "values" ) );
                     sizeSoFar = 5 + keyE.size();
+                    valueBuilder.reset(new BSONArrayBuilder( reduceArgs.subarrayStart( "values" ) ));
                 }
                 
                 BSONElement ee = j.next();
@@ -80,7 +80,6 @@ namespace mongo {
             }
             assert(valueBuilder);
             valueBuilder->done();
-            delete valueBuilder;
             BSONObj args = reduceArgs.obj();
 
             s->invokeSafe( reduce , args );
@@ -306,21 +305,17 @@ namespace mongo {
         
         class MRTL {
         public:
-            MRTL( MRState& state ) : _state( state ){
-                _temp = new InMemory();
+            MRTL( MRState& state ) 
+                : _state( state )
+                , _temp(new InMemory())
+            {
                 _size = 0;
                 numEmits = 0;
             }
-            ~MRTL(){
-                delete _temp;
-            }
-            
             
             void reduceInMemory(){
-                
-                InMemory * old = _temp;
-                InMemory * n = new InMemory();
-                _temp = n;
+                boost::shared_ptr<InMemory> old = _temp;
+                _temp.reset(new InMemory());
                 _size = 0;
                 
                 for ( InMemory::iterator i=old->begin(); i!=old->end(); i++ ){
@@ -338,9 +333,6 @@ namespace mongo {
                         insert( res );
                     }
                 }
-                
-                delete( old );
-
             }
 
             void dump(){
@@ -388,7 +380,7 @@ namespace mongo {
             
             MRState& _state;
         
-            InMemory * _temp;
+            boost::shared_ptr<InMemory> _temp;
             long _size;
             
         public:
@@ -552,7 +544,6 @@ namespace mongo {
                             }
                         
                             ClientCursor::YieldLock yield (cursor.get());
-                                
                             state.finalReduce( all );
                             
                             all.clear();
@@ -568,7 +559,9 @@ namespace mongo {
                         }
 
                         {
-                            dbtemprelease tl;
+                            dbtempreleasecond tl;
+                            if ( ! tl.unlocked() )
+                                log( LL_WARNING ) << "map/reduce can't temp release" << endl;
                             state.finalReduce( all );
                         }
 
@@ -632,64 +625,72 @@ namespace mongo {
                 
                 BSONObj shards = cmdObj["shards"].embeddedObjectUserCheck();
                 vector< auto_ptr<DBClientCursor> > shardCursors;
-                BSONObjIterator i( shards );
-                while ( i.more() ){
-                    BSONElement e = i.next();
-                    string shard = e.fieldName();
 
-                    BSONObj res = e.embeddedObjectUserCheck();
-                    
-                    uassert( 10078 ,  "something bad happened" , shardedOutputCollection == res["result"].valuestrsafe() );
-                    servers.insert( shard );
-                    shardCounts.appendAs( res["counts"] , shard.c_str() );
-
-                    BSONObjIterator j( res["counts"].embeddedObjectUserCheck() );
-                    while ( j.more() ){
-                        BSONElement temp = j.next();
-                        counts[temp.fieldName()] += temp.numberLong();
+                { // parse per shard results 
+                    BSONObjIterator i( shards );
+                    while ( i.more() ){
+                        BSONElement e = i.next();
+                        string shard = e.fieldName();
+                        
+                        BSONObj res = e.embeddedObjectUserCheck();
+                        
+                        uassert( 10078 ,  "something bad happened" , shardedOutputCollection == res["result"].valuestrsafe() );
+                        servers.insert( shard );
+                        shardCounts.appendAs( res["counts"] , shard.c_str() );
+                        
+                        BSONObjIterator j( res["counts"].embeddedObjectUserCheck() );
+                        while ( j.more() ){
+                            BSONElement temp = j.next();
+                            counts[temp.fieldName()] += temp.numberLong();
+                        }
+                        
                     }
-
+                    
                 }
-
-                BSONObj sortKey = BSON( "_id" << 1 );
-
-                ParallelSortClusteredCursor cursor( servers , dbname + "." + shardedOutputCollection ,
-                                                    Query().sort( sortKey ) );
                 
-                
-                auto_ptr<Scope> s = globalScriptEngine->getPooledScope( dbname );
-                ScriptingFunction reduceFunction = s->createFunction( mr.reduceCode.c_str() );
-                ScriptingFunction finalizeFunction = 0;
-                if ( mr.finalizeCode.size() )
-                    finalizeFunction = s->createFunction( mr.finalizeCode.c_str() );
-
-                BSONList values;
-
-                result.append( "result" , mr.finalShort );
-
                 DBDirectClient db;
-                
-                while ( cursor.more() ){
-                    BSONObj t = cursor.next().getOwned();
-                                        
-                    if ( values.size() == 0 ){
+                    
+                { // reduce from each stream
+                    
+                    BSONObj sortKey = BSON( "_id" << 1 );
+                    
+                    ParallelSortClusteredCursor cursor( servers , dbname + "." + shardedOutputCollection ,
+                                                        Query().sort( sortKey ) );
+                    cursor.init();
+                    
+                    auto_ptr<Scope> s = globalScriptEngine->getPooledScope( dbname );
+                    s->localConnect( dbname.c_str() );
+                    ScriptingFunction reduceFunction = s->createFunction( mr.reduceCode.c_str() );
+                    ScriptingFunction finalizeFunction = 0;
+                    if ( mr.finalizeCode.size() )
+                        finalizeFunction = s->createFunction( mr.finalizeCode.c_str() );
+                    
+                    BSONList values;
+                    
+                    result.append( "result" , mr.finalShort );
+                    
+                    while ( cursor.more() ){
+                        BSONObj t = cursor.next().getOwned();
+                        
+                        if ( values.size() == 0 ){
+                            values.push_back( t );
+                            continue;
+                        }
+                        
+                        if ( t.woSortOrder( *(values.begin()) , sortKey ) == 0 ){
+                            values.push_back( t );
+                            continue;
+                        }
+                        
+                        
+                        db.insert( mr.tempLong , reduceValues( values , s.get() , reduceFunction , 1 , finalizeFunction ) );
+                        values.clear();
                         values.push_back( t );
-                        continue;
                     }
                     
-                    if ( t.woSortOrder( *(values.begin()) , sortKey ) == 0 ){
-                        values.push_back( t );
-                        continue;
-                    }
-                    
-
-                    db.insert( mr.tempLong , reduceValues( values , s.get() , reduceFunction , 1 , finalizeFunction ) );
-                    values.clear();
-                    values.push_back( t );
+                    if ( values.size() )
+                        db.insert( mr.tempLong , reduceValues( values , s.get() , reduceFunction , 1 , finalizeFunction ) );
                 }
-                
-                if ( values.size() )
-                    db.insert( mr.tempLong , reduceValues( values , s.get() , reduceFunction , 1 , finalizeFunction ) );
                 
                 long long finalCount = mr.renameIfNeeded( db );
                 log(0) << " mapreducefinishcommand " << mr.finalLong << " " << finalCount << endl;

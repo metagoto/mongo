@@ -121,9 +121,11 @@ namespace mongo {
                 nonce *ln = lastNonce.release();
                 if ( ln == 0 ) {
                     reject = true;
+                    log(1) << "auth: no lastNonce" << endl;
                 } else {
                     digestBuilder << hex << *ln;
                     reject = digestBuilder.str() != received_nonce;
+                    if ( reject ) log(1) << "auth: different lastNonce" << endl;
                 }
                     
                 if ( reject ) {
@@ -174,13 +176,7 @@ namespace mongo {
             AuthenticationInfo *ai = cc().getAuthenticationInfo();
             
             if ( userObj[ "readOnly" ].isBoolean() && userObj[ "readOnly" ].boolean() ) {
-                if ( readLockSupported() ){
-                    ai->authorizeReadOnly( cc().database()->name.c_str() );
-                }
-                else {
-                    log() << "warning: old version of boost, read-only users not supported" << endl;
-                    ai->authorize( cc().database()->name.c_str() );
-                }
+                ai->authorizeReadOnly( cc().database()->name.c_str() );
             } else {
                 ai->authorize( cc().database()->name.c_str() );
             }

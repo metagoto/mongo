@@ -46,19 +46,36 @@ namespace mongo {
             return HostAndPort("localhost", cmdLine.port);
         }
 
-        bool operator<(const HostAndPort& r) const { return _host < r._host || (_host==r._host&&_port<r._port); }
+        /* uses real hostname instead of localhost */
+        static HostAndPort Me();
+
+        bool operator<(const HostAndPort& r) const {
+            if( _host < r._host ) 
+                return true;
+            if( _host == r._host )
+                return port() < r.port();
+            return false;
+        }
+
+        bool operator==(const HostAndPort& r) const {
+            return _host == r._host && port() == r.port();
+        }
 
         /* returns true if the host/port combo identifies this process instance. */
-        bool isSelf() const;
+        bool isSelf() const; // defined in message.cpp
 
         bool isLocalHost() const;
 
         // @returns host:port
         string toString() const; 
 
+        operator string() const { return toString(); }
+
         string host() const { return _host; }
 
-        int port() const { return _port >= 0 ? _port : cmdLine.port; }
+        int port() const { return _port >= 0 ? _port : CmdLine::DefaultDBPort; }
+        bool hasPort() const { return _port >= 0; }
+        void setPort( int port ) { _port = port; }
 
     private:
         // invariant (except full obj assignment):
@@ -75,23 +92,34 @@ namespace mongo {
         return str::before(a, '.') == str::before(b, '.');
     }
 
-    inline bool HostAndPort::isSelf() const { 
-        int p = _port == -1 ? CmdLine::DefaultDBPort : _port;
-        if( p != cmdLine.port )
-            return false;
-        
-        return sameHostname(getHostName(), _host) || isLocalHost();
+    inline HostAndPort HostAndPort::Me() { 
+        string h = getHostName();
+        assert( !h.empty() );
+        assert( h != "localhost" );
+        return HostAndPort(h, cmdLine.port);
     }
 
     inline string HostAndPort::toString() const {
         stringstream ss;
         ss << _host;
-        if( _port != -1 ) ss << ':' << _port;
+        if ( _port != -1 ){
+            ss << ':';
+#if defined(_DEBUG)
+            if( _port >= 44000 && _port < 44100 ) { 
+                log() << "warning: special debug port 44xxx used" << endl;
+                ss << _port+1;
+            }
+            else
+                ss << _port;
+#else
+            ss << _port;
+#endif
+        }
         return ss.str();
     }
 
     inline bool HostAndPort::isLocalHost() const { 
-        return _host == "localhost" || _host == "127.0.0.1" || _host == "::1";
+        return _host == "localhost" || startsWith(_host.c_str(), "127.") || _host == "::1";
     }
 
     inline HostAndPort::HostAndPort(string s) {

@@ -129,6 +129,15 @@ namespace mongo {
                 StringBuilder buf( fullName.size() + 1 );
                 for ( size_t i=0; i<fullName.size(); i++ ){
                     char c = fullName[i];
+                    
+                    if ( c == '$' && 
+                         i > 0 && fullName[i-1] == '.' &&
+                         i+1<fullName.size() && 
+                         fullName[i+1] == '.' ){
+                        i++;
+                        continue;
+                    }
+
                     buf << c;
 
                     if ( c != '.' )

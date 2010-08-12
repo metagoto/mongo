@@ -22,7 +22,6 @@
 
 namespace mongo {
 
-
     /**
      * Database represents a database database
      * Each database database has its own set of files -- dbname.ns, dbname.0, dbname.1, ...
@@ -32,33 +31,7 @@ namespace mongo {
     public:
         static bool _openAllFiles;
         
-        Database(const char *nm, bool& newDb, const string& _path = dbpath)
-            : name(nm), path(_path), namespaceIndex( path, name ) {
-            
-            { // check db name is valid
-                size_t L = strlen(nm);
-                uassert( 10028 ,  "db name is empty", L > 0 );
-                uassert( 10029 ,  "bad db name [1]", *nm != '.' );
-                uassert( 10030 ,  "bad db name [2]", nm[L-1] != '.' );
-                uassert( 10031 ,  "bad char(s) in db name", strchr(nm, ' ') == 0 );
-                uassert( 10032 ,  "db name too long", L < 64 );
-            }
-
-            newDb = namespaceIndex.exists();
-            profile = 0;
-            profileName = name + ".system.profile";
-
-            // If already exists, open.  Otherwise behave as if empty until
-            // there's a write, then open.
-            if ( ! newDb || cmdLine.defaultProfile ) {
-                namespaceIndex.init();
-                if( _openAllFiles )
-                    openAllFiles();
-
-            }
-            
-            magic = 781231;
-        }
+        Database(const char *nm, bool& newDb, const string& _path = dbpath);
         
         ~Database() {
             magic = 0;
@@ -214,6 +187,8 @@ namespace mongo {
                 size += boost::filesystem::file_size( fileName(n) );
             return size;
         }
+
+        void flushFiles( bool sync );
         
         vector<MongoDataFile*> files;
         string name; // "alleyinsider"

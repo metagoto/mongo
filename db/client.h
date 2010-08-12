@@ -29,9 +29,11 @@
 #include "namespace.h"
 #include "lasterror.h"
 #include "stats/top.h"
-#include "repl/rs.h"
+//#include "repl/rs.h"
 
 namespace mongo { 
+
+    extern class ReplSet *theReplSet;
 
     class AuthenticationInfo;
     class Database;
@@ -46,7 +48,7 @@ namespace mongo {
         static mongo::mutex clientsMutex;
         static set<Client*> clients; // always be in clientsMutex when manipulating this
 
-        static int recommendedYieldMicros();
+        static int recommendedYieldMicros( int * writers = 0 , int * readers = 0 );
 
         class GodScope {
             bool _prev;
@@ -81,16 +83,16 @@ namespace mongo {
         public:
             Context(const string& ns, string path=dbpath, mongolock * lock = 0 , bool doauth=true ) 
                 : _client( currentClient.get() ) , _oldContext( _client->_context ) , 
-                  _path( path ) , _lock( lock ) ,
-                  _ns( ns ){
+                  _path( path ) , _lock( lock ) , 
+                  _ns( ns ), _db(0){
                 _finishInit( doauth );
             }
             
             /* this version saves the context but doesn't yet set the new one: */
-
+            
             Context() 
                 : _client( currentClient.get() ) , _oldContext( _client->_context ), 
-                  _path( dbpath ) , _lock(0) , _justCreated(false){
+                  _path( dbpath ) , _lock(0) , _justCreated(false), _db(0){
                 _client->_context = this;
                 clear();
             }
@@ -152,13 +154,15 @@ namespace mongo {
         CurOp * _curOp;
         Context * _context;
         bool _shutdown;
-        list<string> _tempCollections;
+        set<string> _tempCollections;
         const char *_desc;
         bool _god;
         AuthenticationInfo _ai;
         ReplTime _lastOp;
         BSONObj _handshake;
         BSONObj _remoteId;
+
+        void _dropns( const string& ns );
 
     public:
         string clientAddress() const;
@@ -173,9 +177,12 @@ namespace mongo {
         Client(const char *desc);
         ~Client();
 
-        void addTempCollection( const string& ns ) { _tempCollections.push_back( ns ); }
-        void dropTempCollectionsInDB(const string db);
-        void dropAllTempCollectionsInDB(const string db);
+        void addTempCollection( const string& ns );
+        
+        void _invalidateDB(const string& db);
+        static void invalidateDB(const string& db);
+
+        static void invalidateNS( const string& ns );
 
         void setLastOp( ReplTime op ) {
             _lastOp = op;
@@ -185,6 +192,7 @@ namespace mongo {
             return _lastOp;
         }
 
+        /* report what the last operation was.  used by getlasterror */
         void appendLastOp( BSONObjBuilder& b ) {
             if( theReplSet ) { 
                 b.append("lastOp" , (long long) _lastOp);
@@ -207,6 +215,8 @@ namespace mongo {
          */
         bool shutdown();
 
+        
+        /* this is for map/reduce writes */
         bool isGod() const { return _god; }
 
         friend class CurOp;
@@ -220,7 +230,9 @@ namespace mongo {
     };
     
     inline Client& cc() { 
-        return *currentClient.get();
+        Client * c = currentClient.get();
+        assert( c );
+        return *c;
     }
 
     /* each thread which does db operations has a Client object in TLS.  

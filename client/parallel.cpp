@@ -32,8 +32,13 @@ namespace mongo {
         _ns = q.ns;
         _query = q.query.copy();
         _options = q.queryOptions;
-        _fields = q.fields;
+        _fields = q.fields.copy();
+        _batchSize = q.ntoreturn;
+        if ( _batchSize == 1 )
+            _batchSize = 2;
+
         _done = false;
+        _didInit = false;
     }
 
     ClusteredCursor::ClusteredCursor( const string& ns , const BSONObj& q , int options , const BSONObj& fields ){
@@ -41,15 +46,26 @@ namespace mongo {
         _query = q.getOwned();
         _options = options;
         _fields = fields.getOwned();
+        _batchSize = 0;
+
         _done = false;
+        _didInit = false;
     }
 
     ClusteredCursor::~ClusteredCursor(){
         _done = true; // just in case
     }
+
+    void ClusteredCursor::init(){
+        if ( _didInit )
+            return;
+        _didInit = true;
+        _init();
+    }
     
-    auto_ptr<DBClientCursor> ClusteredCursor::query( const string& server , int num , BSONObj extra ){
+    auto_ptr<DBClientCursor> ClusteredCursor::query( const string& server , int num , BSONObj extra , int skipLeft ){
         uassert( 10017 ,  "cursor already done" , ! _done );
+        assert( _didInit );
         
         BSONObj q = _query;
         if ( ! extra.isEmpty() ){
@@ -58,20 +74,34 @@ namespace mongo {
 
         ShardConnection conn( server , _ns );
         
+        if ( conn.setVersion() ){
+            conn.done();
+            throw StaleConfigException( _ns , "ClusteredCursor::query ShardConnection had to change" , true );
+        }
+
         if ( logLevel >= 5 ){
             log(5) << "ClusteredCursor::query (" << type() << ") server:" << server 
-                   << " ns:" << _ns << " query:" << q << " num:" << num << 
-                " _fields:" << _fields << " options: " << _options << endl;
+                   << " ns:" << _ns << " query:" << q << " num:" << num 
+                   << " _fields:" << _fields << " options: " << _options << endl;
         }
         
         auto_ptr<DBClientCursor> cursor = 
-            conn->query( _ns , q , num , 0 , ( _fields.isEmpty() ? 0 : &_fields ) , _options );
+            conn->query( _ns , q , num , 0 , ( _fields.isEmpty() ? 0 : &_fields ) , _options , _batchSize == 0 ? 0 : _batchSize + skipLeft );
+
+        assert( cursor.get() );
         
-        if ( cursor->hasResultFlag( QueryResult::ResultFlag_ShardConfigStale ) ){
+        if ( cursor->hasResultFlag( ResultFlag_ShardConfigStale ) ){
             conn.done();
             throw StaleConfigException( _ns , "ClusteredCursor::query" );
         }
         
+        if ( cursor->hasResultFlag( ResultFlag_ErrSet ) ){
+            conn.done();
+            BSONObj o = cursor->next();
+            throw UserException( o["code"].numberInt() , o["$err"].String() );
+        }
+
+
         cursor->attach( &conn );
 
         conn.done();
@@ -164,7 +194,7 @@ namespace mongo {
     
     // --------  FilteringClientCursor -----------
     FilteringClientCursor::FilteringClientCursor( const BSONObj filter )
-        : _matcher( filter ) , _done( false ){
+        : _matcher( filter ) , _done( true ){
     }
 
     FilteringClientCursor::FilteringClientCursor( auto_ptr<DBClientCursor> cursor , const BSONObj filter )
@@ -283,7 +313,7 @@ namespace mongo {
         : ClusteredCursor( q ) , _servers( servers ){
         _sortKey = sortKey.getOwned();
         _needToSkip = q.ntoskip;
-        _init();
+        _finishCons();
     }
 
     ParallelSortClusteredCursor::ParallelSortClusteredCursor( const set<ServerAndQuery>& servers , const string& ns , 
@@ -292,24 +322,71 @@ namespace mongo {
         : ClusteredCursor( ns , q.obj , options , fields ) , _servers( servers ){
         _sortKey = q.getSort().copy();
         _needToSkip = 0;
-        _init();
+        _finishCons();
     }
 
-    void ParallelSortClusteredCursor::_init(){
+    void ParallelSortClusteredCursor::_finishCons(){
         _numServers = _servers.size();
+        _cursors = 0;
+
+        if ( ! _sortKey.isEmpty() && ! _fields.isEmpty() ){
+            // we need to make sure the sort key is in the project
+
+            set<string> sortKeyFields;
+            _sortKey.getFieldNames(sortKeyFields);
+
+            BSONObjBuilder b;
+            bool isNegative = false;
+            {
+                BSONObjIterator i( _fields );
+                while ( i.more() ){
+                    BSONElement e = i.next();
+                    b.append( e );
+
+                    string fieldName = e.fieldName();
+
+                    // exact field
+                    bool found = sortKeyFields.erase(fieldName);
+
+                    // subfields
+                    set<string>::const_iterator begin = sortKeyFields.lower_bound(fieldName + ".\x00");
+                    set<string>::const_iterator end   = sortKeyFields.lower_bound(fieldName + ".\xFF");
+                    sortKeyFields.erase(begin, end);
+
+                    if ( ! e.trueValue() ) {
+                        uassert( 13431 , "have to have sort key in projection and removing it" , !found && begin == end );
+                    } else if (!e.isABSONObj()) {
+                        isNegative = true;
+                    }
+                }
+            }                    
+            
+            if (isNegative){
+                for (set<string>::const_iterator it(sortKeyFields.begin()), end(sortKeyFields.end()); it != end; ++it){
+                    b.append(*it, 1);
+                }
+            }
+            
+            _fields = b.obj();
+        }
+    }
+    
+    void ParallelSortClusteredCursor::_init(){
+        assert( ! _cursors );
         _cursors = new FilteringClientCursor[_numServers];
             
         // TODO: parellize
         int num = 0;
-        for ( set<ServerAndQuery>::iterator i = _servers.begin(); i!=_servers.end(); i++ ){
+        for ( set<ServerAndQuery>::iterator i = _servers.begin(); i!=_servers.end(); ++i ){
             const ServerAndQuery& sq = *i;
-            _cursors[num++].reset( query( sq._server , 0 , sq._extra ) );
+            _cursors[num++].reset( query( sq._server , 0 , sq._extra , _needToSkip ) );
         }
             
     }
     
     ParallelSortClusteredCursor::~ParallelSortClusteredCursor(){
         delete [] _cursors;
+        _cursors = 0;
     }
 
     bool ParallelSortClusteredCursor::more(){
@@ -317,11 +394,13 @@ namespace mongo {
         if ( _needToSkip > 0 ){
             int n = _needToSkip;
             _needToSkip = 0;
-            
+
             while ( n > 0 && more() ){
-                next();
+                BSONObj x = next();
                 n--;
             }
+
+            _needToSkip = n;
         }
         
         for ( int i=0; i<_numServers; i++ ){
@@ -347,7 +426,7 @@ namespace mongo {
                 continue;
             }
                 
-            int comp = best.woSortOrder( me , _sortKey );
+            int comp = best.woSortOrder( me , _sortKey , true );
             if ( comp < 0 )
                 continue;
                 

@@ -89,6 +89,7 @@
     <CodeAnalysisRules Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" />
     <CodeAnalysisRuleAssemblies Condition="'$(Configuration)|$(Platform)'=='Release|x64'" />
+    <IncludePath Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">..;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -119,7 +120,7 @@
     <ClCompile>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -171,7 +172,7 @@
       <Optimization>MaxSpeed</Optimization>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -192,10 +193,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ResourceCompile Include="db.rc" />
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="..\client\dbclientcursor.cpp" />
+    <ClCompile Include="..\client\distlock.cpp" />
+    <ClCompile Include="..\client\model.cpp" />
     <ClCompile Include="..\pcre-7.4\pcrecpp.cc">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
@@ -436,18 +436,42 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
       </PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\shell\mongo_vstudio.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\s\chunk.cpp" />
+    <ClCompile Include="..\s\config.cpp" />
+    <ClCompile Include="..\s\d_migrate.cpp" />
+    <ClCompile Include="..\s\d_split.cpp" />
+    <ClCompile Include="..\s\d_state.cpp" />
+    <ClCompile Include="..\s\d_writeback.cpp" />
+    <ClCompile Include="..\s\grid.cpp" />
+    <ClCompile Include="..\s\shard.cpp" />
     <ClCompile Include="..\s\shardconnection.cpp" />
+    <ClCompile Include="..\s\shardkey.cpp" />
     <ClCompile Include="..\util\concurrency\task.cpp" />
+    <ClCompile Include="..\util\concurrency\thread_pool.cpp" />
     <ClCompile Include="..\util\concurrency\vars.cpp" />
+    <ClCompile Include="..\util\log.cpp" />
+    <ClCompile Include="..\util\processinfo.cpp" />
+    <ClCompile Include="..\util\stringutils.cpp" />
     <ClCompile Include="..\util\text.cpp" />
     <ClCompile Include="..\util\version.cpp" />
+    <ClCompile Include="cap.cpp" />
+    <ClCompile Include="dbcommands_generic.cpp" />
+    <ClCompile Include="geo\2d.cpp" />
+    <ClCompile Include="geo\haystack.cpp" />
     <ClCompile Include="oplog.cpp" />
     <ClCompile Include="repl.cpp" />
     <ClCompile Include="repl\consensus.cpp" />
     <ClCompile Include="repl\heartbeat.cpp" />
     <ClCompile Include="repl\manager.cpp" />
+    <ClCompile Include="repl\rs_initialsync.cpp" />
     <ClCompile Include="repl\rs_initiate.cpp" />
+    <ClCompile Include="repl\rs_rollback.cpp" />
+    <ClCompile Include="repl\rs_sync.cpp" />
     <ClCompile Include="repl_block.cpp" />
+    <ClCompile Include="restapi.cpp" />
     <ClCompile Include="storage.cpp" />
     <ClCompile Include="..\client\connpool.cpp" />
     <ClCompile Include="..\client\dbclient.cpp" />
@@ -474,7 +498,6 @@
     <ClCompile Include="dbwebserver.cpp" />
     <ClCompile Include="extsort.cpp" />
     <ClCompile Include="index.cpp" />
-    <ClCompile Include="index_geo2d.cpp" />
     <ClCompile Include="indexkey.cpp" />
     <ClCompile Include="instance.cpp" />
     <ClCompile Include="introspect.cpp" />
@@ -533,16 +556,6 @@
     <ClCompile Include="..\s\d_logic.cpp" />
     <ClCompile Include="..\scripting\engine.cpp" />
     <ClCompile Include="..\scripting\engine_spidermonkey.cpp" />
-    <ClCompile Include="..\shell\mongo_vstudio.cpp">
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-      </PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-      </PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-      </PrecompiledHeader>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-      </PrecompiledHeader>
-    </ClCompile>
     <ClCompile Include="..\scripting\utils.cpp" />
     <ClCompile Include="stats\counters.cpp" />
     <ClCompile Include="stats\snapshots.cpp" />
@@ -555,22 +568,37 @@
     <ClCompile Include="repl\rs_config.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\jstests\replsets\replset1.js" />
+    <None Include="..\jstests\replsets\replset2.js" />
+    <None Include="..\jstests\replsets\replset3.js" />
+    <None Include="..\jstests\replsets\replset4.js" />
+    <None Include="..\jstests\replsets\replset5.js" />
+    <None Include="..\jstests\replsets\replsetadd.js" />
+    <None Include="..\jstests\replsets\replsetarb1.js" />
+    <None Include="..\jstests\replsets\replsetarb2.js" />
+    <None Include="..\jstests\replsets\replsetprio1.js" />
+    <None Include="..\jstests\replsets\replsetrestart1.js" />
+    <None Include="..\jstests\replsets\replsetrestart2.js" />
+    <None Include="..\jstests\replsets\replset_remove_node.js" />
+    <None Include="..\jstests\replsets\rollback.js" />
+    <None Include="..\jstests\replsets\rollback2.js" />
+    <None Include="..\jstests\replsets\sync1.js" />
+    <None Include="..\jstests\replsets\twosets.js" />
     <None Include="..\SConstruct" />
     <None Include="..\util\mongoutils\README" />
     <None Include="mongo.ico" />
-    <None Include="readme.txt" />
     <None Include="repl\notes.txt" />
-    <None Include="repl\test.html" />
-    <None Include="repl\testing.js" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\client\dbclientcursor.h" />
+    <ClInclude Include="..\client\distlock.h" />
     <ClInclude Include="..\client\gridfs.h" />
     <ClInclude Include="..\client\parallel.h" />
+    <ClInclude Include="..\s\d_logic.h" />
     <ClInclude Include="..\targetver.h" />
     <ClInclude Include="..\pcre-7.4\config.h" />
     <ClInclude Include="..\pcre-7.4\pcre.h" />
-    <ClInclude Include="..\util\concurrency\locks.h" />
+    <ClInclude Include="..\util\concurrency\rwlock.h" />
     <ClInclude Include="..\util\concurrency\msg.h" />
     <ClInclude Include="..\util\concurrency\mutex.h" />
     <ClInclude Include="..\util\concurrency\mvar.h" />
@@ -579,7 +607,11 @@
     <ClInclude Include="..\util\mongoutils\html.h" />
     <ClInclude Include="..\util\mongoutils\str.h" />
     <ClInclude Include="..\util\ramlog.h" />
+    <ClInclude Include="..\util\text.h" />
+    <ClInclude Include="geo\core.h" />
     <ClInclude Include="helpers\dblogger.h" />
+    <ClInclude Include="instance.h" />
+    <ClInclude Include="oplogreader.h" />
     <ClInclude Include="repl.h" />
     <ClInclude Include="replpair.h" />
     <ClInclude Include="rec.h" />
@@ -709,6 +741,9 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </Library>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="db.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

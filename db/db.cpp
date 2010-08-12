@@ -37,6 +37,7 @@
 #include "../util/concurrency/task.h"
 #include "../util/version.h"
 #include "client.h"
+#include "dbwebserver.h"
 
 #if defined(_WIN32)
 # include "../util/ntservice.h"
@@ -52,7 +53,6 @@ namespace mongo {
     /* only off if --nohints */
     extern bool useHints;
 
-    extern string bind_ip;
     extern char *appsrvPath;
     extern int diagLogging;
     extern int lenForNewNsFiles;
@@ -62,11 +62,13 @@ namespace mongo {
 
 #if defined(_WIN32)
     std::wstring windowsServiceName = L"MongoDB";
+    std::wstring windowsServiceUser = L"";
+    std::wstring windowsServicePassword = L"";
 #endif
 
     void setupSignals();
     void closeAllSockets();
-    void startReplSets();
+    void startReplSets(ReplSetCmdline*);
     void startReplication();
     void pairWith(const char *remoteEnd, const char *arb);
     void exitCleanly( ExitCode code );
@@ -94,48 +96,89 @@ namespace mongo {
 
     QueryResult* emptyMoreResult(long long);
 
-    MessagingPort *connGrab = 0;
-    void connThread();
+    void connThread( MessagingPort * p );
 
     class OurListener : public Listener {
     public:
         OurListener(const string &ip, int p) : Listener(ip, p) { }
         virtual void accepted(MessagingPort *mp) {
-            assert( connGrab == 0 );
+
             if ( ! connTicketHolder.tryAcquire() ){
-                log() << "connection refused because too many open connections" << endl;
+                log() << "connection refused because too many open connections: " << connTicketHolder.used() << endl;
                 // TODO: would be nice if we notified them...
                 mp->shutdown();
+                delete mp;
                 return;
             }
-            connGrab = mp;
+
             try {
-                boost::thread thr(connThread);
-                while ( connGrab )
-                    sleepmillis(1);
+                boost::thread thr(boost::bind(&connThread,mp));
             }
             catch ( boost::thread_resource_error& ){
                 log() << "can't create new thread, closing connection" << endl;
                 mp->shutdown();
-                connGrab = 0;
+                delete mp;
             }
             catch ( ... ){
                 log() << "unkonwn exception starting connThread" << endl;
                 mp->shutdown();
-                connGrab = 0;
+                delete mp;
             }
         }
     };
 
-    void webServerThread();
+/* todo: make this a real test.  the stuff in dbtests/ seem to do all dbdirectclient which exhaust doesn't support yet. */
+// QueryOption_Exhaust
+#define TESTEXHAUST 0
+#if( TESTEXHAUST )
+    void testExhaust() { 
+        sleepsecs(1);
+        unsigned n = 0;
+        auto f = [&n](const BSONObj& o) { 
+            assert( o.valid() );
+            //cout << o << endl;
+            n++;
+            bool testClosingSocketOnError = false;
+            if( testClosingSocketOnError )
+                assert(false);
+        };
+        DBClientConnection db(false);
+        db.connect("localhost");
+        const char *ns = "local.foo";
+        if( db.count(ns) < 10000 )
+            for( int i = 0; i < 20000; i++ ) 
+                db.insert(ns, BSON("aaa" << 3 << "b" << "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+
+        try {
+            db.query(f, ns, Query() );
+        }
+        catch(...) { 
+            cout << "hmmm" << endl;
+        }
+
+        try {
+            db.query(f, ns, Query() );
+        }
+        catch(...) { 
+            cout << "caught" << endl;
+        }
+
+        cout << n << endl;
+    };
+#endif
 
     void listen(int port) {
         //testTheDb();
         log() << "waiting for connections on port " << port << endl;
-        OurListener l(bind_ip, port);
+        OurListener l(cmdLine.bind_ip, port);
+        l.setAsTimeTracker();
         startReplication();
         if ( !noHttpInterface )
             boost::thread thr(webServerThread);
+
+#if(TESTEXHAUST)
+        boost::thread thr(testExhaust);
+#endif
         l.initAndListen();
     }
 
@@ -152,11 +195,16 @@ namespace mongo {
 #endif
     }
 
+    /* if server is really busy, wait a bit */
+    void beNice() {
+        sleepmicros( Client::recommendedYieldMicros() );
+    }
+
     /* we create one thread for each connection from an app server database.
        app server will open a pool of threads.
        todo: one day, asio...
     */
-    void connThread()
+    void connThread( MessagingPort * inPort )
     {
         TicketHolderReleaser connTicketReleaser( &connTicketHolder );
         Client::initThread("conn");
@@ -165,8 +213,9 @@ namespace mongo {
         LastError *le = new LastError();
         lastError.reset(le);
 
-        auto_ptr<MessagingPort> dbMsgPort( connGrab );
-        connGrab = 0;
+        auto_ptr<MessagingPort> dbMsgPort( inPort );
+
+        dbMsgPort->_logLevel = 1;
         Client& c = cc();
 
         try {
@@ -183,7 +232,7 @@ namespace mongo {
                     dbMsgPort->shutdown();
                     break;
                 }
-
+sendmore:
                 if ( inShutdown() ) {
                     log() << "got request after shutdown()" << endl;
                     break;
@@ -193,7 +242,7 @@ namespace mongo {
 
                 DbResponse dbresponse;
                 if ( !assembleResponse( m, dbresponse, dbMsgPort->farEnd ) ) {
-                    out() << curTimeMillis() % 10000 << "   end msg " << dbMsgPort->farEnd.toString() << endl;
+                    log() << curTimeMillis() % 10000 << "   end msg " << dbMsgPort->farEnd.toString() << endl;
                     /* todo: we may not wish to allow this, even on localhost: very low priv accounts could stop us. */
                     if ( dbMsgPort->farEnd.isLocalHost() ) {
                         dbMsgPort->shutdown();
@@ -202,17 +251,43 @@ namespace mongo {
                         dbexit(EXIT_CLEAN);
                     }
                     else {
-                        out() << "  (not from localhost, ignoring end msg)" << endl;
+                        log() << "  (not from localhost, ignoring end msg)" << endl;
                     }
                 }
 
-                if ( dbresponse.response )
+                if ( dbresponse.response ) {
                     dbMsgPort->reply(m, *dbresponse.response, dbresponse.responseTo);
+                    if( dbresponse.exhaust ) { 
+                        MsgData *header = dbresponse.response->header();
+                        QueryResult *qr = (QueryResult *) header;
+                        long long cursorid = qr->cursorId;
+                        if( cursorid ) {
+                            assert( dbresponse.exhaust && *dbresponse.exhaust != 0 );
+                            string ns = dbresponse.exhaust; // before reset() free's it...
+                            m.reset();
+                            BufBuilder b(512);
+                            b.appendNum((int) 0 /*size set later in appendData()*/);
+                            b.appendNum(header->id);
+                            b.appendNum(header->responseTo);
+                            b.appendNum((int) dbGetMore);
+                            b.appendNum((int) 0);
+                            b.appendStr(ns);
+                            b.appendNum((int) 0); // ntoreturn
+                            b.appendNum(cursorid);
+                            m.appendData(b.buf(), b.len());
+                            b.decouple();
+                            DEV log() << "exhaust=true sending more" << endl;
+                            beNice();
+                            goto sendmore;
+                        }
+                    }
+                }
             }
 
         }
-        catch ( AssertionException& ) {
-            problem() << "AssertionException in connThread, closing client connection" << endl;
+        catch ( AssertionException& e ) {
+            log() << "AssertionException in connThread, closing client connection" << endl;
+            log() << ' ' << e.what() << endl;
             dbMsgPort->shutdown();
         }
         catch ( SocketException& ) {
@@ -314,7 +389,7 @@ namespace mongo {
     void repairDatabases() {
 		//        LastError * le = lastError.get( true );
         Client::GodScope gs;
-        log(1) << "enter repairDatabases" << endl;
+        log(1) << "enter repairDatabases (to check pdfile version #)" << endl;
         
         //assert(checkNsFilesOnLoad);
         checkNsFilesOnLoad = false; // we are mainly just checking the header - don't scan the whole .ns file for every db here.
@@ -396,7 +471,12 @@ namespace mongo {
     public:
         string name() { return "DataFileSync"; }
         void run(){
-            log(1) << "will flush memory every: " << _sleepsecs << " seconds" << endl;
+            if( _sleepsecs == 0 )
+                log() << "warning: --syncdelay 0 is not recommended and can have strange performance" << endl;
+            else if( _sleepsecs == 1 ) 
+                log() << "--syncdelay 1" << endl;
+            else if( _sleepsecs != 60 )
+                log(1) << "--syncdelay " << _sleepsecs << endl;
             int time_flushing = 0;
             while ( ! inShutdown() ){
                 if ( _sleepsecs == 0 ){
@@ -413,12 +493,12 @@ namespace mongo {
                 }
                 
                 Date_t start = jsTime();
-                MemoryMappedFile::flushAll( true );
+                int numFiles = MemoryMappedFile::flushAll( true );
                 time_flushing = (int) (jsTime() - start);
 
                 globalFlushCounters.flushed(time_flushing);
 
-                log(1) << "flushing mmap took " << time_flushing << "ms" << endl;
+                log(1) << "flushing mmap took " << time_flushing << "ms " << " for " << numFiles << " files" << endl;
             }
         }
         
@@ -500,9 +580,10 @@ namespace mongo {
         snapshotThread.go();
         clientCursorMonitor.go();
 
-        if( !cmdLine.replSet.empty() ) {
+        if( !cmdLine._replSet.empty() ) {
             replSet = true;
-            boost::thread t(startReplSets);
+            ReplSetCmdline *replSetCmdline = new ReplSetCmdline(cmdLine._replSet);
+            boost::thread t( boost::bind( &startReplSets, replSetCmdline) );
         }
 
         listen(listenPort);
@@ -510,14 +591,17 @@ namespace mongo {
         // listen() will return when exit code closes its socket.
         exitCleanly(EXIT_NET_ERROR);
     }
+
+    void testPretouch();
+
     void initAndListen(int listenPort, const char *appserverLoc = NULL) {
         try { _initAndListen(listenPort, appserverLoc); }
         catch ( std::exception &e ) {
-            problem() << "exception in initAndListen std::exception: " << e.what() << ", terminating" << endl;
+            log() << "exception in initAndListen std::exception: " << e.what() << ", terminating" << endl;
             dbexit( EXIT_UNCAUGHT );
         }
         catch ( int& n ){
-            problem() << "exception in initAndListen int: " << n << ", terminating" << endl;
+            log() << "exception in initAndListen int: " << n << ", terminating" << endl;
             dbexit( EXIT_UNCAUGHT );
         }
         catch(...) {
@@ -585,12 +669,7 @@ int main(int argc, char* argv[], char *envp[] )
     CmdLine::addGlobalOptions( general_options , hidden_options );
 
     general_options.add_options()
-        ("bind_ip", po::value<string>(&bind_ip),
-         "comma separated list of ip addresses to listen on - all local ips by default")
-        ("dbpath", po::value<string>()->default_value("/data/db/"), "directory for datafiles")
-#if !defined(_WIN32) && !defined(__sunos__)
-        ("lockfilepath", po::value<string>(&lockfilepath), "directory for lockfile (if not set, dbpath is used)")
-#endif
+        ("dbpath", po::value<string>() , "directory for datafiles")
         ("directoryperdb", "each database will be stored in a separate directory")
         ("repairpath", po::value<string>() , "root directory for repair files - defaults to dbpath" )
         ("cpu", "periodically show cpu and iowait utilization")
@@ -613,7 +692,7 @@ int main(int argc, char* argv[], char *envp[] )
         ("upgrade", "upgrade db if needed")
         ("repair", "run repair on all dbs")
         ("notablescan", "do not allow table scans")
-        ("syncdelay",po::value<double>(&dataFileSync._sleepsecs)->default_value(60), "seconds between disk syncs (0 for never)")
+        ("syncdelay",po::value<double>(&dataFileSync._sleepsecs)->default_value(60), "seconds between disk syncs (0=never, but not recommended)")
         ("profile",po::value<int>(), "0=off 1=slow, 2=all")
         ("slowms",po::value<int>(&cmdLine.slowMS)->default_value(100), "value of slow for profile and console log" )
         ("maxConns",po::value<int>(), "max number of simultaneous connections")
@@ -624,10 +703,13 @@ int main(int argc, char* argv[], char *envp[] )
         ;
 	#if defined(_WIN32)
     windows_scm_options.add_options()
-		("install", "install mongodb service")
+        ("install", "install mongodb service")
         ("remove", "remove mongodb service")
+        ("reinstall", "reinstall mongodb service (equivilant of mongod --remove followed by mongod --install)")
         ("service", "start mongodb service")
         ("serviceName", po::value<string>(), "windows service name")
+        ("serviceUser", po::value<string>(), "user name service executes as")
+        ("servicePassword", po::value<string>(), "password used to authenticate serviceUser")
 		;
 	#endif
 
@@ -648,10 +730,12 @@ int main(int argc, char* argv[], char *envp[] )
 	sharding_options.add_options()
 		("configsvr", "declare this is a config db of a cluster")
 		("shardsvr", "declare this is a shard db of a cluster")
+        ("noMoveParanoia" , "turn off paranoid saving of data for moveChunk.  this is on by default for now, but default will switch" )
 		;
 
     hidden_options.add_options()
-        ("replSet", po::value<string>(), "specify repl set seed hostnames")
+        ("pretouch", po::value<int>(), "n pretouch threads for applying replicationed operations")
+        ("replSet", po::value<string>(), "specify repl set seed hostnames format <set id>/<host1>,<host2>,etc...")
         ("command", po::value< vector<string> >(), "command")
         ("cacheSize", po::value<long>(), "cache size (in MB) for rec store")
         ;
@@ -666,6 +750,7 @@ int main(int argc, char* argv[], char *envp[] )
     visible_options.add(sharding_options);
     Module::addOptions( visible_options );
 
+    setupCoreSignals();
     setupSignals();
 
     dbExecCommand = argv[0];
@@ -690,6 +775,7 @@ int main(int argc, char* argv[], char *envp[] )
     {
         bool installService = false;
         bool removeService = false;
+        bool reinstallService = false;
         bool startService = false;
         po::variables_map params;
         
@@ -712,7 +798,11 @@ int main(int argc, char* argv[], char *envp[] )
             printGitVersion();
             return 0;
         }
-        dbpath = params["dbpath"].as<string>();
+        if ( params.count( "dbpath" ) )
+            dbpath = params["dbpath"].as<string>();
+        else
+            dbpath = "/data/db/";
+
         if ( params.count("directoryperdb")) {
             directoryperdb = true;
         }
@@ -789,10 +879,23 @@ int main(int argc, char* argv[], char *envp[] )
             cmdLine.notablescan = true;
         }
         if (params.count("install")) {
+            if ( ! params.count( "logpath" ) ){
+                cout << "--install has to be used with --logpath" << endl;
+                ::exit(-1);
+            }
+
             installService = true;
         }
         if (params.count("remove")) {
             removeService = true;
+        }
+        if (params.count("reinstall")) {
+            if ( ! params.count( "logpath" ) ){
+                cout << "--reinstall has to be used with --logpath" << endl;
+                ::exit(-1);
+            }
+
+            reinstallService = true;
         }
         if (params.count("service")) {
             startService = true;
@@ -816,14 +919,29 @@ int main(int argc, char* argv[], char *envp[] )
             /* specifies what the source in local.sources should be */
             cmdLine.source = params["source"].as<string>().c_str();
         }
+        if( params.count("pretouch") ) { 
+            cmdLine.pretouch = params["pretouch"].as<int>();
+        }
         if (params.count("replSet")) {
+            if (params.count("slavedelay")) {
+                cout << "--slavedelay cannot be used with --replSet" << endl;
+                ::exit(-1);
+            } else if (params.count("only")) {
+                cout << "--only cannot be used with --replSet" << endl;
+                ::exit(-1);
+            }
             /* seed list of hosts for the repl set */
-            cmdLine.replSet = params["replSet"].as<string>().c_str();
+            cmdLine._replSet = params["replSet"].as<string>().c_str();
         }
         if (params.count("only")) {
             cmdLine.only = params["only"].as<string>().c_str();
         }
         if (params.count("pairwith")) {
+            cout << "***********************************\n"
+                 << "WARNING WARNING WARNING\n"
+                 << " replica pairs are deprecated\n"
+                 << " see: http://www.mongodb.org/display/DOCS/Replica+Pairs \n" 
+                 << "***********************************" << endl;
             string paired = params["pairwith"].as<string>();
             if (params.count("arbiter")) {
                 string arbiter = params["arbiter"].as<string>();
@@ -865,8 +983,17 @@ int main(int argc, char* argv[], char *envp[] )
 			if( params.count("shardsvr") )
 				cmdLine.port = CmdLine::ShardServerPort;
 		}
-        if ( params.count("configsvr" ) && params.count( "diaglog" ) == 0 ){
-            _diaglog.level = 1;
+        else { 
+            if ( cmdLine.port <= 0 || cmdLine.port > 65535 ){
+                out() << "bad --port number" << endl;
+                dbexit( EXIT_BADOPTIONS );
+            }
+        }
+        if ( params.count("configsvr" ) ){
+            if ( params.count( "diaglog" ) == 0 )
+                _diaglog.level = 1;
+            if ( params.count( "dbpath" ) == 0 )
+                dbpath = "/data/configdb";
         }
         if ( params.count( "profile" ) ){
             cmdLine.defaultProfile = params["profile"].as<int>();
@@ -883,13 +1010,30 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("ipv6")){
             enableIPv6();
         }
-        
+        if (params.count("noMoveParanoia")){
+            cmdLine.moveParanoia = false;
+        }
 #if defined(_WIN32)
         if (params.count("serviceName")){
             string x = params["serviceName"].as<string>();
             windowsServiceName = wstring(x.size(),L' ');
-            for ( size_t i=0; i<x.size(); i++)
+            for ( size_t i=0; i<x.size(); i++) {
                 windowsServiceName[i] = x[i];
+	    }
+        }
+        if (params.count("serviceUser")){
+            string x = params["serviceUser"].as<string>();
+            windowsServiceUser = wstring(x.size(),L' ');
+            for ( size_t i=0; i<x.size(); i++) {
+                windowsServiceUser[i] = x[i];
+	    }
+        }
+        if (params.count("servicePassword")){
+            string x = params["servicePassword"].as<string>();
+            windowsServicePassword = wstring(x.size(),L' ');
+            for ( size_t i=0; i<x.size(); i++) {
+                windowsServicePassword[i] = x[i];
+	    }
         }
         #endif
 
@@ -936,8 +1080,11 @@ int main(int argc, char* argv[], char *envp[] )
         }
 
 #if defined(_WIN32)
-        if ( installService ) {
-            if ( !ServiceController::installService( windowsServiceName , L"Mongo DB", L"Mongo DB Server", argc, argv ) )
+        if ( reinstallService ) {
+            ServiceController::removeService( windowsServiceName );
+	}
+	if ( installService || reinstallService ) {
+            if ( !ServiceController::installService( windowsServiceName , L"Mongo DB", L"Mongo DB Server", windowsServiceUser, windowsServicePassword, dbpath, argc, argv ) )
                 dbexit( EXIT_NTSERVICE_ERROR );
             dbexit( EXIT_CLEAN );
         }
@@ -954,15 +1101,15 @@ int main(int argc, char* argv[], char *envp[] )
 #endif
     }
 
+    if( cmdLine.pretouch )
+        log() << "--pretouch " << cmdLine.pretouch << endl;
+
     initAndListen(cmdLine.port, appsrvPath);
     dbexit(EXIT_CLEAN);
     return 0;
 }
 
 namespace mongo {
-
-    /* we do not use log() below as it uses a mutex and that could cause deadlocks.
-    */
 
     string getDbContext();
 
@@ -1019,7 +1166,7 @@ namespace mongo {
     void interruptThread() {
         int x;
         sigwait( &asyncSignals, &x );
-        log() << "got kill or ctrl c signal " << x << " (" << strsignal( x ) << "), will terminate after current cmd ends" << endl;
+        log() << "got kill or ctrl c or hup signal " << x << " (" << strsignal( x ) << "), will terminate after current cmd ends" << endl;
         Client::initThread( "interruptThread" );
         exitCleanly( EXIT_KILL );
     }
@@ -1043,6 +1190,7 @@ namespace mongo {
         setupSIGTRAPforGDB();
 
         sigemptyset( &asyncSignals );
+        sigaddset( &asyncSignals, SIGHUP );
         sigaddset( &asyncSignals, SIGINT );
         sigaddset( &asyncSignals, SIGTERM );
         assert( pthread_sigmask( SIG_SETMASK, &asyncSignals, 0 ) == 0 );

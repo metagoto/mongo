@@ -18,7 +18,7 @@
 #include "pch.h"
 #include "mmap.h"
 #include "processinfo.h"
-#include "concurrency/locks.h"
+#include "concurrency/rwlock.h"
 
 namespace mongo {
 
@@ -94,23 +94,67 @@ namespace mongo {
     }
 
     /*static*/ int MongoFile::flushAll( bool sync ){
-        int num = 0;
-
-        rwlock lk( mmmutex , false );
-        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
-            num++;
-            MongoFile * mmf = *i;
-            if ( ! mmf )
-                continue;
-
-            mmf->flush( sync );
+        if ( ! sync ){
+            int num = 0;
+            rwlock lk( mmmutex , false );
+            for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+                num++;
+                MongoFile * mmf = *i;
+                if ( ! mmf )
+                    continue;
+                
+                mmf->flush( sync );
+            }
+            return num;
         }
-        return num;
+        
+        // want to do it sync
+        set<MongoFile*> seen;
+        while ( true ){
+            auto_ptr<Flushable> f;
+            {
+                rwlock lk( mmmutex , false );
+                for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+                    MongoFile * mmf = *i;
+                    if ( ! mmf )
+                        continue;
+                    if ( seen.count( mmf ) )
+                        continue;
+                    f.reset( mmf->prepareFlush() );
+                    seen.insert( mmf );
+                    break;
+                }
+            }
+            if ( ! f.get() )
+                break;
+            
+            f->flush();
+        }
+        return seen.size();
     }
 
     void MongoFile::created(){
         rwlock lk( mmmutex , true );
         mmfiles.insert(this);
     }
+
+#ifdef _DEBUG
+
+    void MongoFile::lockAll() {
+        rwlock lk( mmmutex , false );
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+            MongoFile * mmf = *i;
+            if (mmf) mmf->_lock();
+        }
+    }
+
+    void MongoFile::unlockAll() {
+        rwlock lk( mmmutex , false );
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
+            MongoFile * mmf = *i;
+            if (mmf) mmf->_unlock();
+        }
+    }
+#endif
 
 } // namespace mongo

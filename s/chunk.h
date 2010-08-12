@@ -30,9 +30,10 @@
 #include "shardkey.h"
 #include "shard.h"
 #include "config.h"
+#include "util.h"
 
 namespace mongo {
-
+    
     class DBConfig;
     class Chunk;
     class ChunkRange;
@@ -40,7 +41,6 @@ namespace mongo {
     class ChunkRangeMangager;
     class ChunkObjUnitTest;
 
-    typedef unsigned long long ShardChunkVersion;
     typedef shared_ptr<Chunk> ChunkPtr;
 
     // key is max for each Chunk or ChunkRange
@@ -54,10 +54,11 @@ namespace mongo {
        x is in a shard iff
        min <= x < max
      */    
-    class Chunk : public Model , boost::noncopyable, public boost::enable_shared_from_this<Chunk>  {
+    class Chunk : boost::noncopyable, public boost::enable_shared_from_this<Chunk>  {
     public:
 
         Chunk( ChunkManager * info );
+        Chunk( ChunkManager * info , const BSONObj& min, const BSONObj& max, const Shard& shard);
         
         const BSONObj& getMin() const { return _min; }
         const BSONObj& getMax() const { return _max; }
@@ -69,15 +70,16 @@ namespace mongo {
             _max = o;
         }
 
-        Shard getShard() const{
-            return _shard;
-        }
+
+        string getns() const;
+        Shard getShard() const { return _shard; }
+
         void setShard( const Shard& shard );
 
         bool contains( const BSONObj& obj ) const;
 
         string toString() const;
-        operator string() const { return toString(); }
+
         friend ostream& operator << (ostream& out, const Chunk& c){ return (out << c.toString()); }
 
         bool operator==(const Chunk& s) const;
@@ -86,16 +88,15 @@ namespace mongo {
             return ! ( *this == s );
         }
         
-        void getFilter( BSONObjBuilder& b ) const;
-        BSONObj getFilter() const{ BSONObjBuilder b; getFilter( b ); return b.obj(); }
-        
         // if min/max key is pos/neg infinity
         bool minIsInf() const;
         bool maxIsInf() const;
 
         BSONObj pickSplitPoint() const;
         ChunkPtr split();
-        ChunkPtr split( const BSONObj& middle );
+
+        void pickSplitVector( vector<BSONObj>* splitPoints ) const;
+        ChunkPtr multiSplit( const vector<BSONObj>& splitPoints );
 
         /**
          * @return size of shard in bytes
@@ -103,7 +104,7 @@ namespace mongo {
          */
         long getPhysicalSize() const;
         
-        long countObjects( const BSONObj& filter = BSONObj() ) const;
+        int countObjects(int maxcount=0) const;
         
         /**
          * if the amount of data written nears the max size of a shard
@@ -111,7 +112,6 @@ namespace mongo {
          */
         bool splitIfShould( long dataWritten );
         
-
         /*
          * moves either this shard or newShard if it makes sense too
          * @return whether or not a shard was moved
@@ -120,33 +120,34 @@ namespace mongo {
 
         bool moveAndCommit( const Shard& to , string& errmsg );
 
-        virtual const char * getNS(){ return "config.chunks"; }
-        virtual void serialize(BSONObjBuilder& to);
-        virtual void unserialize(const BSONObj& from);
-        virtual string modelServer();
+        const char * getNS(){ return "config.chunks"; }
+        void serialize(BSONObjBuilder& to, ShardChunkVersion myLastMod=0);
+        void unserialize(const BSONObj& from);
+        string modelServer() const;
         
         void appendShortVersion( const char * name , BSONObjBuilder& b );
 
-        virtual void save( bool check=false );
-        
-        void ensureIndex();
-        
         void _markModified();
         
         static int MaxChunkSize;
 
+        string genID() const;
         static string genID( const string& ns , const BSONObj& min );
 
         const ChunkManager* getManager() const { return _manager; }
         
+        bool modified();
+
+        ShardChunkVersion getVersionOnConfigServer() const;
     private:
-        
+
+        bool _splitIfShould( long dataWritten );
+
         // main shard info
         
         ChunkManager * _manager;
         ShardKeyPattern skey() const;
 
-        string _ns;
         BSONObj _min;
         BSONObj _max;
         Shard _shard;
@@ -176,9 +177,6 @@ namespace mongo {
 
         // clones of Chunk methods
         bool contains(const BSONObj& obj) const;
-        void getFilter( BSONObjBuilder& b ) const;
-        BSONObj getFilter() const{ BSONObjBuilder b; getFilter( b ); return b.obj(); }
-        long countObjects( const BSONObj& filter = BSONObj() ) const;
 
         ChunkRange(ChunkMap::const_iterator begin, const ChunkMap::const_iterator end)
             : _manager(begin->second->getManager())
@@ -253,12 +251,9 @@ namespace mongo {
         ChunkManager( DBConfig * config , string ns , ShardKeyPattern pattern , bool unique );
         virtual ~ChunkManager();
 
-        string getns() const {
-            return _ns;
-        }
+        string getns() const { return _ns; }
         
-        int numChunks(){ rwlock lk( _lock , false ); return _chunks.size(); }
-        ChunkPtr getChunk( int i ){ rwlock lk( _lock , false ); return _chunks[i]; }
+        int numChunks() const { rwlock lk( _lock , false ); return _chunkMap.size(); }
         bool hasShardKey( const BSONObj& obj );
 
         ChunkPtr findChunk( const BSONObj& obj , bool retry = false );
@@ -267,32 +262,26 @@ namespace mongo {
         ShardKeyPattern& getShardKey(){  return _key; }
         const ShardKeyPattern& getShardKey() const {  return _key; }
         bool isUnique(){ return _unique; }
+
+        void maybeChunkCollection();
         
-        /**
-         * makes sure the shard index is on all servers
-         */
-        void ensureIndex();
-
-        /**
-         * @return number of Chunk added to the vector
-         */
-        int getChunksForQuery( vector<shared_ptr<ChunkRange> >& chunks , const BSONObj& query );
-
-        /**
-         * @return number of Shards added to the set
-         */
-        int getShardsForQuery( set<Shard>& shards , const BSONObj& query );
-
+        void getShardsForQuery( set<Shard>& shards , const BSONObj& query );
         void getAllShards( set<Shard>& all );
+        void getShardsForRange(set<Shard>& shards, const BSONObj& min, const BSONObj& max); // [min, max)
 
-        void save();
+        void save( bool major );
 
         string toString() const;
-        operator string() const { return toString(); }
 
         ShardChunkVersion getVersion( const Shard& shard ) const;
         ShardChunkVersion getVersion() const;
 
+        /** 
+         * actually does a query on the server
+         * doesn't look at any local data
+         */
+        ShardChunkVersion getVersionOnConfigServer() const;
+        
         /**
          * this is just an increasing number of how many ChunkManagers we have so we know if something has been updated
          */
@@ -300,31 +289,43 @@ namespace mongo {
             return _sequenceNumber;
         }
         
+        void getInfo( BSONObjBuilder& b ){
+            b.append( "key" , _key.key() );
+            b.appendBool( "unique" , _unique );
+        }
+        
         /**
          * @param me - so i don't get deleted before i'm done
          */
         void drop( ChunkManagerPtr me );
+
+        void _printChunks() const;
         
     private:
         
         void _reload();
         void _reload_inlock();
         void _load();
+
+        void save_inlock( bool major );
+        ShardChunkVersion getVersion_inlock() const;
+        void ensureIndex_inlock();
         
         DBConfig * _config;
         string _ns;
         ShardKeyPattern _key;
         bool _unique;
         
-        vector<ChunkPtr> _chunks;
         map<string,unsigned long long> _maxMarkers;
 
         ChunkMap _chunkMap;
         ChunkRangeManager _chunkRanges;
 
+        set<Shard> _shards;
+
         unsigned long long _sequenceNumber;
         
-        RWLock _lock;
+        mutable RWLock _lock;
 
         // This should only be called from Chunk after it has been migrated
         void _migrationNotification(Chunk* c);
@@ -334,12 +335,6 @@ namespace mongo {
         static AtomicUInt NextSequenceNumber;
 
         bool _isValid() const;
-        void _printChunks() const;
-
-        /**
-         * @return number of Chunk matching the query or -1 for all chunks.
-         */
-        int _getChunksForQuery( vector<shared_ptr<ChunkRange> >& chunks , const BSONObj& query );
     };
 
     // like BSONObjCmp. for use as an STL comparison functor
@@ -365,6 +360,15 @@ namespace mongo {
         BSONObjCmp _cmp;
     };
 
-
+    /*
+    struct chunk_lock {
+        chunk_lock( const Chunk* c ){
+            
+        }
+        
+        Chunk _c;
+    };
+    */
+    inline string Chunk::genID() const { return genID(_manager->getns(), _min); }
 
 } // namespace mongo

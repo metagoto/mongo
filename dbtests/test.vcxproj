@@ -253,15 +253,23 @@
     <ClInclude Include="..\util\unittest.h" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="..\db\db.rc" />
-  </ItemGroup>
-  <ItemGroup>
     <ClCompile Include="..\client\dbclientcursor.cpp" />
+    <ClCompile Include="..\client\distlock.cpp" />
+    <ClCompile Include="..\client\gridfs.cpp" />
+    <ClCompile Include="..\client\model.cpp" />
+    <ClCompile Include="..\client\parallel.cpp" />
+    <ClCompile Include="..\db\cap.cpp" />
+    <ClCompile Include="..\db\geo\2d.cpp" />
+    <ClCompile Include="..\db\geo\haystack.cpp" />
     <ClCompile Include="..\db\repl\consensus.cpp" />
     <ClCompile Include="..\db\repl\heartbeat.cpp" />
     <ClCompile Include="..\db\repl\manager.cpp" />
     <ClCompile Include="..\db\repl\rs.cpp" />
+    <ClCompile Include="..\db\repl\rs_initialsync.cpp" />
     <ClCompile Include="..\db\repl\rs_initiate.cpp" />
+    <ClCompile Include="..\db\repl\rs_rollback.cpp" />
+    <ClCompile Include="..\db\repl\rs_sync.cpp" />
+    <ClCompile Include="..\db\restapi.cpp" />
     <ClCompile Include="..\pcre-7.4\pcrecpp.cc">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       </PrecompiledHeader>
@@ -527,7 +535,6 @@
     <ClCompile Include="..\db\dbwebserver.cpp" />
     <ClCompile Include="..\db\extsort.cpp" />
     <ClCompile Include="..\db\index.cpp" />
-    <ClCompile Include="..\db\index_geo2d.cpp" />
     <ClCompile Include="..\db\indexkey.cpp" />
     <ClCompile Include="..\db\instance.cpp" />
     <ClCompile Include="..\db\introspect.cpp" />
@@ -535,17 +542,28 @@
     <ClCompile Include="..\db\json.cpp" />
     <ClCompile Include="..\db\lasterror.cpp" />
     <ClCompile Include="..\db\matcher.cpp" />
+    <ClCompile Include="..\s\chunk.cpp" />
+    <ClCompile Include="..\s\config.cpp" />
+    <ClCompile Include="..\s\d_migrate.cpp" />
+    <ClCompile Include="..\s\d_split.cpp" />
+    <ClCompile Include="..\s\d_state.cpp" />
     <ClCompile Include="..\s\d_util.cpp" />
+    <ClCompile Include="..\s\d_writeback.cpp" />
+    <ClCompile Include="..\s\grid.cpp" />
+    <ClCompile Include="..\s\shard.cpp" />
     <ClCompile Include="..\s\shardconnection.cpp" />
+    <ClCompile Include="..\s\shardkey.cpp" />
     <ClCompile Include="..\util\concurrency\task.cpp" />
     <ClCompile Include="..\util\concurrency\thread_pool.cpp" />
     <ClCompile Include="..\util\concurrency\vars.cpp" />
+    <ClCompile Include="..\util\log.cpp" />
     <ClCompile Include="..\util\mmap_win.cpp" />
     <ClCompile Include="..\db\namespace.cpp" />
     <ClCompile Include="..\db\nonce.cpp" />
     <ClCompile Include="..\db\pdfile.cpp" />
     <ClCompile Include="..\db\query.cpp" />
     <ClCompile Include="..\db\queryoptimizer.cpp" />
+    <ClCompile Include="..\util\processinfo.cpp" />
     <ClCompile Include="..\util\ramstore.cpp" />
     <ClCompile Include="..\db\repl.cpp" />
     <ClCompile Include="..\db\security.cpp" />
@@ -583,6 +601,7 @@
     <ClCompile Include="..\util\ntservice.cpp" />
     <ClCompile Include="..\util\processinfo_win32.cpp" />
     <ClCompile Include="..\util\sock.cpp" />
+    <ClCompile Include="..\util\stringutils.cpp" />
     <ClCompile Include="..\util\text.cpp" />
     <ClCompile Include="..\util\util.cpp" />
     <ClCompile Include="..\s\d_logic.cpp" />

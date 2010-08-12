@@ -18,15 +18,34 @@
 #pragma once
 
 namespace mongo {
-
+    
     /* the administrative-ish stuff here */
     class MongoFile : boost::noncopyable { 
+        
+    public:
+        /** Flushable has to fail nicely if the underlying object gets killed */
+        class Flushable {
+        public:
+            virtual ~Flushable(){}
+            virtual void flush() = 0;
+        };
+        
     protected:
         virtual void close() = 0;
         virtual void flush(bool sync) = 0;
-
+        /**
+         * returns a thread safe object that you can call flush on
+         * Flushable has to fail nicely if the underlying object gets killed
+         */
+        virtual Flushable * prepareFlush() = 0;
+        
         void created(); /* subclass must call after create */
         void destroyed(); /* subclass must call in destructor */
+
+        // only supporting on posix mmap
+        virtual void _lock() {}
+        virtual void _unlock() {}
+
     public:
         virtual ~MongoFile() {}
         virtual long length() = 0;
@@ -39,9 +58,29 @@ namespace mongo {
         static long long totalMappedLength();
         static void closeAllFiles( stringstream &message );
 
+        // Locking allows writes. Reads are always allowed
+        static void lockAll();
+        static void unlockAll();
+
         /* can be "overriden" if necessary */
         static bool exists(boost::filesystem::path p) {
             return boost::filesystem::exists(p);
+        }
+    };
+
+#ifndef _DEBUG
+    // no-ops in production
+    inline void MongoFile::lockAll() {}
+    inline void MongoFile::unlockAll() {}
+
+#endif
+
+    struct MongoFileAllowWrites {
+        MongoFileAllowWrites(){
+            MongoFile::lockAll();
+        }
+        ~MongoFileAllowWrites(){
+            MongoFile::unlockAll();
         }
     };
 
@@ -120,6 +159,7 @@ namespace mongo {
         void* map(const char *filename, long &length, int options = 0 );
 
         void flush(bool sync);
+        virtual Flushable * prepareFlush();
 
         /*void* viewOfs() {
             return view;
@@ -137,6 +177,12 @@ namespace mongo {
         void *view;
         long len;
         string _filename;
+
+    protected:
+        // only posix mmap implementations will support this
+        virtual void _lock();
+        virtual void _unlock();
+
     };
 
     void printMemInfo( const char * where );    

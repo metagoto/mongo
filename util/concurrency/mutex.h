@@ -20,11 +20,13 @@
 #include <map>
 #include <set>
 
+#include "../heapcheck.h"
+
 namespace mongo { 
 
     extern bool __destroyingStatics;
-
     class mutex;
+
     // only used on _DEBUG builds:
     class MutexDebugger { 
         typedef const char * mid; // mid = mutex ID
@@ -42,7 +44,8 @@ namespace mongo {
         //     b.lock(); alone is fine too
         //   only checked on _DEBUG builds.
         string a,b;
-
+        
+        void aBreakPoint(){}
         void programEnding();
         MutexDebugger();
         void entering(mid m) {
@@ -54,6 +57,7 @@ namespace mongo {
             Preceeding &preceeding = *_preceeding;
 
             if( a == m ) { 
+                aBreakPoint();
                 if( preceeding[b.c_str()] ) {
                     cout << "mutex problem " << b << " was locked before " << a << endl;
                     assert(false);
@@ -113,7 +117,7 @@ namespace mongo {
             }
         }
     };
-    extern MutexDebugger mutexDebugger;
+    extern MutexDebugger &mutexDebugger;
     
     // If you create a local static instance of this class, that instance will be destroyed
     // before all global static objects are destroyed, so __destroyingStatics will be set
@@ -140,9 +144,11 @@ namespace mongo {
 #endif
         { 
             _m = new boost::mutex(); 
+            IGNORE_OBJECT( _m  );   // Turn-off heap checking on _m
         }
         ~mutex() {
             if( !__destroyingStatics ) {
+                UNIGNORE_OBJECT( _m );
                 delete _m;
             }
         }

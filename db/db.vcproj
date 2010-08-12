@@ -1446,7 +1446,7 @@
 				>
 			</File>
 			<File
-				RelativePath="..\util\locks.h"
+				RelativePath="..\util\rwlock.h"
 				>
 			</File>
 			<File
@@ -1820,6 +1820,10 @@
 			</File>
 			<File
 				RelativePath=".\repl\rs_config.cpp"
+				>
+			</File>
+			<File
+				RelativePath=".\repl\rs_sync.cpp"
 				>
 			</File>
 			<File

@@ -18,7 +18,7 @@
 #include "../pch.h"
 #include <fcntl.h>
 #include <errno.h>
-#if defined(__freebsd__)
+#if defined(__freebsd__) || defined(__openbsd__)
 #include <sys/stat.h>
 #endif
 
@@ -123,7 +123,11 @@ namespace mongo {
             
             off_t filelen = lseek(fd, 0, SEEK_END);
             if ( filelen < size ) {
-                massert( 10440 ,  "failure creating new datafile", filelen == 0 );
+                if (filelen != 0) {
+                    stringstream ss;
+                    ss << "failure creating new datafile; lseek failed for fd " << fd << " with errno: " << errnoWithDescription();
+                    massert( 10440 ,  ss.str(), filelen == 0 );
+                }
                 // Check for end of disk.
                 massert( 10441 ,  "Unable to allocate file of desired size",
                          size - 1 == lseek(fd, size - 1, SEEK_SET) );
@@ -131,8 +135,9 @@ namespace mongo {
                          1 == write(fd, "", 1) );
                 lseek(fd, 0, SEEK_SET);
                 
-                long z = 256 * 1024;
-                char buf[z];
+                const long z = 256 * 1024;
+                const boost::scoped_array<char> buf_holder (new char[z]);
+                char* buf = buf_holder.get();
                 memset(buf, 0, z);
                 long left = size;
                 while ( left > 0 ) {

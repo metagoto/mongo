@@ -201,7 +201,7 @@ namespace BasicTests {
             t.reset();
             sleepmillis( 1727 );
             ASSERT( t.millis() >= 1000 );
-            ASSERT( t.millis() <= 2000 );
+            ASSERT( t.millis() <= 2500 );
             
             {
                 int total = 1200;
@@ -234,7 +234,7 @@ namespace BasicTests {
                     if ( y < 1000 || y > 2500 ){
                         cout << "sleeptest y: " << y << endl;
                         ASSERT( y >= 1000 );
-                        ASSERT( y <= 100000 );
+                        /* ASSERT( y <= 100000 ); */
                     }
                 }
             }
@@ -309,7 +309,7 @@ namespace BasicTests {
                 {
                     ThreadSafeString bar;
                     bar = "eliot2";
-                    foo = bar;
+                    foo = bar.toString();
                 }
                 ASSERT_EQUALS( "eliot2" , foo );
             }
@@ -364,6 +364,10 @@ namespace BasicTests {
             ASSERT( Database::validDBName( "foo" ) );
             ASSERT( ! Database::validDBName( "foo/bar" ) );
             ASSERT( ! Database::validDBName( "foo.bar" ) );
+
+            ASSERT( nsDollarCheck( "asdads" ) );
+            ASSERT( ! nsDollarCheck( "asda$ds" ) );
+            ASSERT( nsDollarCheck( "local.oplog.$main" ) );
         }
     };
     

@@ -139,6 +139,10 @@ namespace mongo {
             return old + "." + local;
         }
 
+        string toString() const {
+            return (string)buf;
+        }
+
         operator string() const {
             return (string)buf;
         }
@@ -235,24 +239,46 @@ namespace mongo {
 
         /* NOTE: capped collections override the meaning of deleted list.  
                  deletedList[0] points to a list of free records (DeletedRecord's) for all extents in
-                 the namespace.
+                 the capped namespace.
                  deletedList[1] points to the last record in the prev extent.  When the "current extent" 
                  changes, this value is updated.  !deletedList[1].isValid() when this value is not 
                  yet computed.
         */
         DiskLoc deletedList[Buckets];
 
+        void dumpExtents();
+
         long long datasize;
         long long nrecords;
         int lastExtentSize;
         int nIndexes;
+
     private:
         IndexDetails _indexes[NIndexesBase];
+
+    private:
+        Extent *theCapExtent() const { return capExtent.ext(); }
+        void advanceCapExtent( const char *ns );
+        DiskLoc __capAlloc(int len);
+        DiskLoc cappedAlloc(const char *ns, int len);
+        DiskLoc &cappedFirstDeletedInCurExtent();
+        bool nextIsInCapExtent( const DiskLoc &dl ) const;
     public:
+        DiskLoc& cappedListOfAllDeletedRecords() { return deletedList[0]; }
+        DiskLoc& cappedLastDelRecLastExtent()    { return deletedList[1]; }
+        void cappedDumpDelInfo();
+        bool capLooped() const { return capped && capFirstNewRecord.isValid();  }
+        bool inCapExtent( const DiskLoc &dl ) const;
+        void cappedCheckMigrate();
+        void cappedTruncateAfter(const char *ns, DiskLoc after, bool inclusive); /** remove rest of the capped collection from this point onward */
+        void emptyCappedCollection(const char *ns);
+        
         int capped;
-        int max; // max # of objects for a capped table.
+
+        int max; // max # of objects for a capped table.  TODO: should this be 64 bit? 
         double paddingFactor; // 1.0 = no padding.
         int flags;
+
         DiskLoc capExtent;
         DiskLoc capFirstNewRecord;
 
@@ -279,19 +305,26 @@ namespace mongo {
                  this isn't thread safe.  TODO
         */
         enum NamespaceFlags {
-            Flag_HaveIdIndex = 1 << 0, // set when we have _id index (ONLY if ensureIdIndex was called -- 0 if that has never been called)
-            Flag_CappedDisallowDelete = 1 << 1 // set when deletes not allowed during capped table allocation.
+            Flag_HaveIdIndex = 1 << 0 // set when we have _id index (ONLY if ensureIdIndex was called -- 0 if that has never been called)
         };
 
-        IndexDetails& idx(int idxNo) {
+        IndexDetails& idx(int idxNo, bool missingExpected = false ) {
             if( idxNo < NIndexesBase ) 
                 return _indexes[idxNo];
             Extra *e = extra();
-            massert(13282, "missing Extra", e);
+            if ( ! e ){
+                if ( missingExpected )
+                    throw MsgAssertionException( 13283 , "Missing Extra" );
+                massert(13282, "missing Extra", e);
+            }
             int i = idxNo - NIndexesBase;
             if( i >= NIndexesExtra ) {
                 e = e->next(this);
-                massert(13283, "missing Extra", e);
+                if ( ! e ){
+                    if ( missingExpected )
+                        throw MsgAssertionException( 13283 , "missing extra" );
+                    massert(13283, "missing Extra", e);
+                }
                 i -= NIndexesExtra;
             }
             return e->details[i];
@@ -354,8 +387,6 @@ namespace mongo {
 
         void aboutToDeleteAnIndex() { flags &= ~Flag_HaveIdIndex;  }
 
-        void cappedDisallowDelete() { flags |= Flag_CappedDisallowDelete; }
-        
         /* returns index of the first index in which the field is present. -1 if not present. */
         int fieldIsIndexed(const char *fieldName);
 
@@ -389,6 +420,14 @@ namespace mongo {
             }
             return -1;
         }
+        
+        void findIndexByType( const string& name , vector<int>& matches ) {
+            IndexIterator i = ii();
+            while ( i.more() ){
+                if ( i.next().getSpec().getTypeName() == name )
+                    matches.push_back( i.pos() - 1 );
+            }
+        }
 
         /* @return -1 = not found 
            generally id is first index, so not that expensive an operation (assuming present).
@@ -417,7 +456,6 @@ namespace mongo {
         void addDeletedRec(DeletedRecord *d, DiskLoc dloc);
 
         void dumpDeleted(set<DiskLoc> *extents = 0);
-        bool capLooped() const { return capped && capFirstNewRecord.isValid();  }
 
         // Start from firstExtent by default.
         DiskLoc firstRecord( const DiskLoc &startExtent = DiskLoc() ) const;
@@ -425,21 +463,13 @@ namespace mongo {
         // Start from lastExtent by default.
         DiskLoc lastRecord( const DiskLoc &startExtent = DiskLoc() ) const;
 
-        bool inCapExtent( const DiskLoc &dl ) const;
-        void checkMigrate();
         long long storageSize( int * numExtents = 0 );
-
+        
     private:
-        bool cappedMayDelete() const { return !( flags & Flag_CappedDisallowDelete ); }
-        Extent *theCapExtent() const { return capExtent.ext(); }
-        void advanceCapExtent( const char *ns );
+        DiskLoc _alloc(const char *ns, int len);
         void maybeComplain( const char *ns, int len ) const;
         DiskLoc __stdAlloc(int len);
-        DiskLoc __capAlloc(int len);
-        DiskLoc _alloc(const char *ns, int len);
         void compact(); // combine adjacent deleted records
-        DiskLoc &firstDeletedInCapExtent();
-        bool nextIsInCapExtent( const DiskLoc &dl ) const;
     }; // NamespaceDetails
 #pragma pack()
 
@@ -464,7 +494,7 @@ namespace mongo {
         void reset();
         static std::map< string, shared_ptr< NamespaceDetailsTransient > > _map;
     public:
-        NamespaceDetailsTransient(const char *ns) : _ns(ns), _keysComputed(false), _qcWriteCount(), _cll_enabled() { }
+        NamespaceDetailsTransient(const char *ns) : _ns(ns), _keysComputed(false), _qcWriteCount(){ }
         /* _get() is not threadsafe -- see get_inlock() comments */
         static NamespaceDetailsTransient& _get(const char *ns);
         /* use get_w() when doing write operations */
@@ -544,19 +574,6 @@ namespace mongo {
             _qcCache[ pattern ] = make_pair( indexKey, nScanned );
         }
 
-        /* for collection-level logging -- see CmdLogCollection ----------------- */ 
-        /* assumed to be in write lock for this */
-    private:
-        string _cll_ns; // "local.temp.oplog." + _ns;
-        bool _cll_enabled;
-        void cllDrop(); // drop _cll_ns
-    public:
-        string cllNS() const { return _cll_ns; }
-        bool cllEnabled() const { return _cll_enabled; }
-        void cllStart( int logSizeMb = 256 ); // begin collection level logging
-        void cllInvalidate();
-        bool cllValidateComplete();
-
     }; /* NamespaceDetailsTransient */
 
     inline NamespaceDetailsTransient& NamespaceDetailsTransient::_get(const char *ns) {
@@ -603,8 +620,8 @@ namespace mongo {
                 return 0;
             Namespace n(ns);
             NamespaceDetails *d = ht->get(n);
-            if ( d )
-                d->checkMigrate();
+            if ( d && d->capped )
+                d->cappedCheckMigrate();
             return d;
         }
 
@@ -640,8 +657,9 @@ namespace mongo {
 
         NamespaceDetails::Extra* newExtra(const char *ns, int n, NamespaceDetails *d);
 
-    private:
         boost::filesystem::path path() const;
+    private:
+
         void maybeMkdir() const;
         
         MMF f;
@@ -652,7 +670,6 @@ namespace mongo {
 
     extern string dbpath; // --dbpath parm
     extern bool directoryperdb;
-    extern string lockfilepath; // --lockfilepath param
 
     // Rename a namespace within current 'client' db.
     // (Arguments should include db name)

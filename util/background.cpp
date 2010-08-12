@@ -41,8 +41,11 @@ namespace mongo {
         try {
             us->run();
         }
+        catch ( std::exception& e ){
+            log( LL_ERROR ) << "backgroundjob error: " << e.what() << endl;
+        }
         catch(...) {
-            log() << "uncaught exception in BackgroundJob" << endl;
+            log( LL_ERROR ) << "uncaught exception in BackgroundJob" << endl;
         }
         us->state = Done;
         bool delSelf = us->deleteSelf;
@@ -91,6 +94,25 @@ namespace mongo {
                 if( (*i)->state != Done )
                     goto x;
             }
+        }
+    }
+    
+    void PeriodicBackgroundJob::run(){
+        // want to handle first one differently so inShutdown is obeyed nicely
+        sleepmillis( _millis );
+        
+        while ( ! inShutdown() ){
+            try {
+                runLoop();
+            }
+            catch ( std::exception& e ){
+                log( LL_ERROR ) << "PeriodicBackgroundJob [" << name() << "] error: " << e.what() << endl;
+            }
+            catch ( ... ){
+                log( LL_ERROR ) << "PeriodicBackgroundJob [" << name() << "] unknown error" << endl;
+            }
+            
+            sleepmillis( _millis );
         }
     }
 

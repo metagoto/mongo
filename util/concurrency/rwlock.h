@@ -1,4 +1,4 @@
-// locks.h
+// rwlock.h
 
 /*
  *    Copyright (C) 2010 10gen Inc.
@@ -80,7 +80,7 @@ namespace mongo {
             return false;
         }
 
-        bool lock_try( int millis ){
+        bool lock_try( int millis = 0 ){
             boost::system_time until = get_system_time();
             until += boost::posix_time::milliseconds(millis);
             if( _m.timed_lock( until ) ) { 
@@ -146,7 +146,7 @@ namespace mongo {
             return _try( millis , false );
         }
 
-        bool lock_try( int millis ){
+        bool lock_try( int millis = 0 ){
             if( _try( millis , true ) ) { 
 #if defined(_DEBUG)
                 mutexDebugger.entering(_name);
@@ -184,6 +184,17 @@ namespace mongo {
 
 #endif
 
+    class rwlock_try_write {
+        RWLock& _l;
+    public:
+        struct exception { };
+        rwlock_try_write(RWLock& l, int millis = 0) : _l(l) {
+            if( !l.lock_try(millis) ) throw exception();
+        }
+        ~rwlock_try_write() { _l.unlock(); }
+    };
+
+    /* scoped lock */
     struct rwlock {
         rwlock( const RWLock& lock , bool write , bool alreadyHaveLock = false )
             : _lock( (RWLock&)lock ) , _write( write ){

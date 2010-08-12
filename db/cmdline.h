@@ -25,9 +25,18 @@ namespace mongo {
     /* concurrency: OK/READ */
     struct CmdLine { 
         int port;              // --port
+        string bind_ip;        // --bind_ip
         bool rest;             // --rest
 
-        string replSet;        // --replSet <seedlist>
+        string _replSet;       // --replSet[/<seedlist>]
+        string ourSetName() const { 
+            string setname;
+            size_t sl = _replSet.find('/');
+            if( sl == string::npos )
+                return _replSet;
+            return _replSet.substr(0, sl);
+        }
+
         string source;         // --source
         string only;           // --only
         
@@ -44,6 +53,9 @@ namespace mongo {
         int defaultProfile;    // --profile
         int slowMS;            // --time in ms that is "slow"
 
+        int pretouch;          // --pretouch for replication application (experimental)
+        bool moveParanoia;     // for move chunk paranoia 
+
         enum { 
             DefaultDBPort = 27017,
 			ConfigServerPort = 27019,
@@ -52,7 +64,7 @@ namespace mongo {
 
         CmdLine() : 
             port(DefaultDBPort), rest(false), quiet(false), notablescan(false), prealloc(true), smallfiles(false),
-            quota(false), quotaFiles(8), cpu(false), oplogSize(0), defaultProfile(0), slowMS(100)
+            quota(false), quotaFiles(8), cpu(false), oplogSize(0), defaultProfile(0), slowMS(100), pretouch(0), moveParanoia( true )
         { } 
         
 

@@ -272,7 +272,8 @@ DB.prototype.help = function() {
     print("\tdb.getPrevError()");
     print("\tdb.getProfilingLevel()");
     print("\tdb.getReplicationInfo()");
-    print("\tdb.getSisterDB(name) get the db at the same server as this onew");
+    print("\tdb.getSisterDB(name) get the db at the same server as this one");
+    print("\tdb.isMaster() check replica primary status");
     print("\tdb.killOp(opid) kills the current operation in the db");
     print("\tdb.listCommands() lists all the db commands");
     print("\tdb.printCollectionStats()");
@@ -477,6 +478,12 @@ DB.prototype.forceError = function(){
 }
 
 DB.prototype.getLastError = function( w , wtimeout ){
+    var res = this.getLastErrorObj( w , wtimeout );
+    if ( ! res.ok )
+        throw "getlasterror failed: " + tojson( res );
+    return res.err;
+}
+DB.prototype.getLastErrorObj = function( w , wtimeout ){
     var cmd = { getlasterror : 1 };
     if ( w ){
         cmd.w = w;
@@ -484,12 +491,7 @@ DB.prototype.getLastError = function( w , wtimeout ){
             cmd.wtimeout = wtimeout;
     }
     var res = this.runCommand( cmd );
-    if ( ! res.ok )
-        throw "getlasterror failed: " + tojson( res );
-    return res.err;
-}
-DB.prototype.getLastErrorObj = function(){
-    var res = this.runCommand( { getlasterror : 1 } );
+
     if ( ! res.ok )
         throw "getlasterror failed: " + tojson( res );
     return res;
@@ -533,6 +535,8 @@ DB.prototype.tojson = function(){
 DB.prototype.toString = function(){
     return this._name;
 }
+
+DB.prototype.isMaster = function () { return this.runCommand("isMaster"); }
 
 DB.prototype.currentOp = function(){
     return db.$cmd.sys.inprog.findOne();
@@ -669,23 +673,36 @@ DB.prototype.listCommands = function(){
     for ( var name in x.commands ){
         var c = x.commands[name];
 
-        var s = name + " lock: ";
+        var s = name + ": ";
         
         switch ( c.lockType ){
-        case -1: s += "read"; break;
-        case 0: s += "node"; break;
-        case 1: s += "write"; break;
+        case -1: s += "read-lock"; break;
+        case  0: s += "no-lock"; break;
+        case  1: s += "write-lock"; break;
         default: s += c.lockType;
         }
         
-        s += " adminOnly: " + c.adminOnly;
-        s += " slaveOk: " + c.slaveOk;
-        s += " " + c.help;
+        if (c.adminOnly) s += " adminOnly ";
+        if (c.adminOnly) s += " slaveOk ";
+
+        s += "\n  ";
+        s += c.help.replace(/\n/g, '\n  ');
+        s += "\n";
         
-        print( s )
+        print( s );
     }
 }
 
 DB.prototype.printShardingStatus = function(){
     printShardingStatus( this.getSisterDB( "config" ) );
+}
+
+DB.autocomplete = function(obj){
+    var colls = obj.getCollectionNames();
+    var ret=[];
+    for (var i=0; i<colls.length; i++){
+        if (colls[i].match(/^[a-zA-Z0-9_.\$]+$/))
+            ret.push(colls[i]);
+    }
+    return ret;
 }

@@ -59,7 +59,7 @@ namespace mongo {
 
         // --- from DBClientInterface
 
-        virtual BSONObj findOne(const string &ns, Query query, const BSONObj *fieldsToReturn, int queryOptions);
+        virtual BSONObj findOne(const string &ns, const Query& query, const BSONObj *fieldsToReturn, int queryOptions);
 
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn, int nToSkip,
                                                const BSONObj *fieldsToReturn, int queryOptions, int batchSize );
@@ -83,7 +83,14 @@ namespace mongo {
         virtual string getServerAddress() const { return _address; }
         virtual bool isFailed() const { return false; }
         virtual string toString() { return _toString(); }
-        
+
+		virtual BSONObj getLastErrorDetailed();
+
+        virtual bool callRead( Message& toSend , Message& response );
+
+        virtual ConnectionString::ConnectionType type() const { return ConnectionString::SYNC; }  
+
+        virtual bool isMember( const DBConnector * conn ) const;
 
     private:
         SyncClusterConnection( SyncClusterConnection& prev );
@@ -96,12 +103,38 @@ namespace mongo {
         void _connect( string host );
 
         string _address;
+        vector<string> _connAddresses;
         vector<DBClientConnection*> _conns;
         map<string,int> _lockTypes;
         mongo::mutex _mutex;
+        
+        vector<BSONObj> _lastErrors;
     };
     
+    class UpdateNotTheSame : public UserException {
+    public:
+        UpdateNotTheSame( int code , const string& msg , const vector<string>& addrs , const vector<BSONObj>& lastErrors )
+            : UserException( code , msg ) , _addrs( addrs ) , _lastErrors( lastErrors ){
+            assert( _addrs.size() == _lastErrors.size() );
+        }
+        
+        virtual ~UpdateNotTheSame() throw() {
+        }
 
+        unsigned size() const {
+            return _addrs.size();
+        }
+
+        pair<string,BSONObj> operator[](unsigned i) const {
+            return make_pair( _addrs[i] , _lastErrors[i] );
+        }
+
+    private:
+
+        vector<string> _addrs;
+        vector<BSONObj> _lastErrors;
+    };
+    
 };
 
 #include "undef_macros.h"

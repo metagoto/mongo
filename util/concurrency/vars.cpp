@@ -23,7 +23,9 @@
 namespace mongo { 
 
     mutex _atomicMutex("_atomicMutex");
-    MutexDebugger mutexDebugger;
+
+    // intentional leak. otherwise destructor orders can be problematic at termination.
+    MutexDebugger &mutexDebugger = *(new MutexDebugger());
 
     MutexDebugger::MutexDebugger() : 
       x( *(new boost::mutex()) ), magic(0x12345678) {
@@ -35,7 +37,7 @@ namespace mongo {
     }
 
     void MutexDebugger::programEnding() { 
-        if( followers.size() ) {
+        if( logLevel>=1 && followers.size() ) {
             std::cout << followers.size() << " mutexes in program" << endl;
             for( map< mid, set<mid> >::iterator i = followers.begin(); i != followers.end(); i++ ) { 
                 cout << i->first;

@@ -27,9 +27,25 @@
 
 namespace mongo {
 
-    using boost::shared_ptr;
-
-    // Utility interface for stringifying object only when val() called.
+    enum LogLevel {  LL_DEBUG , LL_INFO , LL_NOTICE , LL_WARNING , LL_ERROR , LL_SEVERE };
+    
+    inline const char * logLevelToString( LogLevel l ){
+        switch ( l ){
+        case LL_DEBUG:
+        case LL_INFO: 
+        case LL_NOTICE:
+            return "";
+        case LL_WARNING: 
+            return "warning" ; 
+        case LL_ERROR: 
+            return "ERROR";
+        case LL_SEVERE: 
+            return "SEVERE";
+        default:
+            return "UNKNOWN";
+        }
+    }
+    
     class LazyString {
     public:
         virtual ~LazyString() {}
@@ -41,7 +57,7 @@ namespace mongo {
     class LazyStringImpl : public LazyString {
     public:
         LazyStringImpl( const T &t ) : t_( t ) {}
-        virtual string val() const { return (string)t_; }
+        virtual string val() const { return t_.toString(); }
     private:
         const T& t_;
     };
@@ -49,7 +65,7 @@ namespace mongo {
     class Tee { 
     public:
         virtual ~Tee(){}
-        virtual void write(const string& str) = 0;
+        virtual void write(LogLevel level , const string& str) = 0;
     };
 
     class Nullstream {
@@ -59,6 +75,9 @@ namespace mongo {
         }
         virtual ~Nullstream() {}
         virtual Nullstream& operator<<(const char *) {
+            return *this;
+        }
+        virtual Nullstream& operator<<(const string& ) {
             return *this;
         }
         virtual Nullstream& operator<<(char *) {
@@ -133,32 +152,33 @@ namespace mongo {
         static mongo::mutex mutex;
         static int doneSetup;
         stringstream ss;
+        LogLevel logLevel;
+        static FILE* logfile;
+        static boost::scoped_ptr<ostream> stream;
+        static vector<Tee*> * globalTees;
     public:
+
+        inline static void logLockless( const StringData& s );
+        
+        static void setLogFile(FILE* f){
+            scoped_lock lk(mutex);
+            logfile = f;
+        }
+
         static int magicNumber(){
             return 1717;
         }
-        void flush(Tee *t = 0) {
-            // this ensures things are sane
-            if ( doneSetup == 1717 ) {
-                BufBuilder b(512);
-                time_t_to_String( time(0) , b.grow(20) );
-                b.append( ss.str() );
-                const char *s = b.buf();
 
-                scoped_lock lk(mutex);
-
-                if( t ) t->write(s);
-#ifndef _WIN32
-                //syslog( LOG_INFO , "%s" , cc );
-#endif
-                cout << s;
-                cout.flush();
-            }
-            _init();
+        inline void flush(Tee *t = 0);
+        
+        inline Nullstream& setLogLevel(LogLevel l){
+            logLevel = l;
+            return *this;
         }
 
         /** note these are virtual */
         Logstream& operator<<(const char *x) { ss << x; return *this; }
+        Logstream& operator<<(const string& x) { ss << x; return *this; }
         Logstream& operator<<(char *x)       { ss << x; return *this; }
         Logstream& operator<<(char x)        { ss << x; return *this; }
         Logstream& operator<<(int x)         { ss << x; return *this; }
@@ -205,6 +225,12 @@ namespace mongo {
         Logstream& prolog() {
             return *this;
         }
+        
+        void addGlobalTee( Tee * t ){
+            if ( ! globalTees )
+                globalTees = new vector<Tee*>();
+            globalTees->push_back( t );
+        }
 
     private:
         static thread_specific_ptr<Logstream> tsp;
@@ -213,6 +239,7 @@ namespace mongo {
         }
         void _init(){
             ss.str("");
+            logLevel = LL_INFO;
         }
     public:
         static Logstream& get() {
@@ -260,6 +287,11 @@ namespace mongo {
         return Logstream::get().prolog();
     }
 
+    inline Nullstream& log( LogLevel l ) {
+        return Logstream::get().prolog().setLogLevel( l );
+    }
+
+
     inline Nullstream& log() {
         return Logstream::get().prolog();
     }
@@ -287,15 +319,115 @@ namespace mongo {
     void initLogging( const string& logpath , bool append );
     void rotateLogs( int signal = 0 );
 
+    std::string toUtf8String(const std::wstring& wide);
+
     inline string errnoWithDescription(int x = errno) {
         stringstream s;
-        s << "errno:" << x << ' ' << strerror(x);
+        s << "errno:" << x << ' ';
+
+#if defined(_WIN32)
+        LPTSTR errorText = NULL;
+        FormatMessage(
+            FORMAT_MESSAGE_FROM_SYSTEM
+            |FORMAT_MESSAGE_ALLOCATE_BUFFER
+            |FORMAT_MESSAGE_IGNORE_INSERTS,  
+            NULL,
+            x, 0,
+            (LPTSTR) &errorText,  // output
+            0, // minimum size for output buffer
+            NULL);
+        if( errorText ) {
+            string x = toUtf8String(errorText);
+            for( string::iterator i = x.begin(); i != x.end(); i++ ) {
+                if( *i == '\n' || *i == '\r' ) 
+                    break;
+                s << *i;
+            }
+            LocalFree(errorText);
+        }
+        else
+            s << strerror(x);
+        /*
+        DWORD n = FormatMessage( 
+            FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+            FORMAT_MESSAGE_FROM_SYSTEM | 
+            FORMAT_MESSAGE_IGNORE_INSERTS,
+            NULL, x, 
+            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+            (LPTSTR) &lpMsgBuf, 0, NULL);
+        */
+#else
+        s << strerror(x);
+#endif
         return s.str();
     }
 
     /** output the error # and error message with prefix.  
         handy for use as parm in uassert/massert.
         */
-    string errnoWithPrefix( const char * prefix = 0 );
+    string errnoWithPrefix( const char * prefix );
+
+    void Logstream::logLockless( const StringData& s ){
+        if ( doneSetup == 1717 ){
+            if(fwrite(s.data(), s.size(), 1, logfile)){
+                fflush(logfile);
+            }else{
+                int x = errno;
+                cout << "Failed to write to logfile: " << errnoWithDescription(x) << ": " << out << endl;
+            }
+        }
+        else {
+            cout << s.data() << endl;
+        }
+    }
+
+    void Logstream::flush(Tee *t) {
+        // this ensures things are sane
+        if ( doneSetup == 1717 ) {
+            string msg = ss.str();
+            string threadName = getThreadName();
+            const char * type = logLevelToString(logLevel);
+
+            int spaceNeeded = msg.size() + 64 + threadName.size();
+            int bufSize = 128;
+            while ( bufSize < spaceNeeded )
+                bufSize += 128;
+
+            BufBuilder b(bufSize);
+            time_t_to_String( time(0) , b.grow(20) );
+            if (!threadName.empty()){
+                b.appendChar( '[' );
+                b.appendStr( threadName , false );
+                b.appendChar( ']' );
+                b.appendChar( ' ' );
+            }
+            if ( type[0] ){
+                b.appendStr( type , false );
+                b.appendStr( ": " , false );
+            }
+            b.appendStr( msg );
+
+            string out( b.buf() , b.len() - 1);
+
+            scoped_lock lk(mutex);
+
+            if( t ) t->write(logLevel,out);
+            if ( globalTees ){
+                for ( unsigned i=0; i<globalTees->size(); i++ )
+                    (*globalTees)[i]->write(logLevel,out);
+            }
+
+#ifndef _WIN32
+            //syslog( LOG_INFO , "%s" , cc );
+#endif
+            if(fwrite(out.data(), out.size(), 1, logfile)){
+                fflush(logfile);
+            }else{
+                int x = errno;
+                cout << "Failed to write to logfile: " << errnoWithDescription(x) << ": " << out << endl;
+            }
+        }
+        _init();
+    }
 
 } // namespace mongo

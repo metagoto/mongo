@@ -50,7 +50,9 @@ namespace {
 #define DEBUGMATCHER(x)
 
 namespace mongo {
-    
+
+    extern BSONObj staticNull;
+        
     class Where {
     public:
         Where() {
@@ -739,7 +741,7 @@ namespace mongo {
                 return false;
             if ( cmp == 0 ) {
                 /* missing is ok iff we were looking for null */
-                if ( m.type() == jstNULL || m.type() == Undefined ) {
+                if ( m.type() == jstNULL || m.type() == Undefined || ( bm.compareOp == BSONObj::opIN && bm.myset->count( staticNull.firstElement() ) > 0 ) ) {
                     if ( ( bm.compareOp == BSONObj::NE ) ^ bm.isNot ) {
                         return false;
                     }
@@ -797,6 +799,13 @@ namespace mongo {
                 }
             }            
         }
+        
+        for( vector< shared_ptr< FieldRangeVector > >::const_iterator i = _orConstraints.begin();
+            i != _orConstraints.end(); ++i ) {
+            if ( (*i)->matches( jsobj ) ) {
+                return false;
+            }
+        }
                 
         if ( where ) {
             if ( where->func == 0 ) {
@@ -845,6 +854,9 @@ namespace mongo {
             return false;
         }
         if ( _orMatchers.size() != other._orMatchers.size() ) {
+            return false;
+        }
+        if ( _orConstraints.size() != other._orConstraints.size() ) {
             return false;
         }
         {

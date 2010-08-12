@@ -2,8 +2,10 @@
 .dbshell
 .sconsign.dblite
 .sconf_temp
+perf.data
 
 *~
+*.swp
 *.o
 *.os
 *.obj
@@ -55,6 +57,7 @@ log
 logs
 docs/html
 docs/latex
+docs/doxygen
 32bit
 scratch
 
@@ -74,6 +77,7 @@ mongoimport
 mongosniff
 mongobridge
 mongostat
+bsondump
 
 *.tgz
 *.zip

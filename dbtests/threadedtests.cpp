@@ -129,6 +129,20 @@ namespace ThreadedTests {
         }
     };
 
+    class LockTest {
+    public:
+        void run(){
+            // quick atomicint wrap test
+            // MSGID likely assumes this semantic
+            AtomicUInt counter = 0xffffffff;
+            counter++;
+            ASSERT( counter == 0 );
+
+            writelocktry lk( "" , 0 );
+            ASSERT( lk.got() );
+        }
+    };
+
     class All : public Suite {
     public:
         All() : Suite( "threading" ){
@@ -138,6 +152,7 @@ namespace ThreadedTests {
             add< IsAtomicUIntAtomic >();
             add< MVarTest >();
             add< ThreadPoolTest >();
+            add< LockTest >();
         }
     } myall;
 }

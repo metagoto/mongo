@@ -141,7 +141,8 @@ class EC2InstanceConfigurator(BaseConfigurator):
                                  (("fedora", "8", "x86"), "ami-5647a33f"))),
                                ("rackspace_imgname",
                                 ((("fedora", "11", "x86_64"), "Fedora 11"),
-                                 (("fedora", "12", "x86_64"), "Fedora 12"))),
+                                 (("fedora", "12", "x86_64"), "Fedora 12"),
+                                 (("fedora", "13", "x86_64"), "Fedora 13"))),
                                ("ec2_mtype",
                                 ((("*", "*", "x86"), "m1.small"),
                                  (("*", "*", "x86_64"), "m1.large"))),
@@ -150,9 +151,23 @@ class EC2InstanceConfigurator(BaseConfigurator):
 class nodeWrapper(object):
     def __init__(self, configurator, **kwargs):
         self.terminate = False if "no_terminate" in kwargs else True
+        self.use_internal_name = False
 
     def getHostname(self): 
-        return self.node.public_ip[0] # FIXME private_ip?
+        internal_name=self.node.private_ip[0]
+        public_name=self.node.public_ip[0]
+        if not (internal_name or external_name):
+            raise Exception('host has no name?')
+        if self.use_internal_name:
+            # FIXME: by inspection, it seems this is sometimes the
+            # empty string.  Dunno if that's EC2 or libcloud being
+            # stupid, but it's not good.
+            if internal_name:
+                return internal_name
+            else:
+                return public_name
+        else:
+            return public_name 
     
     def initwait(self):
         print "waiting for node to spin up"
@@ -348,7 +363,8 @@ s/^Package:.*mongodb/Package: {pkg_name}{pkg_name_suffix}\\
 Conflicts: {pkg_name_conflicts}/' debian/control; ) || exit 1
 ( cd "{pkg_name}{pkg_name_suffix}-{pkg_version}" && sed -i 's|$(CURDIR)/debian/mongodb/|$(CURDIR)/debian/{pkg_name}{pkg_name_suffix}/|g' debian/rules) || exit 1
 ( cd "{pkg_name}{pkg_name_suffix}-{pkg_version}" && sed -i 's|debian/mongodb.manpages|debian/{pkg_name}{pkg_name_suffix}.manpages|g' debian/rules) || exit 1
-( cd  "{pkg_name}{pkg_name_suffix}-{pkg_version}" && sed -i '/^Name:/s/.*/Name: {pkg_name}{pkg_name_suffix}/; /^Version:/s/.*/Version: {pkg_version}/; /Requires.*mongo/s/mongo/{pkg_name}{pkg_name_suffix}/;' rpm/mongo.spec )
+( cd  "{pkg_name}{pkg_name_suffix}-{pkg_version}" && sed -i '/^Name:/s/.*/Name: {pkg_name}{pkg_name_suffix}\\
+Conflicts: {pkg_name_conflicts}/; /^Version:/s/.*/Version: {pkg_version}/; /Requires.*mongo/s/mongo/{pkg_name}{pkg_name_suffix}/;' rpm/mongo.spec )
 # Debian systems require some ridiculous workarounds to get an init
 # script at /etc/init.d/mongodb when the packge name isn't the init
 # script name.  Note: dh_installinit --name won't work, because that
@@ -646,7 +662,7 @@ class ScriptFile(object):
             mongo_pub_version       = version.lstrip('n') if version[0] in 'n' else 'latest'
             pkg_name_suffix    = pkg_name_suffix if pkg_name_suffix else ''
             pkg_version        = pkg_version
-            pkg_name_conflicts = self.configurator.default("pkg_name_conflicts") if pkg_name_suffix else []
+            pkg_name_conflicts = list(self.configurator.default("pkg_name_conflicts") if pkg_name_suffix else [])
             pkg_name_conflicts.remove(pkg_name_suffix) if pkg_name_suffix and pkg_name_suffix in pkg_name_conflicts else []
             formatter          =  self.configurator.default("get_mongo") + self.configurator.default("mangle_mongo") + (self.configurator.nightly_build_mangle_files if version[0] == 'n' else '') +(self.configurator.default("build_prerequisites") if version[0] != 'n' else '') + self.configurator.default("install_for_packaging") + self.configurator.default("build_package")
             script+=self.fmt(formatter,

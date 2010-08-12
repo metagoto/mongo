@@ -57,7 +57,7 @@ namespace mongo {
         capFirstNewRecord.setInvalid();
         // For capped case, signal that we are doing initial extent allocation.
         if ( capped )
-            deletedList[ 1 ].setInvalid();
+            cappedLastDelRecLastExtent().setInvalid();
 		assert( sizeof(dataFileVersion) == 2 );
 		dataFileVersion = 0;
 		indexFileVersion = 0;
@@ -182,19 +182,20 @@ namespace mongo {
         dassert( dloc.drec() == d );
         DEBUGGING out() << "TEMP: add deleted rec " << dloc.toString() << ' ' << hex << d->extentOfs << endl;
         if ( capped ) {
-            if ( !deletedList[ 1 ].isValid() ) {
+            if ( !cappedLastDelRecLastExtent().isValid() ) {
                 // Initial extent allocation.  Insert at end.
                 d->nextDeleted = DiskLoc();
-                if ( deletedList[ 0 ].isNull() )
-                    deletedList[ 0 ] = dloc;
+                if ( cappedListOfAllDeletedRecords().isNull() )
+                    cappedListOfAllDeletedRecords() = dloc;
                 else {
-                    DiskLoc i = deletedList[ 0 ];
+                    DiskLoc i = cappedListOfAllDeletedRecords();
                     for (; !i.drec()->nextDeleted.isNull(); i = i.drec()->nextDeleted );
                     i.drec()->nextDeleted = dloc;
                 }
             } else {
-                d->nextDeleted = firstDeletedInCapExtent();
-                firstDeletedInCapExtent() = dloc;
+                d->nextDeleted = cappedFirstDeletedInCurExtent();
+                cappedFirstDeletedInCurExtent() = dloc;
+                // always compact() after this so order doesn't matter
             }
         } else {
             int b = bucket(d->lengthWithHeaders);
@@ -342,53 +343,6 @@ namespace mongo {
         }
     }
 
-    /* combine adjacent deleted records
-
-       this is O(n^2) but we call it for capped tables where typically n==1 or 2!
-       (or 3...there will be a little unused sliver at the end of the extent.)
-    */
-    void NamespaceDetails::compact() {
-        assert(capped);
-
-        list<DiskLoc> drecs;
-
-        // Pull out capExtent's DRs from deletedList
-        DiskLoc i = firstDeletedInCapExtent();
-        for (; !i.isNull() && inCapExtent( i ); i = i.drec()->nextDeleted )
-            drecs.push_back( i );
-        firstDeletedInCapExtent() = i;
-
-        // This is the O(n^2) part.
-        drecs.sort();
-
-        list<DiskLoc>::iterator j = drecs.begin();
-        assert( j != drecs.end() );
-        DiskLoc a = *j;
-        while ( 1 ) {
-            j++;
-            if ( j == drecs.end() ) {
-                DEBUGGING out() << "TEMP: compact adddelrec\n";
-                addDeletedRec(a.drec(), a);
-                break;
-            }
-            DiskLoc b = *j;
-            while ( a.a() == b.a() && a.getOfs() + a.drec()->lengthWithHeaders == b.getOfs() ) {
-                // a & b are adjacent.  merge.
-                a.drec()->lengthWithHeaders += b.drec()->lengthWithHeaders;
-                j++;
-                if ( j == drecs.end() ) {
-                    DEBUGGING out() << "temp: compact adddelrec2\n";
-                    addDeletedRec(a.drec(), a);
-                    return;
-                }
-                b = *j;
-            }
-            DEBUGGING out() << "temp: compact adddelrec3\n";
-            addDeletedRec(a.drec(), a);
-            a = b;
-        }
-    }
-
     DiskLoc NamespaceDetails::firstRecord( const DiskLoc &startExtent ) const {
         for (DiskLoc i = startExtent.isNull() ? firstExtent : startExtent;
                 !i.isNull(); i = i.ext()->xnext ) {
@@ -405,47 +359,6 @@ namespace mongo {
                 return i.ext()->lastRecord;
         }
         return DiskLoc();
-    }
-
-    DiskLoc &NamespaceDetails::firstDeletedInCapExtent() {
-        if ( deletedList[ 1 ].isNull() )
-            return deletedList[ 0 ];
-        else
-            return deletedList[ 1 ].drec()->nextDeleted;
-    }
-
-    bool NamespaceDetails::inCapExtent( const DiskLoc &dl ) const {
-        assert( !dl.isNull() );
-        // We could have a rec or drec, doesn't matter.
-        return dl.drec()->myExtent( dl ) == capExtent.ext();
-    }
-
-    bool NamespaceDetails::nextIsInCapExtent( const DiskLoc &dl ) const {
-        assert( !dl.isNull() );
-        DiskLoc next = dl.drec()->nextDeleted;
-        if ( next.isNull() )
-            return false;
-        return inCapExtent( next );
-    }
-
-    void NamespaceDetails::advanceCapExtent( const char *ns ) {
-        // We want deletedList[ 1 ] to be the last DeletedRecord of the prev cap extent
-        // (or DiskLoc() if new capExtent == firstExtent)
-        if ( capExtent == lastExtent )
-            deletedList[ 1 ] = DiskLoc();
-        else {
-            DiskLoc i = firstDeletedInCapExtent();
-            for (; !i.isNull() && nextIsInCapExtent( i ); i = i.drec()->nextDeleted );
-            deletedList[ 1 ] = i;
-        }
-
-        capExtent = theCapExtent()->xnext.isNull() ? firstExtent : theCapExtent()->xnext;
-
-        /* this isn't true if a collection has been renamed...that is ok just used for diagnostics */
-        //dassert( theCapExtent()->ns == ns );
-
-        theCapExtent()->assertOk();
-        capFirstNewRecord = DiskLoc();
     }
 
     int n_complaints_cap = 0;
@@ -466,133 +379,12 @@ namespace mongo {
         }
     }
 
-    DiskLoc NamespaceDetails::__capAlloc( int len ) {
-        DiskLoc prev = deletedList[ 1 ];
-        DiskLoc i = firstDeletedInCapExtent();
-        DiskLoc ret;
-        for (; !i.isNull() && inCapExtent( i ); prev = i, i = i.drec()->nextDeleted ) {
-            // We need to keep at least one DR per extent in deletedList[ 0 ],
-            // so make sure there's space to create a DR at the end.
-            if ( i.drec()->lengthWithHeaders >= len + 24 ) {
-                ret = i;
-                break;
-            }
-        }
-
-        /* unlink ourself from the deleted list */
-        if ( !ret.isNull() ) {
-            if ( prev.isNull() )
-                deletedList[ 0 ] = ret.drec()->nextDeleted;
-            else
-                prev.drec()->nextDeleted = ret.drec()->nextDeleted;
-            ret.drec()->nextDeleted.setInvalid(); // defensive.
-            assert( ret.drec()->extentOfs < ret.getOfs() );
-        }
-
-        return ret;
-    }
-
-    void NamespaceDetails::checkMigrate() {
-        // migrate old NamespaceDetails format
-        if ( capped && capExtent.a() == 0 && capExtent.getOfs() == 0 ) {
-            capFirstNewRecord = DiskLoc();
-            capFirstNewRecord.setInvalid();
-            // put all the DeletedRecords in deletedList[ 0 ]
-            for ( int i = 1; i < Buckets; ++i ) {
-                DiskLoc first = deletedList[ i ];
-                if ( first.isNull() )
-                    continue;
-                DiskLoc last = first;
-                for (; !last.drec()->nextDeleted.isNull(); last = last.drec()->nextDeleted );
-                last.drec()->nextDeleted = deletedList[ 0 ];
-                deletedList[ 0 ] = first;
-                deletedList[ i ] = DiskLoc();
-            }
-            // NOTE deletedList[ 1 ] set to DiskLoc() in above
-
-            // Last, in case we're killed before getting here
-            capExtent = firstExtent;
-        }
-    }
-
     /* alloc with capped table handling. */
     DiskLoc NamespaceDetails::_alloc(const char *ns, int len) {
         if ( !capped )
             return __stdAlloc(len);
 
-        // capped.
-
-        // signal done allocating new extents.
-        if ( !deletedList[ 1 ].isValid() )
-            deletedList[ 1 ] = DiskLoc();
-        
-        assert( len < 400000000 );
-        int passes = 0;
-        int maxPasses = ( len / 30 ) + 2; // 30 is about the smallest entry that could go in the oplog
-        if ( maxPasses < 5000 ){
-            // this is for bacwards safety since 5000 was the old value
-            maxPasses = 5000;
-        }
-        DiskLoc loc;
-
-        // delete records until we have room and the max # objects limit achieved.
-
-        /* this fails on a rename -- that is ok but must keep commented out */
-        //assert( theCapExtent()->ns == ns );
-
-        theCapExtent()->assertOk();
-        DiskLoc firstEmptyExtent;
-        while ( 1 ) {
-            if ( nrecords < max ) {
-                loc = __capAlloc( len );
-                if ( !loc.isNull() )
-                    break;
-            }
-
-            // If on first iteration through extents, don't delete anything.
-            if ( !capFirstNewRecord.isValid() ) {
-                advanceCapExtent( ns );
-                if ( capExtent != firstExtent )
-                    capFirstNewRecord.setInvalid();
-                // else signal done with first iteration through extents.
-                continue;
-            }
-
-            if ( !capFirstNewRecord.isNull() &&
-                    theCapExtent()->firstRecord == capFirstNewRecord ) {
-                // We've deleted all records that were allocated on the previous
-                // iteration through this extent.
-                advanceCapExtent( ns );
-                continue;
-            }
-
-            if ( theCapExtent()->firstRecord.isNull() ) {
-                if ( firstEmptyExtent.isNull() )
-                    firstEmptyExtent = capExtent;
-                advanceCapExtent( ns );
-                if ( firstEmptyExtent == capExtent ) {
-                    maybeComplain( ns, len );
-                    return DiskLoc();
-                }
-                continue;
-            }
-
-            massert( 10344 ,  "Capped collection full and delete not allowed", cappedMayDelete() );
-            DiskLoc fr = theCapExtent()->firstRecord;
-            theDataFileMgr.deleteRecord(ns, fr.rec(), fr, true);
-            compact();
-            if( ++passes > maxPasses ) {
-                log() << "passes ns:" << ns << " len:" << len << " maxPasses: " << maxPasses << '\n';
-                log() << "passes max:" << max << " nrecords:" << nrecords << " datasize: " << datasize << endl;
-                massert( 10345 ,  "passes >= maxPasses in capped collection alloc", false );
-            }
-        }
-
-        // Remember first record allocated on this iteration through capExtent.
-        if ( capFirstNewRecord.isValid() && capFirstNewRecord.isNull() )
-            capFirstNewRecord = loc;
-
-        return loc;
+        return cappedAlloc(ns,len);
     }
 
     /* extra space for indexes when more than 10 */
@@ -634,11 +426,11 @@ namespace mongo {
 
         IndexDetails *id;
         try {
-            id = &idx(nIndexes);
+            id = &idx(nIndexes,true);
         }
         catch(DBException&) { 
             allocExtra(thisns, nIndexes);
-            id = &idx(nIndexes);
+            id = &idx(nIndexes,false);
         }
 
         nIndexes++;
@@ -743,42 +535,6 @@ namespace mongo {
             i.next().keyPattern().getFieldNames(_indexKeys);
     }
 
-    void NamespaceDetailsTransient::cllStart( int logSizeMb ) {
-        assertInWriteLock();
-        _cll_ns = "local.temp.oplog." + _ns;
-        _cll_enabled = true;
-        stringstream spec;
-        // 128MB
-        spec << "{size:" << logSizeMb * 1024 * 1024 << ",capped:true,autoIndexId:false}";
-        Client::Context ct( _cll_ns );
-        string err;
-        massert( 10347 ,  "Could not create log ns", userCreateNS( _cll_ns.c_str(), fromjson( spec.str() ), err, false ) );
-        NamespaceDetails *d = nsdetails( _cll_ns.c_str() );
-        d->cappedDisallowDelete();
-    }
-
-    void NamespaceDetailsTransient::cllInvalidate() {
-        assertInWriteLock();
-        cllDrop();
-        _cll_enabled = false;
-    }
-    
-    bool NamespaceDetailsTransient::cllValidateComplete() {
-        assertInWriteLock();
-        cllDrop();
-        bool ret = _cll_enabled;
-        _cll_enabled = false;
-        _cll_ns = "";
-        return ret;
-    }
-    
-    void NamespaceDetailsTransient::cllDrop() {
-        assertInWriteLock();
-        if ( !_cll_enabled )
-            return;
-        Client::Context ctx( _cll_ns );
-        dropNS( _cll_ns );
-    }
 
     /* ------------------------------------------------------------------------- */
 
@@ -881,6 +637,8 @@ namespace mongo {
 	}
 
     bool legalClientSystemNS( const string& ns , bool write ){
+        if( ns == "local.system.replset" ) return true;
+
         if ( ns.find( ".system.users" ) != string::npos )
             return true;
 

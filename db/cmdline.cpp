@@ -19,6 +19,7 @@
 #include "pch.h"
 #include "cmdline.h"
 #include "commands.h"
+#include "../util/processinfo.h"
 
 namespace po = boost::program_options;
 
@@ -41,8 +42,10 @@ namespace mongo {
             ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
             ("quiet", "quieter output")
             ("port", po::value<int>(&cmdLine.port), "specify port number")
+            ("bind_ip", po::value<string>(&cmdLine.bind_ip), "comma separated list of ip addresses to listen on - all local ips by default")
             ("logpath", po::value<string>() , "file to send all output to instead of stdout" )
             ("logappend" , "append to logpath instead of over-writing" )
+            ("pidfilepath", po::value<string>(), "directory for pidfile (if not set, no pidfile is created)")
 #ifndef _WIN32
             ("fork" , "fork server process" )
 #endif
@@ -114,11 +117,29 @@ namespace mongo {
             cmdLine.quiet = true;
         }
 
+        string logpath;
+
 #ifndef _WIN32
         if (params.count("fork")) {
             if ( ! params.count( "logpath" ) ){
                 cout << "--fork has to be used with --logpath" << endl;
                 ::exit(-1);
+            }
+            
+            { // test logpath
+                logpath = params["logpath"].as<string>();
+                assert( logpath.size() );
+                if ( logpath[0] != '/' ){
+                    char temp[256];
+                    assert( getcwd( temp , 256 ) );
+                    logpath = (string)temp + "/" + logpath;
+                }
+                FILE * test = fopen( logpath.c_str() , "a" );
+                if ( ! test ){
+                    cout << "can't open [" << logpath << "] for log file: " << errnoWithDescription() << endl;
+                    ::exit(-1);
+                }
+                fclose( test );
             }
             
             cout.flush();
@@ -129,7 +150,10 @@ namespace mongo {
                 _exit(0);
             }
 
-            chdir("/");
+            if ( chdir("/") < 0 ){
+                cout << "Cant chdir() while forking server process: " << strerror(errno) << endl;
+                ::exit(-1);
+            }
             setsid();
             
             pid_t c2 = fork();
@@ -143,18 +167,33 @@ namespace mongo {
             //freopen("/dev/null", "w", stdout);
 
             fclose(stderr);
-            freopen("/dev/null", "w", stderr);
             fclose(stdin);
-            freopen("/dev/null", "r", stdin);
+
+            FILE* f = freopen("/dev/null", "w", stderr);
+            if ( f == NULL ){
+                cout << "Cant reassign stderr while forking server process: " << strerror(errno) << endl;
+                ::exit(-1);
+            }
+
+            f = freopen("/dev/null", "r", stdin);
+            if ( f == NULL ){
+                cout << "Cant reassign stdin while forking server process: " << strerror(errno) << endl;
+                ::exit(-1);
+            }
 
             setupCoreSignals();
             setupSignals();
         }
 #endif
         if (params.count("logpath")) {
-            string lp = params["logpath"].as<string>();
-            uassert( 10033 ,  "logpath has to be non-zero" , lp.size() );
-            initLogging( lp , params.count( "logappend" ) );
+            if ( logpath.size() == 0 )
+                logpath = params["logpath"].as<string>();
+            uassert( 10033 ,  "logpath has to be non-zero" , logpath.size() );
+            initLogging( logpath , params.count( "logappend" ) );
+        }
+
+        if ( params.count("pidfilepath")) {
+            writePidFile( params["pidfilepath"].as<string>() );
         }
 
         {

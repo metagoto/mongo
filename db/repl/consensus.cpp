@@ -35,15 +35,19 @@ namespace mongo {
             }
             string who = cmdObj["who"].String();
             int cfgver = cmdObj["cfgver"].Int();
+			OpTime opTime(cmdObj["opTime"].Date());
 
             bool weAreFresher = false;
             if( theReplSet->config().version > cfgver ) { 
                 log() << "replSet member " << who << " is not yet aware its cfg version " << cfgver << " is stale" << rsLog;
+				result.append("info", "config version stale");
                 weAreFresher = true;
             }
+            else if( opTime < theReplSet->lastOpTimeWritten )  { 
+				weAreFresher = true;
+			}
+            result.appendDate("opTime", theReplSet->lastOpTimeWritten.asDate());
             result.append("fresher", weAreFresher);
-
-            log() << "replSet error: replSetFresh command not implemented yet." << rsLog;
             return true;
         }
     } cmdReplSetFresh;
@@ -79,10 +83,18 @@ namespace mongo {
         return vUp * 2 > totalVotes();
     }
 
-    static const int VETO = -10000;
+    bool Consensus::shouldRelinquish() const {
+        int vUp = rs._self->config().votes;
+        const long long T = rs.config().ho.heartbeatTimeoutMillis * rs.config().ho.heartbeatConnRetries;
+        for( Member *m = rs.head(); m; m=m->next() ) {
+            long long dt = m->hbinfo().timeDown();
+            if( dt < T )
+                vUp += m->config().votes;
+        }
+        return !( vUp * 2 > totalVotes() );
+    }
 
-    class VoteException : public std::exception {
-    };
+    static const int VETO = -10000;
 
     const time_t LeaseTime = 30;
 
@@ -91,8 +103,8 @@ namespace mongo {
         LastYea &ly = t.ref();
         time_t now = time(0);
         if( ly.when + LeaseTime >= now && ly.who != memberId ) {
-            log() << "replSet TEMP not voting yea for " << memberId << rsLog;
-            log() << "replSet TEMP voted for " << ly.who << ' ' << now-ly.when << " secs ago" << rsLog;
+            log(1) << "replSet not voting yea for " << memberId <<
+                " voted for " << ly.who << ' ' << now-ly.when << " secs ago" << rsLog;
             throw VoteException();
         }
         ly.when = now;
@@ -100,10 +112,22 @@ namespace mongo {
         return rs._self->config().votes;
     }
 
+    /* we vote for ourself at start of election.  once it fails, we can cancel the lease we had in 
+       place instead of leaving it for a long time.
+       */
+    void Consensus::electionFailed(unsigned meid) {
+        Atomic<LastYea>::tran t(ly);
+        LastYea &L = t.ref();
+        DEV assert( L.who == meid ); // this may not always always hold, so be aware, but adding for now as a quick sanity test
+        if( L.who == meid )
+            L.when = 0;
+    }
+
     /* todo: threading **************** !!!!!!!!!!!!!!!! */
     void Consensus::electCmdReceived(BSONObj cmd, BSONObjBuilder* _b) { 
         BSONObjBuilder& b = *_b;
-        log() << "replSet TEMP RECEIVED ELECT MSG " << cmd.toString() << rsLog;
+        DEV log() << "replSet received elect msg " << cmd.toString() << rsLog;
+        else log(2) << "replSet received elect msg " << cmd.toString() << rsLog;
         string set = cmd["set"].String();
         unsigned whoid = cmd["whoid"].Int();
         int cfgver = cmd["cfgver"].Int();
@@ -138,21 +162,41 @@ namespace mongo {
         b.append("round", round);
     }
 
-    void ReplSetImpl::getTargets(list<Target>& L) { 
+    void ReplSetImpl::_getTargets(list<Target>& L, int& configVersion) {
+        configVersion = config().version;
         for( Member *m = head(); m; m=m->next() )
             if( m->hbinfo().up() )
                 L.push_back( Target(m->fullName()) );
     }
 
-    /* allUp only meaningful when true returned! */
-    bool Consensus::weAreFreshest(bool& allUp) {
+    /* config version is returned as it is ok to use this unlocked.  BUT, if unlocked, you would need 
+       to check later that the config didn't change. */
+    void ReplSetImpl::getTargets(list<Target>& L, int& configVersion) {
+        if( lockedByMe() ) { 
+            _getTargets(L, configVersion);
+            return;
+        }
+        lock lk(this);
+        _getTargets(L, configVersion);
+    }
+
+    /* Do we have the newest data of them all?
+       @param allUp - set to true if all members are up.  Only set if true returned.
+       @return true if we are freshest.  Note we may tie.
+    */
+    bool Consensus::weAreFreshest(bool& allUp, int& nTies) {
+        const OpTime ord = theReplSet->lastOpTimeWritten;
+        nTies = 0;
+		assert( !ord.isNull() );
         BSONObj cmd = BSON(
                "replSetFresh" << 1 <<
                "set" << rs.name() << 
+			   "opTime" << Date_t(ord.asDate()) <<
                "who" << rs._self->fullName() << 
                "cfgver" << rs._cfg->version );
         list<Target> L;
-        rs.getTargets(L);
+        int ver;
+        rs.getTargets(L, ver);
         multiCommand(cmd, L);
         int nok = 0;
         allUp = true;
@@ -161,77 +205,149 @@ namespace mongo {
                 nok++;
                 if( i->result["fresher"].trueValue() )
                     return false;
+                OpTime remoteOrd( i->result["opTime"].Date() );
+                if( remoteOrd == ord )
+                    nTies++;
+                assert( remoteOrd <= ord );
             }
             else {
-                log() << "replSet TEMP freshest returns " << i->result.toString() << rsLog;
+                DEV log() << "replSet freshest returns " << i->result.toString() << rsLog;
                 allUp = false;
             }
         }
-        log() << "replSet TEMP we are freshest of up nodes, nok:" << nok << rsLog; 
+        DEV log() << "replSet dev we are freshest of up nodes, nok:" << nok << " nTies:" << nTies << rsLog; 
+        assert( ord <= theReplSet->lastOpTimeWritten ); // <= as this may change while we are working...
         return true;
     }
 
     extern time_t started;
 
+    void Consensus::multiCommand(BSONObj cmd, list<Target>& L) { 
+        assert( !rs.lockedByMe() );
+        mongo::multiCommand(cmd, L);
+    }
+
     void Consensus::_electSelf() {
+        if( time(0) < steppedDown ) 
+            return;
+
+        {
+            const OpTime ord = theReplSet->lastOpTimeWritten;
+            if( ord == 0 ) { 
+                log() << "replSet info not trying to elect self, do not yet have a complete set of data from any point in time" << rsLog;
+                return;
+            }
+        }
+
         bool allUp;
-        if( !weAreFreshest(allUp) ) { 
+        int nTies;
+        if( !weAreFreshest(allUp, nTies) ) { 
             log() << "replSet info not electing self, we are not freshest" << rsLog;
             return;
         }
+
+        rs.sethbmsg("",9);
+
         if( !allUp && time(0) - started < 60 * 5 ) { 
-            log() << "replSet info not electing self, not all members up and we have been up less than 5 minutes" << rsLog;
+            /* the idea here is that if a bunch of nodes bounce all at once, we don't want to drop data 
+               if we don't have to -- we'd rather be offline and wait a little longer instead 
+               todo: make this configurable.
+               */
+            rs.sethbmsg("not electing self, not all members up and we have been up less than 5 minutes");
+            return;
         }
+
+        Member& me = *rs._self;
+
+        if( nTies ) {
+            /* tie?  we then randomly sleep to try to not collide on our voting. */
+            /* todo: smarter. */
+            if( me.id() == 0 || sleptLast ) {
+                // would be fine for one node not to sleep 
+                // todo: biggest / highest priority nodes should be the ones that get to not sleep
+            } else {
+                assert( !rs.lockedByMe() ); // bad to go to sleep locked
+                unsigned ms = ((unsigned) rand()) % 1000 + 50;
+                DEV log() << "replSet tie " << nTies << " sleeping a little " << ms << "ms" << rsLog;
+                sleptLast = true;
+                sleepmillis(ms);
+                throw RetryAfterSleepException();
+            }
+        }
+        sleptLast = false;
 
         time_t start = time(0);
-        Member& me = *rs._self;        
-        int tally = yea( me.id() );
-        log() << "replSet info electSelf" << rsLog;
+        unsigned meid = me.id();
+        int tally = yea( meid );
+        bool success = false;
+        try {
+            log() << "replSet info electSelf " << meid << rsLog;
 
-        BSONObj electCmd = BSON(
-               "replSetElect" << 1 <<
-               "set" << rs.name() << 
-               "who" << me.fullName() << 
-               "whoid" << me.hbinfo().id() << 
-               "cfgver" << rs._cfg->version << 
-               "round" << OID::gen() /* this is just for diagnostics */
-            );
+            BSONObj electCmd = BSON(
+                   "replSetElect" << 1 <<
+                   "set" << rs.name() << 
+                   "who" << me.fullName() << 
+                   "whoid" << me.hbinfo().id() << 
+                   "cfgver" << rs._cfg->version << 
+                   "round" << OID::gen() /* this is just for diagnostics */
+                );
 
-        list<Target> L;
-        rs.getTargets(L);
-        multiCommand(electCmd, L);
+            int configVersion;
+            list<Target> L;
+            rs.getTargets(L, configVersion);
+            multiCommand(electCmd, L);
 
-        for( list<Target>::iterator i = L.begin(); i != L.end(); i++ ) {
-            log() << "replSet TEMP elect res: " << i->result.toString() << rsLog;
-            Target& t = *i;
-            if( i->ok ) {
-                int v = i->result["vote"].Int();
-                tally += v;
+            {
+                RSBase::lock lk(&rs);
+                for( list<Target>::iterator i = L.begin(); i != L.end(); i++ ) {
+                    DEV log() << "replSet elect res: " << i->result.toString() << rsLog;
+                    if( i->ok ) {
+                        int v = i->result["vote"].Int();
+                        tally += v;
+                    }
+                }
+                if( tally*2 <= totalVotes() ) {
+                    log() << "replSet couldn't elect self, only received " << tally << " votes" << rsLog;
+                }
+                else if( time(0) - start > 30 ) {
+                    // defensive; should never happen as we have timeouts on connection and operation for our conn
+                    log() << "replSet too much time passed during our election, ignoring result" << rsLog;
+                }
+                else if( configVersion != rs.config().version ) { 
+                    log() << "replSet config version changed during our election, ignoring result" << rsLog;
+                }
+                else {
+                    /* succeeded. */
+                    log(1) << "replSet election succeeded, assuming primary role" << rsLog;
+                    success = true;
+                    rs.assumePrimary();
+                } 
             }
+        } catch( std::exception& ) { 
+            if( !success ) electionFailed(meid);
+            throw;
         }
-        if( tally*2 > totalVotes() ) {
-            if( time(0) - start > 30 ) {
-                // defensive; should never happen as we have timeouts on connection and operation for our conn
-                log() << "replSet too much time passed during election, ignoring result" << rsLog;
-            }
-            /* succeeded. */
-            log() << "replSet election succeeded assuming primary role" << rsLog;
-            rs.assumePrimary();
-            return;
-        } 
-        else { 
-            log() << "replSet couldn't elect self, only received " << tally << " votes" << rsLog;
-        }
+        if( !success ) electionFailed(meid);
     }
 
     void Consensus::electSelf() {
+        assert( !rs.lockedByMe() );
+        assert( !rs.myConfig().arbiterOnly );
         try { 
             _electSelf(); 
         } 
+        catch(RetryAfterSleepException&) { 
+            throw;
+        }
         catch(VoteException& ) { 
             log() << "replSet not trying to elect self as responded yea to someone else recently" << rsLog;
         }
-        catch(...) { }
+        catch(DBException& e) { 
+            log() << "replSet warning caught unexpected exception in electSelf() " << e.toString() << rsLog;
+        }
+        catch(...) { 
+            log() << "replSet warning caught unexpected exception in electSelf()" << rsLog;
+        }
     }
 
 }

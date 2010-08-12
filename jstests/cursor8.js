@@ -1,3 +1,5 @@
+// This should get skipped when testing replication.
+
 t = db.cursor8;
 t.drop();
 t.save( {} );

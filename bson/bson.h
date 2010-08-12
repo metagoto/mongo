@@ -35,14 +35,39 @@
 
 #pragma once
 
+#if defined(MONGO_EXPOSE_MACROS)
+#error this header is for client programs, not the mongo database itself. include jsobj.h instead.
+/* because we define simplistic assert helpers here that don't pull in a bunch of util -- so that
+   BSON can be used header only.
+   */
+#endif
+
 #include <iostream>
 #include <sstream>
 #include <boost/utility.hpp>
+#include "util/builder.h"
 
 namespace bson { 
+
+    using std::string;
+    using std::stringstream;
+
     class assertion : public std::exception { 
     public:
-        virtual const char* what() const throw() { return "BsonAssertion"; }
+        assertion( unsigned u , const string& s )
+            : id( u ) , msg( s ){
+            mongo::StringBuilder ss;
+            ss << "BsonAssertion id: " << u << " " << s;
+            full = ss.str();
+        }
+
+        virtual ~assertion() throw() {}
+
+        virtual const char* what() const throw() { return full.c_str(); }
+        
+        unsigned id;
+        string msg;
+        string full;
     };
 }
 
@@ -50,23 +75,27 @@ namespace mongo {
 #if !defined(assert) 
     inline void assert(bool expr) {
         if(!expr) { 
-            std::cout << "assertion failure in bson library" << std::endl;
-            throw bson::assertion();
+            throw bson::assertion( 0 , "assertion failure in bson library" );
         }
     }
 #endif
 #if !defined(uassert)
+    inline void uasserted(unsigned msgid, std::string s) {
+        throw bson::assertion( msgid , s );
+    }
+
     inline void uassert(unsigned msgid, std::string msg, bool expr) {
         if( !expr )
-            throw bson::assertion();
+            uasserted( msgid , msg );
     }
     inline void msgasserted(int msgid, const char *msg) { 
-        throw bson::assertion();
+        throw bson::assertion( msgid , msg );
     }
+    inline void msgasserted(int msgid, const std::string &msg) { msgasserted(msgid, msg.c_str()); }
     inline void massert(unsigned msgid, std::string msg, bool expr) { 
         if(!expr) { 
             std::cout << "assertion failure in bson library: " << msgid << ' ' << msg << std::endl;
-            throw bson::assertion();
+            throw bson::assertion( msgid , msg );
         }
     }
 #endif

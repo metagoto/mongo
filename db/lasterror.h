@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "../bson/oid.h"
+
 namespace mongo {
     class BSONObjBuilder;
     class Message;
@@ -25,21 +27,29 @@ namespace mongo {
         int code;
         string msg;
         enum UpdatedExistingType { NotUpdate, True, False } updatedExisting;
-        /* todo: nObjects should be 64 bit */
+        OID upsertedId;
+        OID writebackId;
         long long nObjects;
         int nPrev;
         bool valid;
         bool overridenById;
         bool disabled;
+        void writeback( OID& oid ){
+            reset( true );
+            writebackId = oid;
+        }
         void raiseError(int _code , const char *_msg) {
             reset( true );
             code = _code;
             msg = _msg;
         }
-        void recordUpdate( bool _updatedExisting, long long nChanged ) {
+        void recordUpdate( bool _updateObjects , long long _nObjects , OID _upsertedId ){
             reset( true );
-            nObjects = nChanged;
-            updatedExisting = _updatedExisting ? True : False;
+            nObjects = _nObjects;
+            updatedExisting = _updateObjects ? True : False;
+            if ( _upsertedId.isSet() )
+                upsertedId = _upsertedId;
+                
         }
         void recordDelete( long long nDeleted ) {
             reset( true );
@@ -57,16 +67,48 @@ namespace mongo {
             nPrev = 1;
             valid = _valid;
             disabled = false;
+            upsertedId.clear();
+            writebackId.clear();
         }
         void appendSelf( BSONObjBuilder &b );
+
+        struct Disabled : boost::noncopyable {
+            Disabled( LastError * le ){
+                _le = le;
+                if ( _le ){
+                    _prev = _le->disabled;
+                    _le->disabled = true;
+                } else {
+                    _prev = false;
+                }
+            }
+            
+            ~Disabled(){
+                if ( _le )
+                    _le->disabled = _prev;
+            }
+
+            LastError * _le;
+            bool _prev;
+        };
+        
         static LastError noError;
     };
 
     extern class LastErrorHolder {
     public:
         LastErrorHolder() : _id( 0 ) {}
+        ~LastErrorHolder();
 
         LastError * get( bool create = false );
+        LastError * getSafe(){
+            LastError * le = get(false);
+            if ( ! le ){
+                log( LL_ERROR ) << " no LastError!  id: " << getID() << endl;
+                assert( le );
+            }
+            return le;
+        }
 
         LastError * _get( bool create = false ); // may return a disabled LastError
 
@@ -101,32 +143,12 @@ namespace mongo {
             time_t time;
             LastError *lerr;
         };
-        static mongo::mutex _idsmutex;
-        map<int,Status> _ids;    
-    } lastError;
-    
-    inline void raiseError(int code , const char *msg) {
-        LastError *le = lastError.get();
-        if ( le == 0 ) {
-            /* might be intentional (non-user thread) */
-            DEV log() << "warning dev: lastError==0 won't report:" << msg << endl;
-        } else if ( le->disabled ) {
-            log() << "lastError disabled, can't report: " << msg << endl;
-        } else {
-            le->raiseError(code, msg);
-        }
-    }
-    
-    inline void recordUpdate( bool updatedExisting, int nChanged ) {
-        LastError *le = lastError.get();
-        if ( le )
-            le->recordUpdate( updatedExisting, nChanged );        
-    }
+        typedef map<int,Status> IDMap;
 
-    inline void recordDelete( int nDeleted ) {
-        LastError *le = lastError.get();
-        if ( le )
-            le->recordDelete( nDeleted );        
-    }
+        static mongo::mutex _idsmutex;
+        IDMap _ids;    
+    } lastError;
+
+    void raiseError(int code , const char *msg);
 
 } // namespace mongo

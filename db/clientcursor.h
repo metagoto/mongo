@@ -61,6 +61,7 @@ namespace mongo {
         unsigned _pinValue;
 
         bool _doingDeletes;
+        ElapsedTracker _yieldSometimesTracker;
 
         static CCById clientCursorsById;
         static CCByLoc byLoc;
@@ -68,6 +69,8 @@ namespace mongo {
         
         static CursorId allocCursorId_inlock();
 
+
+        
     public:
         /* use this to assure we don't in the background time out cursor while it is under use.
            if you are using noTimeout() already, there is no risk anyway.
@@ -100,18 +103,52 @@ namespace mongo {
                 release();
             }
         }; 
+        
+        // This object assures safe and reliable cleanup of the ClientCursor.
+        // The implementation assumes that there will be no duplicate ids among cursors
+        // (which is assured if cursors must last longer than 1 second).
+        class CleanupPointer : boost::noncopyable {
+        public:
+            CleanupPointer() : _c( 0 ), _id( -1 ) {}
+            void reset( ClientCursor *c = 0 ) {
+                if ( c == _c ) {
+                    return;
+                }
+
+                if ( _c ) {
+                    // be careful in case cursor was deleted by someone else
+                    ClientCursor::erase( _id );
+                }
+                
+                if ( c ) {
+                    _c = c;
+                    _id = c->cursorid;
+                } else {
+                    _c = 0;
+                    _id = -1;
+                }
+            }
+            ~CleanupPointer() {
+                DESTRUCTOR_GUARD ( reset(); );
+            }
+            operator bool() { return _c; }
+            ClientCursor * operator-> () { return _c; }
+        private:
+            ClientCursor *_c;
+            CursorId _id;
+        };
 
         /*const*/ CursorId cursorid;
         string ns;
         shared_ptr<Cursor> c;
-        int pos;                                 // # objects into the cursor so far 
+        int pos;                  // # objects into the cursor so far 
         BSONObj query;
-        int _queryOptions;
+        int _queryOptions;        // see enum QueryOptions dbclient.h
         OpTime _slaveReadTill;
 
-        ClientCursor(int queryOptions, shared_ptr<Cursor>& _c, const char *_ns) :
+        ClientCursor(int queryOptions, shared_ptr<Cursor>& _c, const string& _ns) :
             _idleAgeMillis(0), _pinValue(0), 
-            _doingDeletes(false), 
+            _doingDeletes(false), _yieldSometimesTracker(128,10),
             ns(_ns), c(_c), 
             pos(0), _queryOptions(queryOptions)
         {
@@ -137,6 +174,8 @@ namespace mongo {
         static void invalidate(const char *nsPrefix);
 
         /**
+         * @param microsToSleep -1 : ask client 
+         *                     >=0 : sleep for that amount
          * do a dbtemprelease 
          * note: caller should check matcher.docMatcher().atomic() first and not yield if atomic - 
          *       we don't do herein as this->matcher (above) is only initialized for true queries/getmore.
@@ -145,28 +184,42 @@ namespace mongo {
          *         if false is returned, then this ClientCursor should be considered deleted - 
          *         in fact, the whole database could be gone.
          */
-        bool yield();
+        bool yield( int microsToSleep = -1 );
+
+        /**
+         * @return same as yield()
+         */
+        bool yieldSometimes();
+        
+        static int yieldSuggest();
+        static void staticYield( int micros );
+        
+        struct YieldData { CursorId _id; bool _doingDeletes; };
+        bool prepareToYield( YieldData &data );
+        static bool recoverFromYield( const YieldData &data );
 
         struct YieldLock : boost::noncopyable {
             explicit YieldLock( ptr<ClientCursor> cc )
-                : _cc( cc ) , _id( cc->cursorid ) , _doingDeletes( cc->_doingDeletes ) {
-                cc->updateLocation();
-                _unlock.reset(new dbtempreleasecond());
+                : _canYield(cc->c->supportYields()) {
+                if ( _canYield ){
+                    cc->prepareToYield( _data );
+                    _unlock.reset(new dbtempreleasecond());
+                }
             }
             ~YieldLock(){
-                assert( ! _unlock );
+                if ( _unlock ){
+                    log( LL_WARNING ) << "ClientCursor::YieldLock not closed properly" << endl;
+                    relock();
+                }
             }
 
             bool stillOk(){
+                if ( ! _canYield )
+                    return true;
+
                 relock();
                 
-                if ( ClientCursor::find( _id , false ) == 0 ){
-                    // i was deleted
-                    return false;
-                }
-                
-                _cc->_doingDeletes = _doingDeletes;
-                return true;
+                return ClientCursor::recoverFromYield( _data );
             }
 
             void relock(){
@@ -174,10 +227,9 @@ namespace mongo {
             }
             
         private:
-            ClientCursor * _cc;
-            CursorId _id;
-            bool _doingDeletes;
-
+            bool _canYield;
+            YieldData _data;
+            
             scoped_ptr<dbtempreleasecond> _unlock;
 
         };
@@ -284,6 +336,8 @@ public:
 
         static void informAboutToDeleteBucket(const DiskLoc& b);
         static void aboutToDelete(const DiskLoc& dl);
+
+        static void find( const string& ns , set<CursorId>& all );
     };
 
     class ClientCursorMonitor : public BackgroundJob {

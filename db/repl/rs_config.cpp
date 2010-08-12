@@ -29,6 +29,8 @@ using namespace bson;
 
 namespace mongo { 
 
+    void logOpInitiate(const bo&);
+
     list<HostAndPort> ReplSetConfig::otherMemberHostnames() const { 
         list<HostAndPort> L;
         for( vector<MemberCfg>::const_iterator i = members.begin(); i != members.end(); i++ ) {
@@ -37,24 +39,30 @@ namespace mongo {
         }
         return L;
     }
-
-    void ReplSetConfig::saveConfigLocally() { 
+    
+    /* comment MUST only be set when initiating the set by the initiator */
+    void ReplSetConfig::saveConfigLocally(bo comment) { 
         check();
         log() << "replSet info saving a newer config version to local.system.replset" << rsLog;
-        MemoryMappedFile::flushAll(true);
         { 
             writelock lk("");
-            rsOpTime.initiate();
+            Client::Context cx( rsConfigNs );
+            cx.db()->flushFiles(true);
+
+            //theReplSet->lastOpTimeWritten = ??;
+            //rather than above, do a logOp()? probably
             BSONObj o = asBson();
             Helpers::putSingletonGod(rsConfigNs.c_str(), o, false/*logOp=false; local db so would work regardless...*/);
-            logOpComment(BSON("msg"<<"initiating"));
-            MemoryMappedFile::flushAll(true);
-        }
-    }
+            if( !comment.isEmpty() )
+                logOpInitiate(comment);
 
+            cx.db()->flushFiles(true);
+        }
+        DEV log() << "replSet saveConfigLocally done" << rsLog;
+    }
     
     /*static*/ 
-    void ReplSetConfig::receivedNewConfig(BSONObj cfg) { 
+    /*void ReplSetConfig::receivedNewConfig(BSONObj cfg) { 
         if( theReplSet )
             return; // this is for initial setup only, so far. todo
 
@@ -63,8 +71,8 @@ namespace mongo {
         writelock lk("admin.");
         if( theReplSet ) 
             return;
-        c.saveConfigLocally();
-    }
+        c.saveConfigLocally(bo());
+    }*/
 
     bo ReplSetConfig::MemberCfg::asBson() const { 
         bob b;
@@ -106,6 +114,53 @@ namespace mongo {
         mchk(_id >= 0 && _id <= 255);
         mchk(priority >= 0 && priority <= 1000);
         mchk(votes >= 0 && votes <= 100);
+        uassert(13419, "this version of mongod only supports priorities 0 and 1", priority == 0 || priority == 1);
+    }
+
+    /** @param o old config
+        @param n new config 
+        */
+    /*static*/ bool ReplSetConfig::legalChange(const ReplSetConfig& o, const ReplSetConfig& n, string& errmsg) { 
+        assert( theReplSet );
+
+        if( o._id != n._id ) { 
+            errmsg = "set name may not change"; 
+            return false;
+        }
+        /* TODO : wonder if we need to allow o.version < n.version only, which is more lenient.
+                  if someone had some intermediate config this node doesnt have, that could be 
+                  necessary.  but then how did we become primary?  so perhaps we are fine as-is.
+                  */
+        if( o.version + 1 != n.version ) { 
+            errmsg = "version number wrong";
+            return false;
+        }
+
+        map<HostAndPort,const ReplSetConfig::MemberCfg*> old;
+        for( vector<ReplSetConfig::MemberCfg>::const_iterator i = o.members.begin(); i != o.members.end(); i++ ) { 
+            old[i->h] = &(*i);
+        }
+        int me = 0;
+        for( vector<ReplSetConfig::MemberCfg>::const_iterator i = n.members.begin(); i != n.members.end(); i++ ) { 
+            const ReplSetConfig::MemberCfg& m = *i;
+            if( old.count(m.h) ) { 
+                if( old[m.h]->_id != m._id ) { 
+                    log() << "replSet reconfig error with member: " << m.h.toString() << rsLog;
+                    uasserted(13432, "_id may not change for members");
+                }
+            }
+            if( m.h.isSelf() ) 
+                me++;
+        }
+
+        uassert(13433, "can't find self in new replset config", me == 1);
+
+        /* TODO : MORE CHECKS HERE */
+
+        log() << "replSet TODO : don't allow removal of a node until we handle it at the removed node end?" << endl;
+        // we could change its votes to zero perhaps instead as a short term...
+
+        return true;
     }
 
     void ReplSetConfig::clear() { 
@@ -116,12 +171,10 @@ namespace mongo {
     void ReplSetConfig::check() const { 
         uassert(13132,
             "nonmatching repl set name in _id field; check --replSet command line",
-            startsWith(cmdLine.replSet, _id + '/'));
-        uassert(13133, 
-                "replSet config value is not valid",
-                members.size() >= 1 && members.size() <= 64 && 
-                version > 0);
-
+            _id == cmdLine.ourSetName());
+        uassert(13308, "replSet bad config version #", version > 0);
+        uassert(13133, "replSet bad config no members", members.size() >= 1);
+        uassert(13309, "replSet bad config maximum number of members is 7 (for now)", members.size() <= 7);
     }
 
     void ReplSetConfig::from(BSONObj o) {
@@ -141,7 +194,7 @@ namespace mongo {
             if( settings["heartbeatTimeout"].ok() )
                 ho.heartbeatTimeoutMillis = (unsigned) (settings["heartbeatTimeout"].Number() * 1000);
             ho.check();
-            try { getLastErrorDefaults = settings["getLastErrorDefaults"].Obj(); } catch(...) { }
+            try { getLastErrorDefaults = settings["getLastErrorDefaults"].Obj().copy(); } catch(...) { }
         }
 
         set<string> hosts;
@@ -153,22 +206,33 @@ namespace mongo {
         catch(...) {
             uasserted(13131, "replSet error parsing (or missing) 'members' field in config object");
         }
+
+        unsigned localhosts = 0;
         for( unsigned i = 0; i < members.size(); i++ ) {
             BSONObj mobj = members[i].Obj();
             MemberCfg m;
             try {
                 try { 
                     m._id = (int) mobj["_id"].Number();
-                } catch(...) { throw "_id must be numeric"; }
+                } catch(...) { 
+                    /* TODO: use of string exceptions may be problematic for reconfig case! */
+                    throw "_id must be numeric"; 
+                }
                 string s;
                 try {
                     s = mobj["host"].String();
                     m.h = HostAndPort(s);
                 }
-                catch(...) { throw "bad or missing host field?"; }
+                catch(...) { 
+                    throw string("bad or missing host field? ") + mobj.toString();
+                }
+                if( m.h.isLocalHost() ) 
+                    localhosts++;
                 m.arbiterOnly = mobj.getBoolField("arbiterOnly");
-                try { m.priority = mobj["priority"].Number(); } catch(...) { }
-                try { m.votes = (unsigned) mobj["votes"].Number(); } catch(...) { }
+                if( mobj.hasElement("priority") )
+                    m.priority = mobj["priority"].Number();
+                if( mobj.hasElement("votes") )
+                    m.votes = (unsigned) mobj["votes"].Number();
                 m.check();
             }
             catch( const char * p ) { 
@@ -180,26 +244,31 @@ namespace mongo {
             catch(DBException& e) { 
                 log() << "replSet cfg parsing exception for members[" << i << "] " << e.what() << rsLog;
                 stringstream ss;
-                ss << "replSet members[" << i << "] bad config object";
+                ss << "bad config for member[" << i << "] " << e.what();
                 uassert(13135, ss.str(), false);
             }
-            uassert(13108, "bad " + rsConfigNs + " config dups?", ords.count(m._id) == 0 && hosts.count(m.h.toString()) == 0);
+            if( !(ords.count(m._id) == 0 && hosts.count(m.h.toString()) == 0) ) {
+                log() << "replSet " << o.toString() << rsLog;
+                uassert(13108, "bad replset config -- duplicate hosts in the config object?", false);
+            }
             hosts.insert(m.h.toString());
             ords.insert(m._id);
             this->members.push_back(m);
         }
+        uassert(13393, "can't use localhost in repl set member names except when using it for all members", localhosts == 0 || localhosts == members.size());
         uassert(13117, "bad " + rsConfigNs + " config", !_id.empty());
     }
 
     static inline void configAssert(bool expr) {
-        uassert(13122, "bad " + rsConfigNs + " config", expr);
+        uassert(13122, "bad repl set config?", expr);
     }
 
     ReplSetConfig::ReplSetConfig(BSONObj cfg) { 
         clear();
         from(cfg);
-        configAssert( version < 0 /*unspecified*/ || version == 1 );
-        version = 1;
+        configAssert( version < 0 /*unspecified*/ || (version >= 1 && version <= 5000) );
+        if( version < 1 )
+            version = 1;
         _ok = true;
     }
 
@@ -217,26 +286,24 @@ namespace mongo {
             }
             else {
                 /* first, make sure other node is configured to be a replset. just to be safe. */
-                size_t sl = cmdLine.replSet.find('/');
-                assert( sl != string::npos );
-                string setname = cmdLine.replSet.substr(0, sl);
+                string setname = cmdLine.ourSetName();
                 BSONObj cmd = BSON( "replSetHeartbeat" << setname );
                 int theirVersion;
                 BSONObj info;
-                bool ok = requestHeartbeat(setname, h.toString(), info, -2, theirVersion);
+                bool ok = requestHeartbeat(setname, "", h.toString(), info, -2, theirVersion);
                 if( info["rs"].trueValue() ) { 
                     // yes, it is a replicate set, although perhaps not yet initialized
                 }
                 else {
                     if( !ok ) {
                         log() << "replSet TEMP !ok heartbeating " << h.toString() << " on cfg load" << rsLog;
-                        if( !info.isEmpty() ) log() << "replSet TEMP response was: " << info.toString() << rsLog;
+                        if( !info.isEmpty() ) 
+                            log() << "replSet info " << h.toString() << " : " << info.toString() << rsLog;
                         return;
                     }
                     { 
                         stringstream ss;
                         ss << "replSet error: member " << h.toString() << " is not in --replSet mode";
-                        cout << "TEMP " << info.toString() << endl;
                         msgassertedNoTrace(13260, ss.str().c_str()); // not caught as not a user exception - we want it not caught
                         //for python err# checker: uassert(13260, "", false);
                     }
@@ -258,7 +325,7 @@ namespace mongo {
         }
         catch( DBException& e) { 
             version = v;
-            log(level) << "replSet load config couldn't load " << h.toString() << ' ' << e.what() << rsLog;
+            log(level) << "replSet load config couldn't get from " << h.toString() << ' ' << e.what() << rsLog;
             return;
         }
 
@@ -266,7 +333,7 @@ namespace mongo {
         uassert(13109, "multiple rows in " + rsConfigNs + " not supported", !c->more());
         from(o);
         _ok = true;
-        log(level) << "replSet load config ok " << h.toString() << rsLog;
+        log(level) << "replSet load config ok from " << (h.isSelf() ? "self" : h.toString()) << rsLog;
     }
 
 }

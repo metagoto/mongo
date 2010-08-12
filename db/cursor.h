@@ -78,7 +78,8 @@ namespace mongo {
         virtual void checkLocation() { }
         
         virtual bool supportGetMore() = 0;
-
+        virtual bool supportYields() = 0;
+        
         virtual string toString() { return "abstract?"; }
 
         /* used for multikey index traversal to avoid sending back dups. see Matcher::matches().
@@ -91,10 +92,12 @@ namespace mongo {
         */
         virtual bool getsetdup(DiskLoc loc) = 0;
 
-        virtual BSONArray prettyIndexBounds() const { return BSONArray(); }
+        virtual BSONObj prettyIndexBounds() const { return BSONArray(); }
 
         virtual bool capped() const { return false; }
 
+        virtual long long nscanned() = 0;
+        
         // The implementation may return different matchers depending on the
         // position of the cursor.  If matcher() is nonzero at the start,
         // matcher() should be checked each time advance() is called.
@@ -123,10 +126,12 @@ namespace mongo {
     protected:
         DiskLoc curr, last;
         const AdvanceStrategy *s;
+        void incNscanned() { if ( !curr.isNull() ) { ++_nscanned; } }
 
     private:
         bool tailable_;
         shared_ptr< CoveredIndexMatcher > _matcher;
+        long long _nscanned;
         void init() {
             tailable_ = false;
         }
@@ -152,10 +157,11 @@ namespace mongo {
         
         bool advance();
 
-        BasicCursor(DiskLoc dl, const AdvanceStrategy *_s = forward()) : curr(dl), s( _s ) {
+        BasicCursor(DiskLoc dl, const AdvanceStrategy *_s = forward()) : curr(dl), s( _s ), _nscanned() {
+            incNscanned();
             init();
         }
-        BasicCursor(const AdvanceStrategy *_s = forward()) : s( _s ) {
+        BasicCursor(const AdvanceStrategy *_s = forward()) : s( _s ), _nscanned() {
             init();
         }
         virtual string toString() {
@@ -171,12 +177,15 @@ namespace mongo {
         virtual bool getsetdup(DiskLoc loc) { return false; }
 
         virtual bool supportGetMore() { return true; }
+        virtual bool supportYields() { return true; }
 
         virtual CoveredIndexMatcher *matcher() const { return _matcher.get(); }
         
         virtual void setMatcher( shared_ptr< CoveredIndexMatcher > matcher ) {
             _matcher = matcher;
         }
+        
+        virtual long long nscanned() { return _nscanned; }
         
     };
 

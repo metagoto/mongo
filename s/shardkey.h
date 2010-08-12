@@ -68,26 +68,6 @@ namespace mongo {
          */
         bool hasShardKey( const BSONObj& obj ) const;
         
-        /**
-           returns a query that filters results only for the range desired, i.e. returns 
-             { "field" : { $gte: keyval(min), $lt: keyval(max) } }
-        */
-        void getFilter( BSONObjBuilder& b , const BSONObj& min, const BSONObj& max ) const;
-        
-        /**
-           Returns if the given sort pattern can be ordered by the shard key pattern.
-           Example
-            sort:   { ts: -1 }
-            *this:  { ts:1 }
-              -> -1
-
-              @return
-              0 if sort either doesn't have all the fields or has extra fields
-              < 0 if sort is descending
-              > 1 if sort is ascending
-         */
-        int canOrder( const BSONObj& sort ) const;
-
         BSONObj key() const { return pattern; }
 
         string toString() const;
@@ -97,12 +77,13 @@ namespace mongo {
         bool partOfShardKey(const string& key ) const {
             return patternfields.count( key ) > 0;
         }
+
+        /**
+         * @return
+         * true if 'this' is a prefix (not necessarily contained) of 'otherPattern'.
+         */
+        bool isPrefixOf( const BSONObj& otherPattern ) const;
         
-        bool uniqueAllowd( const BSONObj& otherPattern ) const;
-        
-        operator string() const {
-            return pattern.toString();
-        }
     private:
         BSONObj pattern;
         BSONObj gMin;
@@ -113,7 +94,9 @@ namespace mongo {
     };
 
     inline BSONObj ShardKeyPattern::extractKey(const BSONObj& from) const { 
-        return from.extractFields(pattern);
+        BSONObj k = from.extractFields(pattern);
+        uassert(13334, "Shard Key must be less than 512 bytes", k.objsize() < 512);
+        return k;
     }
 
 } 

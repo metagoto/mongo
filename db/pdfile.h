@@ -48,11 +48,11 @@ namespace mongo {
     
     /* deletes this ns, indexes and cursors */
     void dropCollection( const string &name, string &errmsg, BSONObjBuilder &result ); 
-    bool userCreateNS(const char *ns, BSONObj j, string& err, bool logForReplication);
+    bool userCreateNS(const char *ns, BSONObj j, string& err, bool logForReplication, bool *deferIdIndex = 0);
     shared_ptr<Cursor> findTableScan(const char *ns, const BSONObj& order, const DiskLoc &startLoc=DiskLoc());
 
 // -1 if library unavailable.
-    boost::intmax_t freeSpace();
+    boost::intmax_t freeSpace( const string &path = dbpath );
 
     /*---------------------------------------------------------------------*/
 
@@ -75,7 +75,9 @@ namespace mongo {
 
         /* return max size an extent may be */
         static int maxSize();
-
+        
+        void flush( bool sync );
+        
     private:
         int defaultSize( const char *filename ) const;
 
@@ -106,7 +108,8 @@ namespace mongo {
             NamespaceDetails *d,
             NamespaceDetailsTransient *nsdt,
             Record *toupdate, const DiskLoc& dl,
-            const char *buf, int len, OpDebug& debug, bool &changedId);
+            const char *buf, int len, OpDebug& debug, bool &changedId, bool god=false);
+
         // The object o may be updated if modified on insert.                                
         void insertAndLog( const char *ns, const BSONObj &o, bool god = false );
 
@@ -252,6 +255,8 @@ namespace mongo {
         Extent* getPrevExtent() {
             return xprev.isNull() ? 0 : DataFileMgr::getExtent(xprev);
         }
+        
+        static int maxSize();
     };
 
     /*
@@ -485,5 +490,15 @@ namespace mongo {
     void ensureHaveIdIndex(const char *ns);
     
     bool dropIndexes( NamespaceDetails *d, const char *ns, const char *name, string &errmsg, BSONObjBuilder &anObjBuilder, bool maydeleteIdIndex );
+
+
+    /**
+     * @return true if ns is ok
+     */
+    inline bool nsDollarCheck( const char* ns ){
+        if ( strchr( ns , '$' ) == 0 )
+            return true;
         
+        return strcmp( ns, "local.oplog.$main" ) == 0;
+    }
 } // namespace mongo

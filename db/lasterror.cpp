@@ -30,6 +30,19 @@ namespace mongo {
     LastErrorHolder lastError;
     mongo::mutex LastErrorHolder::_idsmutex("LastErrorHolder");
 
+    bool isShell = false;
+    void raiseError(int code , const char *msg) {
+        LastError *le = lastError.get();
+        if ( le == 0 ) {
+            /* might be intentional (non-user thread) */            
+            OCCASIONALLY DEV if( !isShell ) log() << "warning dev: lastError==0 won't report:" << msg << endl;
+        } else if ( le->disabled ) {
+            log() << "lastError disabled, can't report: " << code << ":" << msg << endl;
+        } else {
+            le->raiseError(code, msg);
+        }
+    }
+
     void LastError::appendSelf( BSONObjBuilder &b ) {
         if ( !valid ) {
             b.appendNull( "err" );
@@ -44,8 +57,21 @@ namespace mongo {
             b.append( "code" , code );
         if ( updatedExisting != NotUpdate )
             b.appendBool( "updatedExisting", updatedExisting == True );
+        if ( upsertedId.isSet() )
+            b.append( "upserted" , upsertedId );
+        if ( writebackId.isSet() )
+            b.append( "writeback" , writebackId );
         b.appendNumber( "n", nObjects );
     }
+
+    LastErrorHolder::~LastErrorHolder(){
+        for ( IDMap::iterator i = _ids.begin(); i != _ids.end(); ++i ){
+            delete i->second.lerr;
+            i->second.lerr = 0;
+        }
+        _ids.clear();
+    }
+
 
     void LastErrorHolder::setID( int id ){
         _id.set( id );
@@ -170,11 +196,8 @@ namespace mongo {
     }
 
     void LastErrorHolder::disconnect( int clientId ){
-        if ( ! clientId )
-            return;
-        
-        scoped_lock lock(_idsmutex);
-        _ids.erase( clientId );
+        if ( clientId )
+            remove(clientId);
     }
 
     struct LastErrorHolderTest : public UnitTest {

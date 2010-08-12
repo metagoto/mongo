@@ -23,6 +23,8 @@
 #include "pdfile.h"
 #include "queryoptimizer.h"
 #include "cmdline.h"
+#include "clientcursor.h"
+#include <queue>
 
 //#define DEBUGQO(x) cout << x << endl;
 #define DEBUGQO(x)
@@ -64,7 +66,8 @@ namespace mongo {
     endKeyInclusive_( endKey.isEmpty() ),
     unhelpful_( false ),
     _special( special ),
-    _type(0){
+    _type(0),
+    _startOrEndSpec( !startKey.isEmpty() || !endKey.isEmpty() ){
 
         if ( !fbs_.matchPossible() ) {
             unhelpful_ = true;
@@ -158,21 +161,19 @@ namespace mongo {
             exactIndexedQueryCount == _originalQuery.nFields() ) {
             exactKeyMatch_ = true;
         }
-        indexBounds_ = fbs.indexBounds( idxKey, direction_ );
-        if ( !startKey.isEmpty() || !endKey.isEmpty() ) {
+        _frv.reset( new FieldRangeVector( fbs, idxKey, direction_ ) );
+        if ( _startOrEndSpec ) {
             BSONObj newStart, newEnd;
             if ( !startKey.isEmpty() )
-                newStart = startKey;
+                _startKey = startKey;
             else
-                newStart = indexBounds_[ 0 ].first;
+                _startKey = _frv->startKey();
             if ( !endKey.isEmpty() )
-                newEnd = endKey;
+                _endKey = endKey;
             else
-                newEnd = indexBounds_[ indexBounds_.size() - 1 ].second;
-            BoundList newBounds;
-            newBounds.push_back( make_pair( newStart, newEnd ) );
-            indexBounds_ = newBounds;
+                _endKey = _frv->endKey();
         }
+
         if ( ( scanAndOrderRequired_ || order_.isEmpty() ) &&
             !fbs.range( idxKey.firstElement().fieldName() ).nontrivial() ) {
             unhelpful_ = true;
@@ -199,11 +200,13 @@ namespace mongo {
 
         massert( 10363 ,  "newCursor() with start location not implemented for indexed plans", startLoc.isNull() );
         
-        if ( indexBounds_.size() < 2 ) {
+        if ( _startOrEndSpec ) {
             // we are sure to spec endKeyInclusive_
-            return shared_ptr<Cursor>( new BtreeCursor( d, idxNo, *index_, indexBounds_[ 0 ].first, indexBounds_[ 0 ].second, endKeyInclusive_, direction_ >= 0 ? 1 : -1 ) );
+            return shared_ptr<Cursor>( new BtreeCursor( d, idxNo, *index_, _startKey, _endKey, endKeyInclusive_, direction_ >= 0 ? 1 : -1 ) );
+        } else if ( index_->getSpec().getType() ) {
+            return shared_ptr<Cursor>( new BtreeCursor( d, idxNo, *index_, _frv->startKey(), _frv->endKey(), true, direction_ >= 0 ? 1 : -1 ) );            
         } else {
-            return shared_ptr<Cursor>( new BtreeCursor( d, idxNo, *index_, indexBounds_, direction_ >= 0 ? 1 : -1 ) );
+            return shared_ptr<Cursor>( new BtreeCursor( d, idxNo, *index_, _frv, direction_ >= 0 ? 1 : -1 ) );
         }
     }
     
@@ -233,7 +236,7 @@ namespace mongo {
         }
     }
     
-    QueryPlanSet::QueryPlanSet( const char *_ns, auto_ptr< FieldRangeSet > frs, const BSONObj &originalQuery, const BSONObj &order, const BSONElement *hint, bool honorRecordedPlan, const BSONObj &min, const BSONObj &max ) :
+    QueryPlanSet::QueryPlanSet( const char *_ns, auto_ptr< FieldRangeSet > frs, const BSONObj &originalQuery, const BSONObj &order, const BSONElement *hint, bool honorRecordedPlan, const BSONObj &min, const BSONObj &max, bool bestGuessOnly, bool mayYield ) :
     ns(_ns),
     _originalQuery( originalQuery ),
     fbs_( frs ),
@@ -245,7 +248,9 @@ namespace mongo {
     honorRecordedPlan_( honorRecordedPlan ),
     min_( min.getOwned() ),
     max_( max.getOwned() ),
-    _bestGuessOnly() {
+    _bestGuessOnly( bestGuessOnly ),
+    _mayYield( mayYield ),
+    _yieldSometimesTracker( 256, 20 ){
         if ( hint && !hint->eoo() ) {
             hint_ = hint->wrap();
         }
@@ -261,6 +266,38 @@ namespace mongo {
         }
         NamespaceDetails *d = nsdetails(ns);
         plans_.push_back( PlanPtr( new QueryPlan( d, d->idxNo(id), *fbs_, _originalQuery, order_, min_, max_ ) ) );
+    }
+    
+    // returns an IndexDetails * for a hint, 0 if hint is $natural.
+    // hint must not be eoo()
+    IndexDetails *parseHint( const BSONElement &hint, NamespaceDetails *d ) {
+        massert( 13292, "hint eoo", !hint.eoo() );
+        if( hint.type() == String ) {
+            string hintstr = hint.valuestr();
+            NamespaceDetails::IndexIterator i = d->ii();
+            while( i.more() ) {
+                IndexDetails& ii = i.next();
+                if ( ii.indexName() == hintstr ) {
+                    return &ii;
+                }
+            }
+        }
+        else if( hint.type() == Object ) { 
+            BSONObj hintobj = hint.embeddedObject();
+            uassert( 10112 ,  "bad hint", !hintobj.isEmpty() );
+            if ( !strcmp( hintobj.firstElement().fieldName(), "$natural" ) ) {
+                return 0;
+            }
+            NamespaceDetails::IndexIterator i = d->ii();
+            while( i.more() ) {
+                IndexDetails& ii = i.next();
+                if( ii.keyPattern().woCompare(hintobj) == 0 ) {
+                    return &ii;
+                }
+            }
+        }        
+        uassert( 10113 ,  "bad hint", false );
+        return 0;
     }
     
     void QueryPlanSet::init() {
@@ -280,36 +317,15 @@ namespace mongo {
         BSONElement hint = hint_.firstElement();
         if ( !hint.eoo() ) {
             mayRecordPlan_ = false;
-            if( hint.type() == String ) {
-                string hintstr = hint.valuestr();
-                NamespaceDetails::IndexIterator i = d->ii();
-                while( i.more() ) {
-                    IndexDetails& ii = i.next();
-                    if ( ii.indexName() == hintstr ) {
-                        addHint( ii );
-                        return;
-                    }
-                }
+            IndexDetails *id = parseHint( hint, d );
+            if ( id ) {
+                addHint( *id );
+            } else {
+                massert( 10366 ,  "natural order cannot be specified with $min/$max", min_.isEmpty() && max_.isEmpty() );
+                // Table scan plan
+                plans_.push_back( PlanPtr( new QueryPlan( d, -1, *fbs_, _originalQuery, order_ ) ) );                
             }
-            else if( hint.type() == Object ) { 
-                BSONObj hintobj = hint.embeddedObject();
-                uassert( 10112 ,  "bad hint", !hintobj.isEmpty() );
-                if ( !strcmp( hintobj.firstElement().fieldName(), "$natural" ) ) {
-                    massert( 10366 ,  "natural order cannot be specified with $min/$max", min_.isEmpty() && max_.isEmpty() );
-                    // Table scan plan
-                    plans_.push_back( PlanPtr( new QueryPlan( d, -1, *fbs_, _originalQuery, order_ ) ) );
-                    return;
-                }
-                NamespaceDetails::IndexIterator i = d->ii();
-                while( i.more() ) {
-                    IndexDetails& ii = i.next();
-                    if( ii.keyPattern().woCompare(hintobj) == 0 ) {
-                        addHint( ii );
-                        return;
-                    }
-                }
-            }
-            uassert( 10113 ,  "bad hint", false );
+            return;
         }
         
         if ( !min_.isEmpty() || !max_.isEmpty() ) {
@@ -360,13 +376,11 @@ namespace mongo {
             NamespaceDetailsTransient& nsd = NamespaceDetailsTransient::get_inlock( ns );
             BSONObj bestIndex = nsd.indexForPattern( fbs_->pattern( order_ ) );
             if ( !bestIndex.isEmpty() ) {
-                usingPrerecordedPlan_ = true;
-                mayRecordPlan_ = false;
+                PlanPtr p;
                 oldNScanned_ = nsd.nScannedForPattern( fbs_->pattern( order_ ) );
                 if ( !strcmp( bestIndex.firstElement().fieldName(), "$natural" ) ) {
                     // Table scan plan
-                    plans_.push_back( PlanPtr( new QueryPlan( d, -1, *fbs_, _originalQuery, order_ ) ) );
-                    return;
+                    p.reset( new QueryPlan( d, -1, *fbs_, _originalQuery, order_ ) );
                 }
 
                 NamespaceDetails::IndexIterator i = d->ii();
@@ -374,11 +388,17 @@ namespace mongo {
                     int j = i.pos();
                     IndexDetails& ii = i.next();
                     if( ii.keyPattern().woCompare(bestIndex) == 0 ) {
-                        plans_.push_back( PlanPtr( new QueryPlan( d, j, *fbs_, _originalQuery, order_ ) ) );
-                        return;
+                        p.reset( new QueryPlan( d, j, *fbs_, _originalQuery, order_ ) );
                     }
                 }
-                massert( 10368 ,  "Unable to locate previously recorded index", false );
+
+                massert( 10368 ,  "Unable to locate previously recorded index", p.get() );
+                if ( !( _bestGuessOnly && p->scanAndOrderRequired() ) ) {
+                    usingPrerecordedPlan_ = true;
+                    mayRecordPlan_ = false;
+                    plans_.push_back( p );
+                    return;
+                }
             }
         }
         
@@ -399,7 +419,7 @@ namespace mongo {
             return;
         }
         
-        bool normalQuery = hint_.isEmpty() && min_.isEmpty() && max_.isEmpty() && _originalQuery.getField( "$or" ).eoo();
+        bool normalQuery = hint_.isEmpty() && min_.isEmpty() && max_.isEmpty();
 
         PlanSet plans;
         for( int i = 0; i < d->nIndexes; ++i ) {
@@ -450,7 +470,7 @@ namespace mongo {
             shared_ptr<Cursor> c = (*i)->newCursor();
             BSONObjBuilder explain;
             explain.append( "cursor", c->toString() );
-            explain.appendArray( "indexBounds", c->prettyIndexBounds() );
+            explain.append( "indexBounds", c->prettyIndexBounds() );
             arr.push_back( explain.obj() );
         }
         BSONObjBuilder b;
@@ -486,6 +506,34 @@ namespace mongo {
     plans_( plans ) {
     }
     
+    void QueryPlanSet::Runner::mayYield( const vector< shared_ptr< QueryOp > > &ops ) {
+        if ( plans_._mayYield ) {
+            if ( plans_._yieldSometimesTracker.ping() ) {
+                int micros = ClientCursor::yieldSuggest();
+                if ( micros > 0 ) {
+                    for( vector< shared_ptr< QueryOp > >::const_iterator i = ops.begin(); i != ops.end(); ++i ) {
+                        if ( !prepareToYield( **i ) ) {
+                            return;
+                        }
+                    }
+                    ClientCursor::staticYield( micros );
+                    for( vector< shared_ptr< QueryOp > >::const_iterator i = ops.begin(); i != ops.end(); ++i ) {
+                        recoverFromYield( **i );
+                    }                        
+                }
+            }
+        }        
+    }
+    
+    struct OpHolder {
+        OpHolder( const shared_ptr< QueryOp > &op ) : _op( op ), _offset() {}
+        shared_ptr< QueryOp > _op;
+        long long _offset;
+        bool operator<( const OpHolder &other ) const {
+            return _op->nscanned() + _offset > other._op->nscanned() + other._offset;
+        }
+    };
+    
     shared_ptr< QueryOp > QueryPlanSet::Runner::run() {
         massert( 10369 ,  "no plans", plans_.plans_.size() > 0 );
         
@@ -510,31 +558,29 @@ namespace mongo {
                 return *i;
         }
         
-        long long nScanned = 0;
-        long long nScannedBackup = 0;
-        while( 1 ) {
-            ++nScanned;
-            unsigned errCount = 0;
-            bool first = true;
-            for( vector< shared_ptr< QueryOp > >::iterator i = ops.begin(); i != ops.end(); ++i ) {
-                QueryOp &op = **i;
-                nextOp( op );
-                if ( op.complete() ) {
-                    if ( first ) {
-                        nScanned += nScannedBackup;
-                    }
-                    if ( plans_.mayRecordPlan_ && op.mayRecordPlan() ) {
-                        op.qp().registerSelf( nScanned );
-                    }
-                    return *i;
+        std::priority_queue< OpHolder > queue;
+        for( vector< shared_ptr< QueryOp > >::iterator i = ops.begin(); i != ops.end(); ++i ) {
+            queue.push( *i );
+        }
+        
+        while( !queue.empty() ) {
+            mayYield( ops );
+            OpHolder holder = queue.top();
+            queue.pop();
+            QueryOp &op = *holder._op;
+            nextOp( op );
+            if ( op.complete() ) {
+                if ( plans_.mayRecordPlan_ && op.mayRecordPlan() ) {
+                    op.qp().registerSelf( op.nscanned() );
                 }
-                if ( op.error() )
-                    ++errCount;
-                first = false;
+                return holder._op;
             }
-            if ( errCount == ops.size() )
-                break;
-            if ( !plans_._bestGuessOnly && plans_.usingPrerecordedPlan_ && nScanned > plans_.oldNScanned_ * 10 && plans_._special.empty() ) {
+            if ( op.error() ) {
+                continue;
+            }
+            queue.push( holder );
+            if ( !plans_._bestGuessOnly && plans_.usingPrerecordedPlan_ && op.nscanned() > plans_.oldNScanned_ * 10 && plans_._special.empty() ) {
+                holder._offset = -op.nscanned();
                 plans_.addOtherPlans( true );
                 PlanSet::iterator i = plans_.plans_.begin();
                 ++i;
@@ -545,36 +591,52 @@ namespace mongo {
                     initOp( *op );
                     if ( op->complete() )
                         return op;
+                    queue.push( op );
                 }                
                 plans_.mayRecordPlan_ = true;
                 plans_.usingPrerecordedPlan_ = false;
-                nScannedBackup = nScanned;
-                nScanned = 0;
-            }
+            }            
         }
         return ops[ 0 ];
     }
     
+#define GUARD_OP_EXCEPTION( op, expression ) \
+    try { \
+        expression; \
+    } \
+    catch ( DBException& e ) { \
+        op.setException( e.getInfo() ); \
+    } \
+    catch ( const std::exception &e ) { \
+        op.setException( ExceptionInfo( e.what() , 0 ) ); \
+    } \
+    catch ( ... ) { \
+        op.setException( ExceptionInfo( "Caught unknown exception" , 0 ) ); \
+    }
+        
+    
     void QueryPlanSet::Runner::initOp( QueryOp &op ) {
-        try {
-            op.init();
-        } catch ( const std::exception &e ) {
-            op.setExceptionMessage( e.what() );
-        } catch ( ... ) {
-            op.setExceptionMessage( "Caught unknown exception" );
-        }        
+        GUARD_OP_EXCEPTION( op, op.init() );
     }
 
     void QueryPlanSet::Runner::nextOp( QueryOp &op ) {
-        try {
-            if ( !op.error() )
-                op.next();
-        } catch ( const std::exception &e ) {
-            op.setExceptionMessage( e.what() );
-        } catch ( ... ) {
-            op.setExceptionMessage( "Caught unknown exception" );
-        }        
+        GUARD_OP_EXCEPTION( op, if ( !op.error() ) { op.next(); } );
     }
+
+    bool QueryPlanSet::Runner::prepareToYield( QueryOp &op ) {
+        GUARD_OP_EXCEPTION( op,
+                           if ( op.error() ) {
+                               return true;
+                           } else {
+                               return op.prepareToYield();
+                           } );
+        return true;
+    }
+
+    void QueryPlanSet::Runner::recoverFromYield( QueryOp &op ) {
+        GUARD_OP_EXCEPTION( op, if ( !op.error() ) { op.recoverFromYield(); } );
+    }
+    
     
     MultiPlanScanner::MultiPlanScanner( const char *ns,
                                        const BSONObj &query,
@@ -582,27 +644,33 @@ namespace mongo {
                                        const BSONElement *hint,
                                        bool honorRecordedPlan,
                                        const BSONObj &min,
-                                       const BSONObj &max ) :
+                                       const BSONObj &max,
+                                       bool bestGuessOnly,
+                                       bool mayYield ) :
     _ns( ns ),
     _or( !query.getField( "$or" ).eoo() ),
     _query( query.getOwned() ),
     _fros( ns, _query ),
     _i(),
     _honorRecordedPlan( honorRecordedPlan ),
-    _bestGuessOnly() {
-        // TODO add special/type check
-        // eventually implement (some of?) these
-        if ( !order.isEmpty() || ( hint && !hint->eoo() ) || !min.isEmpty() || !max.isEmpty() ) {
+    _bestGuessOnly( bestGuessOnly ),
+    _hint( ( hint && !hint->eoo() ) ? hint->wrap() : BSONObj() ),
+    _mayYield( mayYield ),
+    _tableScanned()
+    {
+        if ( !order.isEmpty() || !min.isEmpty() || !max.isEmpty() || !_fros.getSpecial().empty() ) {
             _or = false;
         }
+        if ( _or && uselessOr( _hint.firstElement() ) ) {
+            _or = false;
+        }
+        // if _or == false, don't use or clauses for index selection
         if ( !_or ) {
             auto_ptr< FieldRangeSet > frs( new FieldRangeSet( ns, _query ) );
-            _currentQps.reset( new QueryPlanSet( ns, frs, _query, order, hint, honorRecordedPlan, min, max ) );
-            _n = 1; // only one run
+            _currentQps.reset( new QueryPlanSet( ns, frs, _query, order, hint, honorRecordedPlan, min, max, _bestGuessOnly, _mayYield ) );
         } else {
             BSONElement e = _query.getField( "$or" );
             massert( 13268, "invalid $or spec", e.type() == Array && e.embeddedObject().nFields() > 0 );
-            _n = e.embeddedObject().nFields();
         }
     }
 
@@ -612,13 +680,15 @@ namespace mongo {
             ++_i;
             return _currentQps->runOp( op );
         }
-        if ( _i != 0 ) {
-            _fros.popOrClause();            
-        }
         ++_i;
         auto_ptr< FieldRangeSet > frs( _fros.topFrs() );
-        _currentQps.reset( new QueryPlanSet( _ns, frs, _query, BSONObj(), 0, _honorRecordedPlan ) );
+        BSONElement hintElt = _hint.firstElement();
+        _currentQps.reset( new QueryPlanSet( _ns, frs, _query, BSONObj(), &hintElt, _honorRecordedPlan, BSONObj(), BSONObj(), _bestGuessOnly, _mayYield ) );
         shared_ptr< QueryOp > ret( _currentQps->runOp( op ) );
+        if ( ret->qp().willScanTable() ) {
+            _tableScanned = true;
+        }
+        _fros.popOrClause();
         return ret;
     }
     
@@ -628,7 +698,44 @@ namespace mongo {
             ret = runOpOnce( *ret );
         }
         return ret;
-    }    
+    }
+    
+    bool MultiPlanScanner::uselessOr( const BSONElement &hint ) const {
+        NamespaceDetails *nsd = nsdetails( _ns );
+        if ( !nsd ) {
+            return true;
+        }
+        IndexDetails *id = 0;
+        if ( !hint.eoo() ) {
+            IndexDetails *id = parseHint( hint, nsd );
+            if ( !id ) {
+                return true;
+            }
+        }
+        vector< BSONObj > ret;
+        _fros.allClausesSimplified( ret );
+        for( vector< BSONObj >::const_iterator i = ret.begin(); i != ret.end(); ++i ) {
+            if ( id ) {
+                if ( id->getSpec().suitability( *i, BSONObj() ) == USELESS ) {
+                    return true;
+                }
+            } else {
+                bool useful = false;
+                NamespaceDetails::IndexIterator j = nsd->ii();
+                while( j.more() ) {
+                    IndexDetails &id = j.next();
+                    if ( id.getSpec().suitability( *i, BSONObj() ) != USELESS ) {
+                        useful = true;
+                        break;
+                    }
+                }
+                if ( !useful ) {
+                    return true;
+                }       
+            }
+        }
+        return false;
+    }
     
     bool indexWorks( const BSONObj &idxPattern, const BSONObj &sampleKey, int direction, int firstSignificantField ) {
         BSONObjIterator p( idxPattern );

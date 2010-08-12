@@ -21,17 +21,16 @@
 namespace mongo {
 
     /* throws */
-    bool requestHeartbeat(string setname, string memberFullName, BSONObj& result, int myConfigVersion, int& theirConfigVersion);
+    bool requestHeartbeat(string setname, string fromHost, string memberFullName, BSONObj& result, int myConfigVersion, int& theirConfigVersion, bool checkEmpty = false);
 
     struct HealthOptions { 
         HealthOptions() { 
             heartbeatSleepMillis = 2000;
             heartbeatTimeoutMillis = 10000;
-            heartbeatConnRetries  = 3;
+            heartbeatConnRetries  = 2;
         }
-        bool isDefault() const {
-            return !( heartbeatSleepMillis != 2000 || heartbeatTimeoutMillis != 10000 || heartbeatConnRetries  != 3 ); 
-        }
+
+        bool isDefault() const { return *this == HealthOptions(); }
 
         // see http://www.mongodb.org/display/DOCS/Replica+Set+Internals
         unsigned heartbeatSleepMillis;
@@ -41,6 +40,10 @@ namespace mongo {
         void check() {
             uassert(13112, "bad replset heartbeat option", heartbeatSleepMillis >= 10);
             uassert(13113, "bad replset heartbeat option", heartbeatTimeoutMillis >= 10);
+        }
+
+        bool operator==(const HealthOptions& r) const { 
+            return heartbeatSleepMillis==r.heartbeatSleepMillis && heartbeatTimeoutMillis==r.heartbeatTimeoutMillis && heartbeatConnRetries==heartbeatConnRetries; 
         }
     };
 

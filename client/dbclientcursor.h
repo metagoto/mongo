@@ -25,7 +25,7 @@
 
 namespace mongo {
     
-    class ShardConnection;
+    class AScopedConnection;
     
 	/** Queries return a cursor object */
     class DBClientCursor : boost::noncopyable {
@@ -38,7 +38,8 @@ namespace mongo {
             if you want to exhaust whatever data has been fetched to the client already but 
             then perhaps stop.
         */
-        bool moreInCurrentBatch() { return !_putBack.empty() || pos < nReturned; }
+        int objsLeftInBatch() const { _assertIfNull(); return _putBack.size() + nReturned - pos; }
+        bool moreInCurrentBatch() { return objsLeftInBatch() > 0; }
 
         /** next
 		   @return next object in the result cursor.
@@ -65,6 +66,13 @@ namespace mongo {
             return o;
         }
 
+        /** peek ahead at items buffered for future next() calls.
+            never requests new data from the server.  so peek only effective 
+            with what is already buffered.
+            WARNING: no support for _putBack yet!
+        */
+        void peek(vector<BSONObj>&, int atMost);
+
         /**
            iterate the rest of the cursor and return the number if items
          */
@@ -83,18 +91,19 @@ namespace mongo {
            available from the dbclientcursor.
         */
         bool isDead() const {
-            return cursorId == 0;
+            return  !this || cursorId == 0;
         }
 
         bool tailable() const {
             return (opts & QueryOption_CursorTailable) != 0;
         }
         
-        /** see QueryResult::ResultFlagType (db/dbmessage.h) for flag values 
+        /** see ResultFlagType (constants.h) for flag values 
             mostly these flags are for internal purposes - 
             ResultFlag_ErrSet is the possible exception to that
         */
         bool hasResultFlag( int flag ){
+            _assertIfNull();
             return (resultFlags & flag) != 0;
         }
 
@@ -108,7 +117,7 @@ namespace mongo {
                 nToSkip(_nToSkip),
                 fieldsToReturn(_fieldsToReturn),
                 opts(queryOptions),
-                batchSize(bs),
+                batchSize(bs==1?2:bs),
                 m(new Message()),
                 cursorId(),
                 nReturned(),
@@ -140,11 +149,11 @@ namespace mongo {
         */
         void decouple() { _ownCursor = false; }
         
-        void attach( ScopedDbConnection * conn );
-        void attach( ShardConnection * conn );
+        void attach( AScopedConnection * conn );
         
     private:
         friend class DBClientBase;
+        friend class DBClientConnection;
         bool init();        
         int nextBatchSize();
         DBConnector *connector;
@@ -165,10 +174,30 @@ namespace mongo {
         const char *data;
         void dataReceived();
         void requestMore();
+        void exhaustReceiveMore(); // for exhaust
         bool _ownCursor; // see decouple()
         string _scopedHost;
+
+        // Don't call from a virtual function
+        void _assertIfNull() const { uassert(13348, "connection died", this); }
     };
     
+    /** iterate over objects in current batch only - will not cause a network call
+     */
+    class DBClientCursorBatchIterator {
+    public:
+        DBClientCursorBatchIterator( DBClientCursor &c ) : _c( c ), _n() {}
+        bool moreInCurrentBatch() { return _c.moreInCurrentBatch(); }
+        BSONObj nextSafe() {
+            massert( 13383, "BatchIterator empty", moreInCurrentBatch() );
+            ++_n;
+            return _c.nextSafe();
+        }
+        int n() const { return _n; }
+    private:
+        DBClientCursor &_c;
+        int _n;
+    };
     
 } // namespace mongo
 

@@ -84,7 +84,7 @@ namespace mongo {
         bt_dmp=0;
     }
 
-    int BucketBasics::fullValidate(const DiskLoc& thisLoc, const BSONObj &order) {
+    int BucketBasics::fullValidate(const DiskLoc& thisLoc, const BSONObj &order, int *unusedCount) {
         {
             bool f = false;
             assert( f = true );
@@ -107,18 +107,24 @@ namespace mongo {
         for ( int i = 0; i < n; i++ ) {
             _KeyNode& kn = k(i);
 
-            if ( kn.isUsed() ) kc++;
+            if ( kn.isUsed() ) {
+                kc++;
+            } else {
+                if ( unusedCount ) {
+                    ++( *unusedCount );
+                }
+            }
             if ( !kn.prevChildBucket.isNull() ) {
                 DiskLoc left = kn.prevChildBucket;
                 BtreeBucket *b = left.btree();
                 wassert( b->parent == thisLoc );
-                kc += b->fullValidate(kn.prevChildBucket, order);
+                kc += b->fullValidate(kn.prevChildBucket, order, unusedCount);
             }
         }
         if ( !nextChild.isNull() ) {
             BtreeBucket *b = nextChild.btree();
             wassert( b->parent == thisLoc );
-            kc += b->fullValidate(nextChild, order);
+            kc += b->fullValidate(nextChild, order, unusedCount);
         }
 
         return kc;
@@ -269,12 +275,12 @@ namespace mongo {
     }*/
 
     /* insert a key in a bucket with no complexity -- no splits required */
-    bool BucketBasics::basicInsert(const DiskLoc& thisLoc, int keypos, const DiskLoc& recordLoc, const BSONObj& key, const Ordering &order) {
+    bool BucketBasics::basicInsert(const DiskLoc& thisLoc, int &keypos, const DiskLoc& recordLoc, const BSONObj& key, const Ordering &order) {
         modified(thisLoc);
         assert( keypos >= 0 && keypos <= n );
         int bytesNeeded = key.objsize() + sizeof(_KeyNode);
         if ( bytesNeeded > emptySize ) {
-            pack( order );
+            pack( order, keypos );
             if ( bytesNeeded > emptySize )
                 return false;
         }
@@ -294,7 +300,7 @@ namespace mongo {
     /* when we delete things we just leave empty space until the node is
        full and then we repack it.
     */
-    void BucketBasics::pack( const Ordering &order ) {
+    void BucketBasics::pack( const Ordering &order, int &refPos ) {
         if ( flags & Packed )
             return;
 
@@ -302,14 +308,29 @@ namespace mongo {
         char temp[BucketSize];
         int ofs = tdz;
         topSize = 0;
+        int i = 0;
         for ( int j = 0; j < n; j++ ) {
-            short ofsold = k(j).keyDataOfs();
-            int sz = keyNode(j).key.objsize();
+            if( j > 0 && ( j != refPos ) && k( j ).isUnused() && k( j ).prevChildBucket.isNull() ) {
+                continue; // key is unused and has no children - drop it
+            }
+            if( i != j ) {
+                if ( refPos == j ) {
+                    refPos = i; // i < j so j will never be refPos again
+                }
+                k( i ) = k( j );
+            }
+            short ofsold = k(i).keyDataOfs();
+            int sz = keyNode(i).key.objsize();
             ofs -= sz;
             topSize += sz;
             memcpy(temp+ofs, dataAt(ofsold), sz);
-            k(j).setKeyDataOfsSavingUse( ofs );
+            k(i).setKeyDataOfsSavingUse( ofs );
+            ++i;
         }
+        if ( refPos == n ) {
+            refPos = i;
+        }
+        n = i;
         int dataUsed = tdz - ofs;
         memcpy(data + ofs, temp + ofs, dataUsed);
         emptySize = tdz - dataUsed - n * sizeof(_KeyNode);
@@ -319,10 +340,10 @@ namespace mongo {
         assertValid( order );
     }
 
-    inline void BucketBasics::truncateTo(int N, const Ordering &order) {
+    inline void BucketBasics::truncateTo(int N, const Ordering &order, int &refPos) {
         n = N;
         setNotPacked();
-        pack( order );
+        pack( order, refPos );
     }
 
     /* - BtreeBucket --------------------------------------------------- */
@@ -343,6 +364,35 @@ namespace mongo {
 
             break;
         }
+    }
+    
+    int BtreeBucket::customBSONCmp( const BSONObj &l, const BSONObj &rBegin, int rBeginLen, const vector< const BSONElement * > &rEnd, const Ordering &o ) {
+        BSONObjIterator ll( l );
+        BSONObjIterator rr( rBegin );
+        vector< const BSONElement * >::const_iterator rr2 = rEnd.begin();
+        unsigned mask = 1;
+        for( int i = 0; i < rBeginLen; ++i, mask <<= 1 ) {
+            BSONElement lll = ll.next();
+            BSONElement rrr = rr.next();
+            ++rr2;
+            
+            int x = lll.woCompare( rrr, false );
+            if ( o.descending( mask ) )
+                x = -x;
+            if ( x != 0 )
+                return x;
+        }
+        for( ; ll.more(); mask <<= 1 ) {
+            BSONElement lll = ll.next();
+            BSONElement rrr = **rr2;
+            ++rr2;
+            int x = lll.woCompare( rrr, false );
+            if ( o.descending( mask ) )
+                x = -x;
+            if ( x != 0 )
+                return x;
+        }
+        return 0;
     }
 
     bool BtreeBucket::exists(const IndexDetails& idx, DiskLoc thisLoc, const BSONObj& key, const Ordering& order) { 
@@ -510,11 +560,11 @@ namespace mongo {
             assert(false);
         }
 found:
-        deallocBucket( thisLoc );
+        deallocBucket( thisLoc, id );
     }
     
-    void BtreeBucket::deallocBucket(const DiskLoc &thisLoc) {
-#if 1
+    void BtreeBucket::deallocBucket(const DiskLoc &thisLoc, IndexDetails &id) {
+#if 0
         /* as a temporary defensive measure, we zap the whole bucket, AND don't truly delete
            it (meaning it is ineligible for reuse).
            */
@@ -524,11 +574,8 @@ found:
         //defensive:
         n = -1;
         parent.Null();
-        massert( 10284 , "todo: use RecStoreInterface instead", false);
-        // TODO: this was broken anyway as deleteRecord does unindexRecord() call which assumes the data is a BSONObj, 
-        // and it isn't.
-        assert(false);
-//        theDataFileMgr.deleteRecord(id.indexNamespace().c_str(), thisLoc.rec(), thisLoc);
+        string ns = id.indexNamespace();
+        btreeStore->deleteRecord(ns.c_str(), thisLoc);
 #endif
     }
 
@@ -599,6 +646,8 @@ found:
 
     /* insert a key in this bucket, splitting if necessary.
        keypos - where to insert the key i3n range 0..n.  0=make leftmost, n=make rightmost.
+       NOTE this function may free some data, and as a result the value passed for keypos may
+       be invalid after calling insertHere()
     */
     void BtreeBucket::insertHere(DiskLoc thisLoc, int keypos,
                                  DiskLoc recordLoc, const BSONObj& key, const Ordering& order,
@@ -719,7 +768,8 @@ found:
             }
         }
 
-        truncateTo(split, order);  // note this may trash splitkey.key.  thus we had to promote it before finishing up here.
+        int newpos = keypos;
+        truncateTo(split, order, newpos);  // note this may trash splitkey.key.  thus we had to promote it before finishing up here.
 
         // add our new key, there is room now
         {
@@ -727,7 +777,7 @@ found:
             if ( keypos <= split ) {
                 if ( split_debug )
                     out() << "  keypos<split, insertHere() the new key" << endl;
-                insertHere(thisLoc, keypos, recordLoc, key, order, lchild, rchild, idx);
+                insertHere(thisLoc, newpos, recordLoc, key, order, lchild, rchild, idx);
             } else {
                 int kp = keypos-split-1;
                 assert(kp>=0);
@@ -830,6 +880,129 @@ found:
             return pos == n ? DiskLoc() /*theend*/ : thisLoc;
     }
 
+    bool BtreeBucket::customFind( int l, int h, const BSONObj &keyBegin, int keyBeginLen, const vector< const BSONElement * > &keyEnd, const Ordering &order, int direction, DiskLoc &thisLoc, int &keyOfs, pair< DiskLoc, int > &bestParent ) {
+        while( 1 ) {
+            if ( l + 1 == h ) {
+                keyOfs = ( direction > 0 ) ? h : l;
+                DiskLoc next = thisLoc.btree()->k( h ).prevChildBucket;
+                if ( !next.isNull() ) {
+                    bestParent = make_pair( thisLoc, keyOfs );
+                    thisLoc = next;
+                    return true;
+                } else {
+                    return false;
+                }
+            }
+            int m = l + ( h - l ) / 2;
+            int cmp = customBSONCmp( thisLoc.btree()->keyNode( m ).key, keyBegin, keyBeginLen, keyEnd, order );
+            if ( cmp < 0 ) {
+                l = m;
+            } else if ( cmp > 0 ) {
+                h = m;
+            } else {
+                if ( direction < 0 ) {
+                    l = m;
+                } else {
+                    h = m;
+                }
+            }
+        }        
+    }
+    
+    // find smallest/biggest value greater-equal/less-equal than specified
+    // starting thisLoc + keyOfs will be strictly less than/strictly greater than keyBegin/keyBeginLen/keyEnd
+    // All the direction checks below allowed me to refactor the code, but possibly separate forward and reverse implementations would be more efficient
+    void BtreeBucket::advanceTo(const IndexDetails &id, DiskLoc &thisLoc, int &keyOfs, const BSONObj &keyBegin, int keyBeginLen, const vector< const BSONElement * > &keyEnd, const Ordering &order, int direction ) {
+        int l,h;
+        bool dontGoUp;
+        if ( direction > 0 ) {
+            l = keyOfs;
+            h = n - 1;
+            dontGoUp = ( customBSONCmp( keyNode( h ).key, keyBegin, keyBeginLen, keyEnd, order ) >= 0 );
+        } else {
+            l = 0;
+            h = keyOfs;
+            dontGoUp = ( customBSONCmp( keyNode( l ).key, keyBegin, keyBeginLen, keyEnd, order ) <= 0 );
+        }
+        pair< DiskLoc, int > bestParent;
+        if ( dontGoUp ) {
+            // this comparison result assures h > l
+            if ( !customFind( l, h, keyBegin, keyBeginLen, keyEnd, order, direction, thisLoc, keyOfs, bestParent ) ) {
+                return;
+            }
+        } else {
+            // go up parents until rightmost/leftmost node is >=/<= target or at top
+            while( !thisLoc.btree()->parent.isNull() ) {
+                thisLoc = thisLoc.btree()->parent;
+                if ( direction > 0 ) {
+                    if ( customBSONCmp( thisLoc.btree()->keyNode( thisLoc.btree()->n - 1 ).key, keyBegin, keyBeginLen, keyEnd, order ) >= 0 ) {
+                        break;
+                    }
+                } else {
+                    if ( customBSONCmp( thisLoc.btree()->keyNode( 0 ).key, keyBegin, keyBeginLen, keyEnd, order ) <= 0 ) {
+                        break;
+                    }                    
+                }
+            }
+        }
+        // go down until find smallest/biggest >=/<= target
+        while( 1 ) {
+            l = 0;
+            h = thisLoc.btree()->n - 1;
+            // leftmost/rightmost key may possibly be >=/<= search key
+            bool firstCheck;
+            if ( direction > 0 ) {
+                firstCheck = ( customBSONCmp( thisLoc.btree()->keyNode( 0 ).key, keyBegin, keyBeginLen, keyEnd, order ) >= 0 );
+            } else {
+                firstCheck = ( customBSONCmp( thisLoc.btree()->keyNode( h ).key, keyBegin, keyBeginLen, keyEnd, order ) <= 0 );
+            }
+            if ( firstCheck ) {
+                DiskLoc next;
+                if ( direction > 0 ) {
+                    next = thisLoc.btree()->k( 0 ).prevChildBucket;
+                    keyOfs = 0;
+                } else {
+                    next = thisLoc.btree()->nextChild;
+                    keyOfs = h;
+                }
+                if ( !next.isNull() ) {
+                    bestParent = make_pair( thisLoc, keyOfs );
+                    thisLoc = next;
+                    continue;
+                } else {
+                    return;
+                }
+            }
+            bool secondCheck;
+            if ( direction > 0 ) {
+                secondCheck = ( customBSONCmp( thisLoc.btree()->keyNode( h ).key, keyBegin, keyBeginLen, keyEnd, order ) < 0 );
+            } else {
+                secondCheck = ( customBSONCmp( thisLoc.btree()->keyNode( 0 ).key, keyBegin, keyBeginLen, keyEnd, order ) > 0 );
+            }
+            if ( secondCheck ) {
+                DiskLoc next;
+                if ( direction > 0 ) {
+                    next = thisLoc.btree()->nextChild;
+                } else {
+                    next = thisLoc.btree()->k( 0 ).prevChildBucket;
+                }
+                if ( next.isNull() ) {
+                    // if bestParent is null, we've hit the end and thisLoc gets set to DiskLoc()
+                    thisLoc = bestParent.first;
+                    keyOfs = bestParent.second;
+                    return;
+                } else {
+                    thisLoc = next;
+                    continue;
+                }
+            }
+            if ( !customFind( l, h, keyBegin, keyBeginLen, keyEnd, order, direction, thisLoc, keyOfs, bestParent ) ) {
+                return;
+            }
+        }
+    }
+
+    
     /* @thisLoc disk location of *this
     */
     int BtreeBucket::_insert(DiskLoc thisLoc, DiskLoc recordLoc,
@@ -1082,7 +1255,7 @@ namespace mongo {
                 } else {
                     if ( !x->nextChild.isNull() )
                         x->nextChild.btreemod()->parent = upLoc;
-                    x->deallocBucket( xloc );
+                    x->deallocBucket( xloc, idx );
                 }
                 xloc = nextLoc;
             }

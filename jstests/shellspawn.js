@@ -1,3 +1,5 @@
+#!/usr/bin/mongod
+
 baseName = "jstests_shellspawn";
 t = db.getCollection( baseName );
 t.drop();
@@ -14,11 +16,15 @@ else {
     
     spawn = startMongoProgramNoConnect( "mongo", "--port", myPort(), "--eval", "print( 'I am a shell' );" );
     
+    stopMongoProgramByPid( spawn );
+
     spawn = startMongoProgramNoConnect( "mongo", "--port", myPort() );
+
+    stopMongoProgramByPid( spawn );
     
     spawn = startMongoProgramNoConnect( "mongo", "--port", myPort() );
     
     stopMongoProgramByPid( spawn );
-    
+
     // all these shells should be killed
 }

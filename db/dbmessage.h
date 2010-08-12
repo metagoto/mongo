@@ -20,6 +20,7 @@
 #include "jsobj.h"
 #include "namespace.h"
 #include "../util/message.h"
+#include "../client/constants.h"
 
 namespace mongo {
 
@@ -37,24 +38,6 @@ namespace mongo {
     
 #pragma pack(1)
     struct QueryResult : public MsgData {
-        enum ResultFlagType {
-            /* returned, with zero results, when getMore is called but the cursor id 
-               is not valid at the server. */
-            ResultFlag_CursorNotFound = 1,   
-
-            /* { $err : ... } is being returned */
-            ResultFlag_ErrSet = 2,           
-
-            /* Have to update config from the server, usually $err is also set */
-            ResultFlag_ShardConfigStale = 4,  
-
-            /* for backward compatability: this let's us know the server supports 
-               the QueryOption_AwaitData option. if it doesn't, a repl slave client should sleep 
-               a little between getMore's.
-            */
-            ResultFlag_AwaitCapable = 8
-        };
-
         long long cursorId;
         int startingFrom;
         int nReturned;
@@ -75,19 +58,23 @@ namespace mongo {
 
     /* For the database/server protocol, these objects and functions encapsulate
        the various messages transmitted over the connection.
-    */
 
+       See http://www.mongodb.org/display/DOCS/Mongo+Wire+Protocol
+    */
     class DbMessage {
     public:
-        DbMessage(const Message& _m) : m(_m) {
+        DbMessage(const Message& _m) : m(_m)
+        {
             // for received messages, Message has only one buffer
             theEnd = _m.singleData()->_data + _m.header()->dataLen();
-            int *r = (int *) _m.singleData()->_data;
-            reserved = *r;
-            r++;
-            data = (const char *) r;
+            char *r = _m.singleData()->_data;
+            reserved = (int *) r;
+            data = r + 4;
             nextjsobj = data;
         }
+
+        /** the 32 bit field before the ns */
+        int& reservedField() { return *reserved; }
 
         const char * getns() const {
             return data;
@@ -109,13 +96,12 @@ namespace mongo {
             return getInt( 1 );
         }
 
-        void resetPull(){
-            nextjsobj = data;
-        }
-        int pullInt() {
+        void resetPull(){ nextjsobj = data; }
+        int pullInt() const { return pullInt(); }
+        int& pullInt() {
             if ( nextjsobj == data )
                 nextjsobj += strlen(data) + 1; // skip namespace
-            int i = *((int *)nextjsobj);
+            int& i = *((int *)nextjsobj);
             nextjsobj += 4;
             return i;
         }
@@ -164,9 +150,7 @@ namespace mongo {
             return js;
         }
 
-        const Message& msg() const {
-            return m;
-        }
+        const Message& msg() const { return m; }
 
         void markSet(){
             mark = nextjsobj;
@@ -178,7 +162,7 @@ namespace mongo {
 
     private:
         const Message& m;
-        int reserved;
+        int* reserved;
         const char *data;
         const char *nextjsobj;
         const char *theEnd;
@@ -224,7 +208,7 @@ namespace mongo {
                             ) {
         BufBuilder b(32768);
         b.skip(sizeof(QueryResult));
-        b.append(data, size);
+        b.appendBuf(data, size);
         QueryResult *qr = (QueryResult *) b.buf();
         qr->_resultFlags() = queryResultFlags;
         qr->len = b.len();
@@ -240,6 +224,7 @@ namespace mongo {
 } // namespace mongo
 
 //#include "bsonobj.h"
+
 #include "instance.h"
 
 namespace mongo {
@@ -258,7 +243,7 @@ namespace mongo {
     inline void replyToQuery(int queryResultFlags, Message &m, DbResponse &dbresponse, BSONObj obj) {
         BufBuilder b;
         b.skip(sizeof(QueryResult));
-        b.append((void*) obj.objdata(), obj.objsize());
+        b.appendBuf((void*) obj.objdata(), obj.objsize());
         QueryResult* msgdata = (QueryResult *) b.buf();
         b.decouple();
         QueryResult *qr = msgdata;
@@ -273,5 +258,7 @@ namespace mongo {
         dbresponse.response = resp;
         dbresponse.responseTo = m.header()->id;
     }
+
+    string debugString( Message& m );
 
 } // namespace mongo

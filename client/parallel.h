@@ -16,13 +16,12 @@
  */
 
 /**
-   tools for wokring in parallel/sharded/clustered environment
+   tools for working in parallel/sharded/clustered environment
  */
 
 #include "../pch.h"
 #include "dbclient.h"
 #include "redef_macros.h"
-
 #include "../db/dbmessage.h"
 #include "../db/matcher.h"
 
@@ -50,7 +49,7 @@ namespace mongo {
 
         string toString() const {
             StringBuilder ss;
-            ss << "server:" << _server << " _extra:" << _extra << " _orderObject:" << _orderObject;
+            ss << "server:" << _server << " _extra:" << _extra.toString() << " _orderObject:" << _orderObject.toString();
             return ss.str();
         }
 
@@ -63,8 +62,6 @@ namespace mongo {
         BSONObj _orderObject;
     };
 
-
-
     /**
      * this is a cursor that works over a set of servers
      * can be used in serial/paralellel as controlled by sub classes
@@ -74,7 +71,10 @@ namespace mongo {
         ClusteredCursor( QueryMessage& q );
         ClusteredCursor( const string& ns , const BSONObj& q , int options=0 , const BSONObj& fields=BSONObj() );
         virtual ~ClusteredCursor();
-
+        
+        /** call before using */
+        void init();
+        
         virtual bool more() = 0;
         virtual BSONObj next() = 0;
         
@@ -85,7 +85,10 @@ namespace mongo {
         virtual BSONObj explain();
 
     protected:
-        auto_ptr<DBClientCursor> query( const string& server , int num = 0 , BSONObj extraFilter = BSONObj() );
+        
+        virtual void _init() = 0;
+
+        auto_ptr<DBClientCursor> query( const string& server , int num = 0 , BSONObj extraFilter = BSONObj() , int skipLeft = 0 );
         BSONObj explain( const string& server , BSONObj extraFilter = BSONObj() );
         
         static BSONObj _concatFilter( const BSONObj& filter , const BSONObj& extraFilter );
@@ -96,6 +99,9 @@ namespace mongo {
         BSONObj _query;
         int _options;
         BSONObj _fields;
+        int _batchSize;
+
+        bool _didInit;
 
         bool _done;
     };
@@ -189,8 +195,10 @@ namespace mongo {
         virtual BSONObj next();
         virtual string type() const { return "SerialServer"; }
 
-    private:
+    protected:
         virtual void _explain( map< string,list<BSONObj> >& out );
+
+        void _init(){}
 
         vector<ServerAndQuery> _servers;
         unsigned _serverIndex;
@@ -214,7 +222,8 @@ namespace mongo {
         virtual bool more();
         virtual BSONObj next();
         virtual string type() const { return "ParallelSort"; }
-    private:
+    protected:
+        void _finishCons();
         void _init();
 
         virtual void _explain( map< string,list<BSONObj> >& out );

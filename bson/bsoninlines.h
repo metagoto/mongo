@@ -19,6 +19,8 @@
 
 #include <map>
 #include "util/atomic_int.h"
+#include "util/misc.h"
+#include "../util/hex.h"
 
 namespace mongo {
 
@@ -74,11 +76,11 @@ namespace mongo {
         return false;
     }
 
-    inline BSONElement BSONObj::getField(const char *name) const {
+    inline BSONElement BSONObj::getField(const StringData& name) const {
         BSONObjIterator i(*this);
         while ( i.more() ) {
             BSONElement e = i.next();
-            if ( strcmp(e.fieldName(), name) == 0 )
+            if ( strcmp(e.fieldName(), name.data()) == 0 )
                 return e;
         }
         return BSONElement();
@@ -210,10 +212,18 @@ namespace mongo {
         return s;
     }
 
-    inline string BSONObj::toString( bool isArray ) const {
+    inline string BSONObj::toString( bool isArray, bool full ) const {
         if ( isEmpty() ) return "{}";
+        StringBuilder s;
+        toString(s, isArray, full);
+        return s.str();
+    }
+    inline void BSONObj::toString(StringBuilder& s,  bool isArray, bool full ) const {
+        if ( isEmpty() ){
+            s << "{}";
+            return;
+        }
 
-        stringstream s;
         s << ( isArray ? "[ " : "{ " );
         BSONObjIterator i(*this);
         bool first = true;
@@ -235,16 +245,17 @@ namespace mongo {
                 first = false;
             else
                 s << ", ";
-            s << e.toString( !isArray );
+            e.toString(s, !isArray, full );
         }
         s << ( isArray ? " ]" : " }" );
-        return s.str();
     }
 
     extern unsigned getRandomNumber();
 
     inline void BSONElement::validate() const {
-        switch( type() ) {
+        const BSONType t = type();
+        
+        switch( t ) {
         case DBRef:
         case Code:
         case Symbol:
@@ -253,8 +264,8 @@ namespace mongo {
             if ( x > 0 && valuestr()[x-1] == 0 )
                 return;
             StringBuilder buf;
-            buf <<  "Invalid dbref/code/string/symbol size: " << x << " strnlen:" << strnlen( valuestr() , x );
-            massert( 10321 , buf.str() , 0 );
+            buf <<  "Invalid dbref/code/string/symbol size: " << x << " strnlen:" << mongo::strnlen( valuestr() , x );
+            msgasserted( 10321 , buf.str() );
             break;
         }
         case CodeWScope: {
@@ -264,7 +275,7 @@ namespace mongo {
             massert( 10323 ,  "Invalid CodeWScope string size", totalSize >= strSizeWNull + 4 + 4 );
             massert( 10324 ,  "Invalid CodeWScope string size",
                      strSizeWNull > 0 &&
-                     strSizeWNull - 1 == strnlen( codeWScopeCode(), strSizeWNull ) );
+                     (strSizeWNull - 1) == mongo::strnlen( codeWScopeCode(), strSizeWNull ) );
             massert( 10325 ,  "Invalid CodeWScope size", totalSize >= strSizeWNull + 4 + 4 + 4 );
             int objSize = *( int * )( value() + 4 + 4 + strSizeWNull );
             massert( 10326 ,  "Invalid CodeWScope object size", totalSize == 4 + 4 + strSizeWNull + objSize );
@@ -333,16 +344,16 @@ namespace mongo {
         case RegEx:
         {
             const char *p = value();
-            size_t len1 = ( maxLen == -1 ) ? strlen( p ) : strnlen( p, remain );
+            size_t len1 = ( maxLen == -1 ) ? strlen( p ) : mongo::strnlen( p, remain );
             //massert( 10318 ,  "Invalid regex string", len1 != -1 ); // ERH - 4/28/10 - don't think this does anything
             p = p + len1 + 1;
-            size_t len2 = ( maxLen == -1 ) ? strlen( p ) : strnlen( p, remain - len1 - 1 );
+            size_t len2 = ( maxLen == -1 ) ? strlen( p ) : mongo::strnlen( p, remain - len1 - 1 );
             //massert( 10319 ,  "Invalid regex options string", len2 != -1 ); // ERH - 4/28/10 - don't think this does anything
             x = (int) (len1 + 1 + len2 + 1);
         }
         break;
         default: {
-            stringstream ss;
+            StringBuilder ss;
             ss << "BSONElement: bad type " << (int) type();
             string msg = ss.str();
             massert( 10320 , msg.c_str(),false);
@@ -353,13 +364,18 @@ namespace mongo {
         return totalSize;
     }
 
-    inline string BSONElement::toString( bool includeFieldName ) const {
-        stringstream s;
+    inline string BSONElement::toString( bool includeFieldName, bool full ) const {
+        StringBuilder s;
+        toString(s, includeFieldName, full);
+        return s.str();
+    }
+    inline void BSONElement::toString(StringBuilder& s, bool includeFieldName, bool full ) const {
         if ( includeFieldName && type() != EOO )
             s << fieldName() << ": ";
         switch ( type() ) {
         case EOO:
-            return "EOO";
+            s << "EOO";
+            break;
         case mongo::Date:
             s << "new Date(" << date() << ')';
             break;
@@ -371,16 +387,7 @@ namespace mongo {
             }
             break;
         case NumberDouble:
-            {
-                stringstream tmp;
-                tmp.precision( 16 );
-                tmp << number();
-                string n = tmp.str();
-                s << n;
-                // indicate this is a double:
-                if( strchr(n.c_str(), '.') == 0 && strchr(n.c_str(), 'E') == 0 && strchr(n.c_str(), 'N') == 0 )
-                    s << ".0";
-            }
+            s.appendDoubleNice( number() );
             break;
         case NumberLong:
             s << _numberLong();
@@ -392,10 +399,10 @@ namespace mongo {
             s << ( boolean() ? "true" : "false" );
             break;
         case Object:
-            s << embeddedObject().toString();
+            embeddedObject().toString(s, false, full);
             break;
         case mongo::Array:
-            s << embeddedObject().toString( true );
+            embeddedObject().toString(s, true, full);
             break;
         case Undefined:
             s << "undefined";
@@ -411,21 +418,25 @@ namespace mongo {
             break;
         case CodeWScope:
             s << "CodeWScope( "
-                << codeWScopeCode() << ", " << codeWScopeObject().toString() << ")";
+                << codeWScopeCode() << ", " << codeWScopeObject().toString(false, full) << ")";
             break;
         case Code:
-            if ( valuestrsize() > 80 )
-                s << string(valuestr()).substr(0, 70) << "...";
-            else {
-                s << valuestr();
+            if ( !full &&  valuestrsize() > 80 ) {
+                s.write(valuestr(), 70);
+                s << "...";
+            } else {
+                s.write(valuestr(), valuestrsize()-1);
             }
             break;
         case Symbol:
         case mongo::String:
-            if ( valuestrsize() > 80 )
-                s << '"' << string(valuestr()).substr(0, 70) << "...\"";
-            else {
-                s << '"' << valuestr() << '"';
+            s << '"';
+            if ( !full &&  valuestrsize() > 80 ) {
+                s.write(valuestr(), 70);
+                s << "...\"";
+            } else {
+                s.write(valuestr(), valuestrsize()-1);
+                s << '"';
             }
             break;
         case DBRef:
@@ -441,6 +452,11 @@ namespace mongo {
             break;
         case BinData:
             s << "BinData";
+            if (full){
+                int len;
+                const char* data = binDataClean(len);
+                s << '(' << binDataType() << ", " << toHex(data, len) << ')';
+            }
             break;
         case Timestamp:
             s << "Timestamp " << timestampTime() << "|" << timestampInc();
@@ -449,7 +465,6 @@ namespace mongo {
             s << "?type=" << type();
             break;
         }
-        return s.str();
     }
 
     /* return has eoo() true if no match
@@ -563,4 +578,11 @@ namespace mongo {
     }
 
     inline void BSONElement::Val(BSONObj& v) const { v = Obj(); }
+
+    template<typename T>
+    inline BSONFieldValue<BSONObj> BSONField<T>::query( const char * q , const T& t ) const {
+        BSONObjBuilder b;
+        b.append( q , t );
+        return BSONFieldValue<BSONObj>( _name , b.obj() );
+    }
 }

@@ -27,6 +27,8 @@
 #include "../../util/ramlog.h"
 #include "../helpers/dblogger.h"
 #include "connections.h"
+#include "../../util/unittest.h"
+#include "../dbhelpers.h"
 
 namespace mongo {
     /* decls for connections.h */
@@ -62,77 +64,150 @@ namespace mongo {
         return s.str();
     }
 
-    void Member::summarizeAsHtml(stringstream& s) const { 
+    void Member::summarizeMember(stringstream& s) const { 
         s << tr();
         {
             stringstream u;
             u << "http://" << h().host() << ':' << (h().port() + 1000) << "/_replSet";
             s << td( a(u.str(), "", fullName()) );
         }
+        s << td( id() );
         double h = hbinfo().health;
         bool ok = h > 0;
-        s << td(h);
+        s << td(red(str::stream() << h,h == 0));
         s << td(ago(hbinfo().upSince));
+        bool never = false;
         {
             string h;
             time_t hb = hbinfo().lastHeartbeat;
-            if( hb == 0 ) h = "never"; 
+            if( hb == 0 ) {
+                h = "never";
+                never = true;
+            }
             else h = ago(hb) + " ago";
             s << td(h);
         }
         s << td(config().votes);
-        s << td(ReplSet::stateAsStr(state()));
-        s << td( red(hbinfo().lastHeartbeatMsg,!ok) );
+        { 
+            string stateText = ReplSet::stateAsStr(state());
+            if( ok || stateText.empty() ) 
+                s << td(stateText); // text blank if we've never connected
+            else
+                s << td( grey(str::stream() << "(was " << ReplSet::stateAsStr(state()) << ')', true) );
+        }
+        s << td( grey(hbinfo().lastHeartbeatMsg,!ok) );
         stringstream q;
         q << "/_replSetOplog?" << id();
-        s << td( a(q.str(), "", "finish") );
+        s << td( a(q.str(), "", never ? "?" : hbinfo().opTime.toString()) );
+        if( hbinfo().skew > INT_MIN ) {
+            s << td( grey(str::stream() << hbinfo().skew,!ok) );
+        } else
+            s << td("");
         s << _tr();
     }
-
+    
     string ReplSetImpl::stateAsHtml(MemberState s) { 
-        if( s == STARTUP ) return a("", "serving still starting up, or still trying to initiate the set", "STARTUP");
-        if( s == PRIMARY ) return a("", "this server thinks it is primary", "PRIMARY");
-        if( s == SECONDARY ) return a("", "this server thinks it is a secondary (slave mode)", "SECONDARY");
-        if( s == RECOVERING ) return a("", "recovering/resyncing; after recovery usually auto-transitions to secondary", "RECOVERING");
-        if( s == FATAL ) return a("", "something bad has occurred and server is not completely offline with regard to the replica set.  fatal error.", "FATAL");
-        if( s == STARTUP2 ) return a("", "loaded config, still determining who is primary", "STARTUP2");
+        if( s.s == MemberState::RS_STARTUP ) return a("", "serving still starting up, or still trying to initiate the set", "STARTUP");
+        if( s.s == MemberState::RS_PRIMARY ) return a("", "this server thinks it is primary", "PRIMARY");
+        if( s.s == MemberState::RS_SECONDARY ) return a("", "this server thinks it is a secondary (slave mode)", "SECONDARY");
+        if( s.s == MemberState::RS_RECOVERING ) return a("", "recovering/resyncing; after recovery usually auto-transitions to secondary", "RECOVERING");
+        if( s.s == MemberState::RS_FATAL ) return a("", "something bad has occurred and server is not completely offline with regard to the replica set.  fatal error.", "RS_FATAL");
+        if( s.s == MemberState::RS_STARTUP2 ) return a("", "loaded config, still determining who is primary", "RS_STARTUP2");
+        if( s.s == MemberState::RS_ARBITER ) return a("", "this server is an arbiter only", "ARBITER");
+        if( s.s == MemberState::RS_DOWN ) return a("", "member is down, slow, or unreachable", "DOWN");
         return "";
     }
 
     string ReplSetImpl::stateAsStr(MemberState s) { 
-        if( s == STARTUP ) return "STARTUP";
-        if( s == PRIMARY ) return "PRIMARY";
-        if( s == SECONDARY ) return "SECONDARY";
-        if( s == RECOVERING ) return "RECOVERING";
-        if( s == FATAL ) return "FATAL";
-        if( s == STARTUP2 ) return "STARTUP2";
+        if( s.s == MemberState::RS_STARTUP ) return "STARTUP";
+        if( s.s == MemberState::RS_PRIMARY ) return "PRIMARY";
+        if( s.s == MemberState::RS_SECONDARY ) return "SECONDARY";
+        if( s.s == MemberState::RS_RECOVERING ) return "RECOVERING";
+        if( s.s == MemberState::RS_FATAL ) return "FATAL";
+        if( s.s == MemberState::RS_STARTUP2 ) return "STARTUP2";
+        if( s.s == MemberState::RS_ARBITER ) return "ARBITER";
+        if( s.s == MemberState::RS_DOWN ) return "DOWN";
         return "";
     }
 
     extern time_t started;
 
+    // oplogdiags in web ui
     static void say(stringstream&ss, const bo& op) {
-        ss << op.toString() << '\n';
+        ss << "<tr>";
+
+        set<string> skip;
+        be e = op["ts"];
+        if( e.type() == Date || e.type() == Timestamp ) { 
+            OpTime ot = e._opTime();
+	    ss << td( time_t_to_String_short( ot.getSecs() ) );
+            ss << td( ot.toString() );
+            skip.insert("ts");
+        }
+        else ss << td("?") << td("?");
+
+        e = op["h"];
+        if( e.type() == NumberLong ) {
+            ss << "<td>" << hex << e.Long() << "</td>\n";
+            skip.insert("h");
+        } else
+            ss << td("?");
+
+        ss << td(op["op"].valuestrsafe());
+        ss << td(op["ns"].valuestrsafe());
+        skip.insert("op");
+        skip.insert("ns");
+
+        ss << "<td>";
+        for( bo::iterator i(op); i.more(); ) { 
+            be e = i.next();
+            if( skip.count(e.fieldName()) ) continue;
+            ss << e.toString() << ' ';
+        }
+        ss << "</td>";
+
+        ss << "</tr>";
+        ss << '\n';
     }
 
     void ReplSetImpl::_getOplogDiagsAsHtml(unsigned server_id, stringstream& ss) const { 
-        Member *m = findById(server_id);
+        const Member *m = findById(server_id);
         if( m == 0 ) { 
             ss << "Error : can't find a member with id: " << server_id << '\n';
             return;
         }
 
-        const bo fields = BSON( "o" << -1 << "o2" << -1 );
+        ss << p("Server : " + m->fullName() + "<br>ns : " + rsoplog );
+
+        //const bo fields = BSON( "o" << false << "o2" << false );
+        const bo fields;
 
         ScopedConn conn(m->fullName());        
 
         auto_ptr<DBClientCursor> c = conn->query(rsoplog, Query().sort("$natural",1), 20, 0, &fields);
-        ss << "<pre>\n";
+        if( c.get() == 0 ) { 
+            ss << "couldn't query " << rsoplog;
+            return;
+        }
+        static const char *h[] = {"ts","optime", "h","op","ns","rest",0};
+
+        ss << "<style type=\"text/css\" media=\"screen\">"
+            "table { font-size:75% }\n"
+//            "th { background-color:#bbb; color:#000 }\n"
+//            "td,th { padding:.25em }\n"
+            "</style>\n";
+        
+        ss << table(h, true);
+        //ss << "<pre>\n";
         int n = 0;
-        long long lastOrd = 0;
+        OpTime otFirst;
+        OpTime otLast;
+        OpTime otEnd;
         while( c->more() ) {
             bo o = c->next();
-            lastOrd = o["t"].Long();
+            otLast = o["ts"]._opTime();
+            if( otFirst.isNull() ) 
+                otFirst = otLast;
             say(ss, o);
             n++;            
         }
@@ -141,20 +216,45 @@ namespace mongo {
         }
         else { 
             auto_ptr<DBClientCursor> c = conn->query(rsoplog, Query().sort("$natural",-1), 20, 0, &fields);
+            if( c.get() == 0 ) { 
+                ss << "couldn't query [2] " << rsoplog;
+                return;
+            }
             string x;
-            while( c->more() ) {
+            bo o = c->next();
+            otEnd = o["ts"]._opTime();
+            while( 1 ) {
                 stringstream z;
-                bo o = c->next();
-                if( o["t"].Long() == lastOrd ) 
+                if( o["ts"]._opTime() == otLast ) 
                     break;
                 say(z, o);
                 x = z.str() + x;
+                if( !c->more() )
+                    break;
+                o = c->next();
             }
             if( !x.empty() ) {
-                ss << "\n...\n\n" << x;
+                ss << "<tr><td>...</td><td>...</td><td>...</td><td>...</td><td>...</td></tr>\n" << x;
+                //ss << "\n...\n\n" << x;
             }
         }
-        ss << "</pre>\n";
+        ss << _table();
+        ss << p(time_t_to_String_short(time(0)) + " current time");
+
+        //ss << "</pre>\n";
+
+        if( !otEnd.isNull() ) {
+            ss << "<p>Log length in time: ";
+            unsigned d = otEnd.getSecs() - otFirst.getSecs();
+            double h = d / 3600.0;
+            ss.precision(3);
+            if( h < 72 )
+                ss << h << " hours";
+            else 
+                ss << h / 24.0 << " days";
+            ss << "</p>\n";
+        }
+
     }
 
     void ReplSetImpl::_summarizeAsHtml(stringstream& s) const { 
@@ -163,11 +263,14 @@ namespace mongo {
         s << tr("Majority up:", elect.aMajoritySeemsToBeUp()?"yes":"no" );
         s << _table();
 
-        const char *h[] = {"Member", "Up", 
-            "<a title=\"length of time we have been continuously connected to the other member with no reconnects\">cctime</a>", 
+        const char *h[] = {"Member", 
+            "<a title=\"member id in the replset config\">id</a>", 
+            "Up", 
+            "<a title=\"length of time we have been continuously connected to the other member with no reconnects (for self, shows uptime)\">cctime</a>", 
             "<a title=\"when this server last received a heartbeat response - includes error code responses\">Last heartbeat</a>", 
             "Votes", "State", "Status", 
-            "<a title=\"how up to date this server is; write operations are sequentially numbered\">opord</a>", 
+            "<a title=\"how up to date this server is.  this value polled every few seconds so actually lag is typically much lower than value shown here.\">optime</a>", 
+            "<a title=\"Clock skew in seconds relative to this server. Informational; server clock variances will make the diagnostics hard to read, but otherwise are benign..\">skew</a>", 
             0};
         s << table(h);
 
@@ -175,26 +278,43 @@ namespace mongo {
            order on all the different web ui's; that is less confusing for the operator. */
         map<int,string> mp;
 
+        string myMinValid;
+        try {
+            readlocktry lk("local.replset.minvalid", 300);
+            if( lk.got() ) {
+                BSONObj mv;
+                if( Helpers::getSingleton("local.replset.minvalid", mv) ) { 
+                    myMinValid = "minvalid:" + mv["ts"]._opTime().toString();
+                }
+            }
+            else myMinValid = ".";
+        }
+        catch(...) { 
+            myMinValid = "exception fetching minvalid";
+        }
+
         {
             stringstream s;
             /* self row */
-            s << tr() << td(_self->fullName()) <<
-                td("1") << 
+            s << tr() << td(_self->fullName() + " (me)") <<
+                td(_self->id()) <<
+  	        td("1") <<  //up
                 td(ago(started)) << 
-                td("(self)") << 
+	        td("") << // last heartbeat
                 td(ToString(_self->config().votes)) << 
-                td(stateAsHtml(_myState));
-            s << td( _self->lhb() );
+                td(stateAsHtml(box.getState()));
+            s << td( _hbmsg );
             stringstream q;
             q << "/_replSetOplog?" << _self->id();
-            s << td( a(q.str(), "", rsOpTime.toString()) );
+            s << td( a(q.str(), myMinValid, theReplSet->lastOpTimeWritten.toString()) );
+            s << td(""); // skew
             s << _tr();
 			mp[_self->hbinfo().id()] = s.str();
         }
         Member *m = head();
         while( m ) {
 			stringstream s;
-            m->summarizeAsHtml(s);
+            m->summarizeMember(s);
 			mp[m->hbinfo().id()] = s.str();
             m = m->next();
         }
@@ -204,80 +324,12 @@ namespace mongo {
         s << _table();
     }
 
-    static int repeats(const vector<const char *>& v, int i) { 
-        for( int j = i-1; j >= 0 && j+8 > i; j-- ) {
-            if( strcmp(v[i]+20,v[j]+20) == 0 ) {
-                for( int x = 1; ; x++ ) {
-                    if( j+x == i ) return j;
-                    if( i+x>=(int) v.size() ) return -1;
-                    if( strcmp(v[i+x]+20,v[j+x]+20) ) return -1;
-                }
-                return -1;
-            }
-        }
-        return -1;
-    }
-
-    static string clean(const vector<const char *>& v, int i, string line="") { 
-        if( line.empty() ) line = v[i];
-        if( i > 0 && strncmp(v[i], v[i-1], 11) == 0 )
-            return string("           ") + line.substr(11);
-        return v[i];
-    }
-
-    /*static bool isWarning(const char *line) {
-        const char *p = strstr(line, "replSet ");
-        if( p ) { 
-            p += 8;
-            return startsWith(p, "warning") || startsWith(p, "error");
-        }
-        return false;
-    }*/
-    static string color(string line) { 
-        string s = str::after(line, "replSet ");
-        if( str::startsWith(s, "warning") || startsWith(s, "error") )
-            return red(line);
-        if( str::startsWith(s, "info") ) {
-            if( str::endsWith(s, " up\n") )
-                return green(line);
-            if( str::endsWith(s, " down\n") )
-                return yellow(line);
-            return blue(line);
-        }
-
-        return line;
-    }
 
     void fillRsLog(stringstream& s) {
-        bool first = true;
-        s << "<pre>\n";
-        vector<const char *> v = _rsLog.get();
-        for( int i = 0; i < (int)v.size(); i++ ) {
-            assert( strlen(v[i]) > 20 );
-            int r = repeats(v, i);
-            if( r < 0 ) {
-                s << color( clean(v,i) );
-            } else {
-                stringstream x;
-                x << string(v[i], 0, 20);
-                int nr = (i-r);
-                int last = i+nr-1;
-                for( ; r < i ; r++ ) x << '.';
-                if( 1 ) { 
-                    stringstream r; 
-                    if( nr == 1 ) r << "repeat last line";
-                    else r << "repeats last " << nr << " lines; ends " << string(v[last]+4,0,15);
-                    first = false; s << a("", r.str(), clean(v,i,x.str()));
-                }
-                else s << x.str();
-                s << '\n';
-                i = last;
-            }
-        }
-        s << "</pre>\n";
+        _rsLog.toHTML( s );
     }
 
-    Member* ReplSetImpl::findById(unsigned id) const { 
+    const Member* ReplSetImpl::findById(unsigned id) const { 
         if( id == _self->id() ) return _self;
         for( Member *m = head(); m; m = m->next() )
             if( m->id() == id ) 
@@ -286,31 +338,52 @@ namespace mongo {
     }
 
     void ReplSetImpl::_summarizeStatus(BSONObjBuilder& b) const { 
-        Member *m =_members.head();
         vector<BSONObj> v;
 
         // add self
         {
             HostAndPort h(getHostName(), cmdLine.port);
-            v.push_back( 
-                BSON( "name" << h.toString() << "self" << true << 
-                      "errmsg" << _self->lhb() ) );
+
+            BSONObjBuilder bb;
+            bb.append("_id", (int) _self->id());
+            bb.append("name", h.toString());
+            bb.append("health", 1.0);
+            bb.append("state", (int) box.getState().s);
+            string s = _self->lhb();
+            if( !s.empty() )
+                bb.append("errmsg", s);
+            bb.append("self", true);
+            v.push_back(bb.obj());
         }
 
+        Member *m =_members.head();
         while( m ) {
             BSONObjBuilder bb;
+            bb.append("_id", (int) m->id());
             bb.append("name", m->fullName());
             bb.append("health", m->hbinfo().health);
+            bb.append("state", (int) m->state().s);
             bb.append("uptime", (unsigned) (m->hbinfo().upSince ? (time(0)-m->hbinfo().upSince) : 0));
-            bb.appendDate("lastHeartbeat", m->hbinfo().lastHeartbeat);
-            bb.append("errmsg", m->lhb());
+            bb.appendTimeT("lastHeartbeat", m->hbinfo().lastHeartbeat);
+            string s = m->lhb();
+            if( !s.empty() )
+                bb.append("errmsg", s);
             v.push_back(bb.obj());
             m = m->next();
         }
+        sort(v.begin(), v.end());
         b.append("set", name());
-        b.appendDate("date", time(0));
-        b.append("myState", _myState);
+        b.appendTimeT("date", time(0));
+        b.append("myState", box.getState().s);
         b.append("members", v);
     }
+
+    static struct Test : public UnitTest { 
+        void run() { 
+            HealthOptions a,b;
+            assert( a == b );
+            assert( a.isDefault() );
+        }
+    } test;
 
 }

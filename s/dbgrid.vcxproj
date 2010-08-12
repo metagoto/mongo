@@ -184,8 +184,14 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\client\dbclientcursor.cpp" />
+    <ClCompile Include="..\client\distlock.cpp" />
+    <ClCompile Include="..\db\dbwebserver.cpp" />
     <ClCompile Include="..\util\concurrency\thread_pool.cpp" />
     <ClCompile Include="..\util\concurrency\vars.cpp" />
+    <ClCompile Include="..\util\log.cpp" />
+    <ClCompile Include="..\util\miniwebserver.cpp" />
+    <ClCompile Include="..\util\processinfo.cpp" />
+    <ClCompile Include="..\util\stringutils.cpp" />
     <ClCompile Include="..\util\text.cpp" />
     <ClCompile Include="..\util\version.cpp" />
     <ClCompile Include="balance.cpp" />
@@ -203,6 +209,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\db\queryutil.cpp" />
+    <ClCompile Include="grid.cpp" />
     <ClCompile Include="request.cpp" />
     <ClCompile Include="shardconnection.cpp" />
     <ClCompile Include="s_only.cpp" />
@@ -507,8 +514,10 @@
     <ClCompile Include="..\util\util.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\util\processinfo.h" />
     <ClInclude Include="..\util\version.h" />
     <ClInclude Include="balancer_policy.h" />
+    <ClInclude Include="grid.h" />
     <ClInclude Include="gridconfig.h" />
     <ClInclude Include="griddatabase.h" />
     <ClInclude Include="shard.h" />

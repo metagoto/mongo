@@ -25,6 +25,7 @@
 
 namespace mongo { 
 
+    /* lifespan is different than CurOp because of recursives with DBDirectClient */
     class OpDebug {
     public:
         StringBuilder str;
@@ -80,11 +81,12 @@ namespace mongo {
         }
 
     public:
-
-        bool haveQuery() const { return *((int *) _queryBuf) != 0; }
+        
+        int querySize() const { return *((int *) _queryBuf); }
+        bool haveQuery() const { return querySize() != 0; }
 
         BSONObj query() {
-            if( *((int *) _queryBuf) == 1 ) { 
+            if( querySize() == 1 ) { 
                 return _tooBig;
             }
             BSONObj o(_queryBuf);
@@ -240,7 +242,7 @@ namespace mongo {
             return infoNoauth();
         }
         
-        BSONObj infoNoauth();
+        BSONObj infoNoauth( int attempt = 0 );
 
         string getRemoteString( bool includePort = true ){
             return _remote.toString(includePort);
@@ -264,7 +266,7 @@ namespace mongo {
             return _progressMeter;
         }
         
-        string getMessage() const { return _message; }
+        string getMessage() const { return _message.toString(); }
         ProgressMeter& getProgressMeter() { return _progressMeter; }
 
         friend class Client;

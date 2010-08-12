@@ -34,6 +34,8 @@
 #include "commands.h"
 #include "queryoptimizer.h"
 #include "lasterror.h"
+#include "../s/d_logic.h"
+#include "repl_block.h"
 
 namespace mongo {
 
@@ -60,6 +62,23 @@ namespace mongo {
         virtual void _init() {
             c_ = qp().newCursor();
         }
+        virtual bool prepareToYield() {
+            if ( ! _cc ) {
+                _cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , c_ , qp().ns() ) );
+            }
+            return _cc->prepareToYield( _yieldData );
+        }        
+        virtual void recoverFromYield() {
+            if ( !ClientCursor::recoverFromYield( _yieldData ) ) {
+                _cc.reset();
+                c_.reset();
+                massert( 13340, "cursor dropped during delete", false );
+            }
+        }
+        virtual long long nscanned() {
+            assert( c_.get() );
+            return c_->nscanned();
+        }
         virtual void next() {
             if ( !c_->ok() ) {
                 setComplete();
@@ -74,7 +93,7 @@ namespace mongo {
             }
 
             c_->advance();
-            ++_nscanned;
+            _nscanned = c_->nscanned();
             if ( count_ > bestCount_ )
                 bestCount_ = count_;
             
@@ -97,6 +116,8 @@ namespace mongo {
         int &bestCount_;
         long long _nscanned;
         shared_ptr<Cursor> c_;
+        ClientCursor::CleanupPointer _cc;
+        ClientCursor::YieldData _yieldData;
     };
     
     /* ns:      namespace, e.g. <database>.<collection>
@@ -104,7 +125,7 @@ namespace mongo {
        justOne: stop after 1 match
        god:     allow access to system namespaces, and don't yield
     */
-    long long deleteObjects(const char *ns, BSONObj pattern, bool justOneOrig, bool logop, bool god) {
+    long long deleteObjects(const char *ns, BSONObj pattern, bool justOneOrig, bool logop, bool god, RemoveSaver * rs ) {
         if( !god ) {
             if ( strstr(ns, ".system.") ) {
                 /* note a delete from system.indexes would corrupt the db 
@@ -128,7 +149,7 @@ namespace mongo {
 
         int best = 0;
         shared_ptr< MultiCursor::CursorOp > opPtr( new DeleteOp( justOneOrig, best ) );
-        shared_ptr< MultiCursor > creal( new MultiCursor( ns, pattern, BSONObj(), opPtr ) );
+        shared_ptr< MultiCursor > creal( new MultiCursor( ns, pattern, BSONObj(), opPtr, true ) );
         
         if( !creal->ok() )
             return nDeleted;
@@ -139,14 +160,16 @@ namespace mongo {
             
         CursorId id = cc->cursorid;
             
-        unsigned long long nScanned = 0;
         bool justOne = justOneOrig;
+        bool canYield = !god && !creal->matcher()->docMatcher().atomic();
         do {
-            if ( ++nScanned % 128 == 0 && !god && !creal->matcher()->docMatcher().atomic() ) {
-                if ( ! cc->yield() ){
-                    cc.release(); // has already been deleted elsewhere
-                    break;
-                }
+            if ( canYield && ! cc->yieldSometimes() ){
+                cc.release(); // has already been deleted elsewhere
+                // TODO should we assert or something?
+                break;
+            }
+            if ( !cc->c->ok() ) {
+                break; // if we yielded, could have hit the end
             }
                 
             // this way we can avoid calling updateLocation() every time (expensive)
@@ -187,6 +210,9 @@ namespace mongo {
                 }
             }
 
+            if ( rs )
+                rs->goingToDelete( rloc.obj() /*cc->c->current()*/ );
+
             theDataFileMgr.deleteRecord(ns, rloc.rec(), rloc);
             nDeleted++;
             if ( justOne ) {
@@ -212,14 +238,13 @@ namespace mongo {
             return _runCommands(ns, jsobj, b, anObjBuilder, fromRepl, queryOptions);
         }
         catch ( AssertionException& e ) {
-            if ( !e.msg.empty() )
-                anObjBuilder.append("assertion", e.msg);
+            e.getInfo().append( anObjBuilder , "assertion" , "assertionCode" );
         }
         curop.debug().str << " assertion ";
         anObjBuilder.append("errmsg", "db assertion failure");
         anObjBuilder.append("ok", 0.0);
         BSONObj x = anObjBuilder.done();
-        b.append((void*) x.objdata(), x.objsize());
+        b.appendBuf((void*) x.objdata(), x.objsize());
         return true;
     }
 
@@ -256,8 +281,9 @@ namespace mongo {
         return qr;
     }
 
-    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& curop, int pass ) {
-
+    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& curop, int pass, bool& exhaust ) {
+//        log() << "TEMP GETMORE " << ns << ' ' << cursorid << ' ' << pass << endl;
+        exhaust = false;
         ClientCursor::Pointer p(cursorid);
         ClientCursor *cc = p._c;
         
@@ -271,14 +297,14 @@ namespace mongo {
 
         b.skip(sizeof(QueryResult));
         
-        int resultFlags = QueryResult::ResultFlag_AwaitCapable;
+        int resultFlags = ResultFlag_AwaitCapable;
         int start = 0;
         int n = 0;
 
         if ( !cc ) {
             log() << "getMore: cursorid not found " << ns << " " << cursorid << endl;
             cursorid = 0;
-            resultFlags = QueryResult::ResultFlag_CursorNotFound;
+            resultFlags = ResultFlag_CursorNotFound;
         }
         else {
             if ( pass == 0 )
@@ -288,7 +314,7 @@ namespace mongo {
 
             if( pass == 0 ) {
                 StringBuilder& ss = curop.debug().str;
-                ss << " getMore: " << cc->query << " ";
+                ss << " getMore: " << cc->query.toString() << " ";
             }
             
             start = cc->pos;
@@ -298,6 +324,7 @@ namespace mongo {
 
             while ( 1 ) {
                 if ( !c->ok() ) {
+//                    log() << "TEMP Tailable : " << c->tailable() << ' ' << (queryOptions & QueryOption_AwaitData) << endl;
                     if ( c->tailable() ) {
                         /* when a tailable cursor hits "EOF", ok() goes false, and current() is null.  however 
                            advance() can still be retries as a reactivation attempt.  when there is new data, it will 
@@ -322,8 +349,13 @@ namespace mongo {
                 // in some cases (clone collection) there won't be a matcher
                 if ( c->matcher() && !c->matcher()->matches(c->currKey(), c->currLoc() ) ) {
                 }
+                /*
+                  TODO
+                else if ( _chunkMatcher && ! _chunkMatcher->belongsToMe( c->currKey(), c->currLoc() ) ){
+                    cout << "TEMP skipping un-owned chunk: " << c->current() << endl;
+                }
+                */
                 else {
-                    //out() << "matches " << c->currLoc().toString() << '\n';
                     if( c->getsetdup(c->currLoc()) ) {
                         //out() << "  but it's a dup \n";
                     }
@@ -349,6 +381,7 @@ namespace mongo {
                 cc->updateLocation();
                 cc->mayUpgradeStorage();
                 cc->storeOpForSlave( last );
+                exhaust = cc->_queryOptions & QueryOption_Exhaust;
             }
         }
 
@@ -366,11 +399,12 @@ namespace mongo {
 
     class CountOp : public QueryOp {
     public:
-        CountOp( const BSONObj &spec ) :
-        count_(),
-        skip_( spec["skip"].numberLong() ),
-        limit_( spec["limit"].numberLong() ),
-        bc_() {}
+        CountOp( const string& ns , const BSONObj &spec ) :
+            _ns(ns), count_(),
+            skip_( spec["skip"].numberLong() ),
+            limit_( spec["limit"].numberLong() ),
+            bc_(){
+        }
         
         virtual void _init() {
             c_ = qp().newCursor();
@@ -382,11 +416,33 @@ namespace mongo {
             }
         }
 
+        virtual long long nscanned() {
+            assert( c_.get() );
+            return c_->nscanned();
+        }
+        
+        virtual bool prepareToYield() {
+            if ( ! _cc ) {
+                _cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , c_ , _ns.c_str() ) );
+            }
+            return _cc->prepareToYield( _yieldData );
+        }
+        
+        virtual void recoverFromYield() {
+            if ( !ClientCursor::recoverFromYield( _yieldData ) ) {
+                c_.reset();
+                _cc.reset();
+                massert( 13337, "cursor dropped during count", false );
+                // TODO maybe we want to prevent recording the winning plan as well?
+            }
+        }
+        
         virtual void next() {
             if ( !c_->ok() ) {
                 setComplete();
                 return;
             }
+
             if ( bc_ ) {
                 if ( firstMatch_.isEmpty() ) {
                     firstMatch_ = bc_->currKeyNode().key;
@@ -403,7 +459,8 @@ namespace mongo {
                     }
                     _gotOne();
                 }
-            } else {
+            } 
+            else {
                 if ( !matcher()->matches(c_->currKey(), c_->currLoc() ) ) {
                 }
                 else if( !c_->getsetdup(c_->currLoc()) ) {
@@ -413,7 +470,7 @@ namespace mongo {
             c_->advance();
         }
         virtual QueryOp *_createChild() const {
-            CountOp *ret = new CountOp( BSONObj() );
+            CountOp *ret = new CountOp( _ns , BSONObj() );
             ret->count_ = count_;
             ret->skip_ = skip_;
             ret->limit_ = limit_;
@@ -437,6 +494,8 @@ namespace mongo {
             count_++;
         }
 
+        string _ns;
+        
         long long count_;
         long long skip_;
         long long limit_;
@@ -444,46 +503,39 @@ namespace mongo {
         BSONObj query_;
         BtreeCursor *bc_;
         BSONObj firstMatch_;
+
+        ClientCursor::CleanupPointer _cc;
+        ClientCursor::YieldData _yieldData;
     };
-    
+
     /* { count: "collectionname"[, query: <query>] }
        returns -1 on ns does not exist error.
     */    
     long long runCount( const char *ns, const BSONObj &cmd, string &err ) {
+        Client::Context cx(ns);
         NamespaceDetails *d = nsdetails( ns );
         if ( !d ) {
             err = "ns missing";
             return -1;
         }
         BSONObj query = cmd.getObjectField("query");
-
+        
         // count of all objects
         if ( query.isEmpty() ){
-            long long num = d->nrecords;
-            num = num - cmd["skip"].numberLong();
-            if ( num < 0 ) {
-                num = 0;
-            }
-            if ( cmd["limit"].isNumber() ){
-                long long limit = cmd["limit"].numberLong();
-                if ( limit < num ){
-                    num = limit;
-                }
-            }
-            return num;
+            return applySkipLimit( d->nrecords , cmd );
         }
-        MultiPlanScanner mps( ns, query, BSONObj() );
-        CountOp original( cmd );
+        MultiPlanScanner mps( ns, query, BSONObj(), 0, true, BSONObj(), BSONObj(), false, true );
+        CountOp original( ns , cmd );
         shared_ptr< CountOp > res = mps.runOp( original );
         if ( !res->complete() ) {
             log() << "Count with ns: " << ns << " and query: " << query
-                  << " failed with exception: " << res->exceptionMessage()
+                  << " failed with exception: " << res->exception()
                   << endl;
             return 0;
         }
         return res->count();
     }
-
+    
     class ExplainBuilder {
     public:
         ExplainBuilder() : _i() {}
@@ -507,14 +559,18 @@ namespace mongo {
             } else {
                 _b.reset( new BSONObjBuilder( _c->subobjStart() ) );
             }
-            *_b << "cursor" << c->toString() << "indexBounds" << c->prettyIndexBounds();
+            *_b << "cursor" << c->toString();
             _b->appendNumber( "nscanned", nscanned );
             _b->appendNumber( "nscannedObjects", nscannedObjects );
             *_b << "n" << n;
-            if ( scanAndOrder ) {
+
+            if ( scanAndOrder )
                 *_b << "scanAndOrder" << true;
-            }
+
             *_b << "millis" << millis;
+
+            *_b << "indexBounds" << c->prettyIndexBounds();
+
             if ( !hint ) {
                 *_b << "allPlans" << _a->arr();
             }
@@ -551,16 +607,16 @@ namespace mongo {
     public:
         
         UserQueryOp( const ParsedQuery& pq, Message &response, ExplainBuilder &eb, CurOp &curop ) :
-        //int ntoskip, int ntoreturn, const BSONObj &order, bool wantMore,
-        //                   bool explain, FieldMatcher *filter, int queryOptions ) :
             _buf( 32768 ) , // TODO be smarter here
             _pq( pq ) ,
             _ntoskip( pq.getSkip() ) ,
             _nscanned(0), _oldNscanned(0), _nscannedObjects(0), _oldNscannedObjects(0),
             _n(0),
             _oldN(0),
+            _chunkMatcher(shardingState.getChunkMatcher(pq.ns())),
             _inMemSort(false),
             _saveClientCursor(false),
+            _wouldSaveClientCursor(false),
             _oplogReplay( pq.hasOption( QueryOption_OplogReplay) ),
             _response( response ),
             _eb( eb ),
@@ -589,6 +645,38 @@ namespace mongo {
             }
         }
         
+        virtual bool prepareToYield() {
+            if ( _findingStartCursor.get() ) {
+                return _findingStartCursor->prepareToYield();
+            } else {
+                if ( ! _cc ) {
+                    _cc.reset( new ClientCursor( QueryOption_NoCursorTimeout , _c , _pq.ns() ) );
+                }
+                return _cc->prepareToYield( _yieldData );
+            }
+        }
+        
+        virtual void recoverFromYield() {
+            if ( _findingStartCursor.get() ) {
+                _findingStartCursor->recoverFromYield();
+            } else {
+                if ( !ClientCursor::recoverFromYield( _yieldData ) ) {
+                    _c.reset();
+                    _cc.reset();
+                    massert( 13338, "cursor dropped during query", false );
+                    // TODO maybe we want to prevent recording the winning plan as well?
+                } 
+            }
+        }        
+        
+        virtual long long nscanned() {
+            if ( _findingStartCursor.get() ) {
+                return 0; // should only be one query plan, so value doesn't really matter.
+            }
+            assert( _c.get() );
+            return _c->nscanned();
+        }
+        
         virtual void next() {
             if ( _findingStartCursor.get() ) {
                 if ( _findingStartCursor->done() ) {
@@ -604,7 +692,7 @@ namespace mongo {
                 finish( false );
                 return;
             }
-            
+
             bool mayCreateCursor1 = _pq.wantMore() && ! _inMemSort && _pq.getNumToReturn() != 1 && useCursors;
             
             if( 0 ) { 
@@ -616,7 +704,7 @@ namespace mongo {
                 return;
             }
 
-            _nscanned++;
+            _nscanned = _c->nscanned();
             if ( !matcher()->matches(_c->currKey(), _c->currLoc() , &_details ) ) {
                 // not a match, continue onward
                 if ( _details.loadedObject )
@@ -625,7 +713,13 @@ namespace mongo {
             else {
                 _nscannedObjects++;
                 DiskLoc cl = _c->currLoc();
-                if( !_c->getsetdup(cl) ) { 
+                if ( _chunkMatcher && ! _chunkMatcher->belongsToMe( _c->currKey(), _c->currLoc() ) ){
+                    // cout << "TEMP skipping un-owned chunk: " << _c->current() << endl;
+                }
+                else if( _c->getsetdup(cl) ) { 
+                    // dup
+                }
+                else {
                     // got a match.
                     
                     if ( _inMemSort ) {
@@ -645,6 +739,7 @@ namespace mongo {
                             }
                         }
                         else {
+
                             if ( _pq.returnKey() ){
                                 BSONObjBuilder bb( _buf );
                                 bb.appendKeys( _c->indexKeyPattern() , _c->currKey() );
@@ -653,6 +748,13 @@ namespace mongo {
                             else {
                                 BSONObj js = _c->current();
                                 assert( js.isValid() );
+
+                                if ( _oplogReplay ){
+                                    BSONElement e = js["ts"];
+                                    if ( e.type() == Date || e.type() == Timestamp )
+                                        _slaveReadTill = e._opTime();
+                                }
+
                                 fillQueryResultFromObj( _buf , _pq.getFields() , js , (_pq.showDiskLoc() ? &cl : 0));
                             }
                             _n++;
@@ -665,8 +767,8 @@ namespace mongo {
                             else if ( _pq.enoughForFirstBatch( n() , _buf.len() ) ){
                                 /* if only 1 requested, no cursor saved for efficiency...we assume it is findOne() */
                                 if ( mayCreateCursor1 ) {
-                                    _c->advance();
-                                    if ( _c->ok() ) {
+                                    _wouldSaveClientCursor = true;
+                                    if ( _c->advance() ) {
                                         // more...so save a cursor
                                         _saveClientCursor = true;
                                     }
@@ -708,10 +810,11 @@ namespace mongo {
             } else {
                 setComplete();
             }
+
         }
         
         void finishExplain( const BSONObj &suffix ) {
-            BSONObj obj = _eb.finishWithSuffix( nscanned(), nscannedObjects(), n(), _curop.elapsedMillis(), suffix);
+            BSONObj obj = _eb.finishWithSuffix( totalNscanned(), nscannedObjects(), n(), _curop.elapsedMillis(), suffix);
             fillQueryResultFromObj(_buf, 0, obj);
             _n = 1;
             _oldN = 0;
@@ -727,7 +830,7 @@ namespace mongo {
             }
             UserQueryOp *ret = new UserQueryOp( _pq, _response, _eb, _curop );
             ret->_oldN = n();
-            ret->_oldNscanned = nscanned();
+            ret->_oldNscanned = totalNscanned();
             ret->_oldNscannedObjects = nscannedObjects();
             ret->_ntoskip = _ntoskip;
             return ret;
@@ -736,10 +839,16 @@ namespace mongo {
         bool scanAndOrderRequired() const { return _inMemSort; }
         shared_ptr<Cursor> cursor() { return _c; }
         int n() const { return _oldN + _n; }
-        long long nscanned() const { return _nscanned + _oldNscanned; }
+        long long totalNscanned() const { return _nscanned + _oldNscanned; }
         long long nscannedObjects() const { return _nscannedObjects + _oldNscannedObjects; }
         bool saveClientCursor() const { return _saveClientCursor; }
+        bool wouldSaveClientCursor() const { return _wouldSaveClientCursor; }
+        
+        void finishForOplogReplay( ClientCursor * cc ){
+            if ( _oplogReplay && ! _slaveReadTill.isNull() )
+                cc->_slaveReadTill = _slaveReadTill;
 
+        }
     private:
         BufBuilder _buf;
         const ParsedQuery& _pq;
@@ -754,52 +863,54 @@ namespace mongo {
         
         MatchDetails _details;
 
+        ChunkMatcherPtr _chunkMatcher;
+        
         bool _inMemSort;
         auto_ptr< ScanAndOrder > _so;
         
         shared_ptr<Cursor> _c;
+        ClientCursor::CleanupPointer _cc;
+        ClientCursor::YieldData _yieldData;
 
         bool _saveClientCursor;
+        bool _wouldSaveClientCursor;
         bool _oplogReplay;
         auto_ptr< FindingStartCursor > _findingStartCursor;
         
         Message &_response;
         ExplainBuilder &_eb;
         CurOp &_curop;
+        OpTime _slaveReadTill;
     };
     
     /* run a query -- includes checking for and running a Command */
-    void runQuery(Message& m, QueryMessage& q, CurOp& curop, Message &result) {
+    const char *runQuery(Message& m, QueryMessage& q, CurOp& curop, Message &result) {
         StringBuilder& ss = curop.debug().str;
         shared_ptr<ParsedQuery> pq_shared( new ParsedQuery(q) );
         ParsedQuery& pq( *pq_shared );
-        const char *ns = q.ns;
         int ntoskip = q.ntoskip;
         BSONObj jsobj = q.query;
         int queryOptions = q.queryOptions;
-        BSONObj snapshotHint;
+        const char *ns = q.ns;
         
         if( logLevel >= 2 )
             log() << "query: " << ns << jsobj << endl;
         
-        long long nscanned = 0;
         ss << ns;
         {
-            // only insert if nonzero. 
+            // only say ntoreturn if nonzero. 
             int n =  pq.getNumToReturn();
             if( n ) 
                 ss << " ntoreturn:" << n;
         }
         curop.setQuery(jsobj);
         
-        Client& c = cc();
-
-        if ( pq.couldBeCommand() ){
+        if ( pq.couldBeCommand() ) {
             BufBuilder bb;
             bb.skip(sizeof(QueryResult));
             BSONObjBuilder cmdResBuf;
             if ( runCommands(ns, jsobj, curop, bb, cmdResBuf, false, queryOptions) ) {
-                ss << " command: " << jsobj;
+                ss << " command: " << jsobj.toString();
                 curop.markCommand();
                 auto_ptr< QueryResult > qr;
                 qr.reset( (QueryResult *) bb.buf() );
@@ -813,12 +924,11 @@ namespace mongo {
                 qr->nReturned = 1;
                 result.setData( qr.release(), true );
             }
-            return;
+            return false;
         }
         
         /* --- regular query --- */
 
-        long long cursorid = 0;
         int n = 0;
         BSONElement hint = useHints ? pq.getHint() : BSONElement();
         bool explain = pq.isExplain();
@@ -848,13 +958,15 @@ namespace mongo {
         if ( pq.hasOption( QueryOption_CursorTailable ) ) {
             NamespaceDetails *d = nsdetails( ns );
             uassert( 13051, "tailable cursor requested on non capped collection", d && d->capped );
+            const BSONObj nat1 = BSON( "$natural" << 1 );
             if ( order.isEmpty() ) {
-                order = BSON( "$natural" << 1 );
+                order = nat1;
             } else {
-                uassert( 13052, "only {$natural:1} order allowed for tailable cursor", order == BSON( "$natural" << 1 ) );
+                uassert( 13052, "only {$natural:1} order allowed for tailable cursor", order == nat1 );
             }
         }
         
+        BSONObj snapshotHint; // put here to keep the data in scope
         if( snapshot ) { 
             NamespaceDetails *d = nsdetails(ns);
             if ( d ){
@@ -877,12 +989,11 @@ namespace mongo {
         }
             
         if ( ! (explain || pq.showDiskLoc()) && isSimpleIdQuery( query ) && !pq.hasOption( QueryOption_CursorTailable ) ) {
-            nscanned = 1;
-
             bool nsFound = false;
             bool indexFound = false;
 
             BSONObj resObject;
+            Client& c = cc();
             bool found = Helpers::findById( c, ns , query , resObject , &nsFound , &indexFound );
             if ( nsFound == false || indexFound == true ){
                 BufBuilder bb(sizeof(QueryResult)+resObject.objsize()+32);
@@ -900,11 +1011,11 @@ namespace mongo {
                 qr->len = bb.len();
                 ss << " reslen:" << bb.len();
                 qr->setOperation(opReply);
-                qr->cursorId = cursorid;
+                qr->cursorId = 0;
                 qr->startingFrom = 0;
                 qr->nReturned = n;      
                 result.setData( qr.release(), true );
-                return;
+                return false;
             }     
         }
         
@@ -916,7 +1027,7 @@ namespace mongo {
             if ( mps.usingPrerecordedPlan() )
                 oldPlan = mps.oldExplain();
         }
-        auto_ptr< MultiPlanScanner > mps( new MultiPlanScanner( ns, query, order, &hint, !explain, pq.getMin(), pq.getMax() ) );
+        auto_ptr< MultiPlanScanner > mps( new MultiPlanScanner( ns, query, order, &hint, !explain, pq.getMin(), pq.getMax(), false, true ) );
         BSONObj explainSuffix;
         if ( explain ) {
             BSONObjBuilder bb;
@@ -928,20 +1039,25 @@ namespace mongo {
         UserQueryOp original( pq, result, eb, curop );
         shared_ptr< UserQueryOp > o = mps->runOp( original );
         UserQueryOp &dqo = *o;
-        massert( 10362 ,  dqo.exceptionMessage(), dqo.complete() );
+        if ( ! dqo.complete() )
+            throw MsgAssertionException( dqo.exception() );
         if ( explain ) {
             dqo.finishExplain( explainSuffix );
         }
         n = dqo.n();
-        nscanned = dqo.nscanned();
+        long long nscanned = dqo.totalNscanned();
         if ( dqo.scanAndOrderRequired() )
             ss << " scanAndOrder ";
         shared_ptr<Cursor> cursor = dqo.cursor();
-        log( 5 ) << "   used cursor: " << cursor.get() << endl;
-        if ( dqo.saveClientCursor() || mps->mayRunMore() ) {
+        if( logLevel >= 5 )
+            log() << "   used cursor: " << cursor.get() << endl;
+        long long cursorid = 0;
+        const char * exhaust = 0;
+        if ( dqo.saveClientCursor() || ( dqo.wouldSaveClientCursor() && mps->mayRunMore() ) ) {
             ClientCursor *cc;
             bool moreClauses = mps->mayRunMore();
             if ( moreClauses ) {
+                // this MultiCursor will use a dumb NoOp to advance(), so no need to specify mayYield
                 shared_ptr< Cursor > multi( new MultiCursor( mps, cursor, dqo.matcher(), dqo ) );
                 cc = new ClientCursor(queryOptions, multi, ns);
             } else {
@@ -950,17 +1066,19 @@ namespace mongo {
             }
             cursorid = cc->cursorid;
             cc->query = jsobj.getOwned();
-            DEV tlog() << "  query has more, cursorid: " << cursorid << endl;
+            DEV tlog() << "query has more, cursorid: " << cursorid << endl;
             cc->pos = n;
             cc->pq = pq_shared;
             cc->fields = pq.getFieldPtr();
             cc->originalMessage = m;
             cc->updateLocation();
-            if ( !cc->c->ok() && cc->c->tailable() ) {
-                DEV tlog() << "  query has no more but tailable, cursorid: " << cursorid << endl;
-            } else {
-                DEV tlog() << "  query has more, cursorid: " << cursorid << endl;
+            if ( !cc->c->ok() && cc->c->tailable() )
+                DEV tlog() << "query has no more but tailable, cursorid: " << cursorid << endl;
+            if( queryOptions & QueryOption_Exhaust ) {
+                exhaust = ns;
+                ss << " exhaust ";
             }
+            dqo.finishForOplogReplay(cc);
         }
 
         QueryResult *qr = (QueryResult *) result.header();
@@ -980,10 +1098,10 @@ namespace mongo {
                 ss << " ntoskip:" << ntoskip;
             if ( dbprofile )
                 ss << " \nquery: ";
-            ss << jsobj << ' ';
+            ss << jsobj.toString() << ' ';
         }
         ss << " nreturned:" << n;
-        return;
+        return exhaust;
     }    
     
 } // namespace mongo

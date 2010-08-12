@@ -51,7 +51,7 @@ namespace mongo {
             addrinfo hints;
             memset(&hints, 0, sizeof(addrinfo));
             hints.ai_socktype = SOCK_STREAM;
-            hints.ai_flags = AI_ADDRCONFIG;
+            //hints.ai_flags = AI_ADDRCONFIG; // This is often recommended but don't do it. SERVER-1579
             hints.ai_family = (IPv6Enabled() ? AF_UNSPEC : AF_INET);
 
             stringstream ss;
@@ -194,6 +194,16 @@ namespace mongo {
     
     ListeningSockets* ListeningSockets::get(){
         return _instance;
+    }
+
+    
+    string getHostNameCached(){
+        static string host;
+        if ( host.empty() ){
+            string s = getHostName();
+            host = s;
+        }
+        return host;
     }
 
 } // namespace mongo

@@ -19,6 +19,7 @@
 
 #pragma once
 
+
 #include "../client/dbclient.h"
 #include "curop.h"
 #include "security.h"
@@ -93,19 +94,23 @@ namespace mongo {
     struct DbResponse {
         Message *response;
         MSGID responseTo;
-        DbResponse(Message *r, MSGID rt) : response(r), responseTo(rt) {
-        }
+        const char *exhaust; /* points to ns if exhaust mode. 0=normal mode*/
+        DbResponse(Message *r, MSGID rt) : response(r), responseTo(rt), exhaust(0) { }
         DbResponse() {
             response = 0;
+            exhaust = 0;
         }
-        ~DbResponse() {
-            delete response;
-        }
+        ~DbResponse() { delete response; }
     };
     
     bool assembleResponse( Message &m, DbResponse &dbresponse, const SockAddr &client = unknownAddress );
 
-    void getDatabaseNames( vector< string > &names );
+    void getDatabaseNames( vector< string > &names , const string& usePath = dbpath );
+
+    /* returns true if there is no data on this server.  useful when starting replication. 
+       local database does NOT count. 
+    */
+    bool replHasDatabases();
 
 // --- local client ---
     
@@ -114,7 +119,7 @@ namespace mongo {
     public:
         virtual auto_ptr<DBClientCursor> query(const string &ns, Query query, int nToReturn = 0, int nToSkip = 0,
                                                const BSONObj *fieldsToReturn = 0, int queryOptions = 0);
-
+        
         virtual bool isFailed() const {
             return false;
         }
@@ -130,11 +135,19 @@ namespace mongo {
             // don't need to piggy back when connected locally
             return say( toSend );
         }
-
+        
         virtual void killCursor( long long cursorID );
+        
+        virtual bool callRead( Message& toSend , Message& response ){
+            return call( toSend , response );
+        }
+
+        virtual ConnectionString::ConnectionType type() const { return ConnectionString::MASTER; }  
+        virtual bool isMember( const DBConnector * conn ) const { return this == conn; };
     };
 
     extern int lockFile;
     void acquirePathLock();
+    void maybeCreatePidFile();
     
 } // namespace mongo

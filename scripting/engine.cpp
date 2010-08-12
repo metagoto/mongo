@@ -73,6 +73,9 @@ namespace mongo {
             // TODO: make signed
             builder.appendDate( fieldName , Date_t((unsigned long long)getNumber( scopeName )) );
             break;
+        case Code:
+            builder.appendCode( fieldName , getString( scopeName ).c_str() );
+            break;
         default:
             stringstream temp;
             temp << "can't append type from:";
@@ -93,7 +96,7 @@ namespace mongo {
         path p( filename );
 
         if ( ! exists( p ) ){
-            cout << "file [" << filename << "] doesn't exist" << endl;
+            log() << "file [" << filename << "] doesn't exist" << endl;
             if ( assertOnError )
                 assert( 0 );
             return false;
@@ -113,7 +116,7 @@ namespace mongo {
             }
 
             if (empty){
-                cout << "directory [" << filename << "] doesn't have any *.js files" << endl;
+                log() << "directory [" << filename << "] doesn't have any *.js files" << endl;
                 if ( assertOnError )
                     assert( 0 );
                 return false;
@@ -125,13 +128,27 @@ namespace mongo {
         File f;
         f.open( filename.c_str() , true );
 
-        fileofs L = f.len();
-        assert( L <= 0x7ffffffe );
-        char * data = (char*)malloc( (size_t) L+1 );
+        unsigned L;
+        {
+            fileofs fo = f.len();
+            assert( fo <= 0x7ffffffe );
+            L = (unsigned) fo;
+        }
+        boost::scoped_array<char> data (new char[L+1]);
         data[L] = 0;
-        f.read( 0 , data , (size_t) L );
+        f.read( 0 , data.get() , L );
+
+        int offset = 0;
+        if (data[0] == '#' && data[1] == '!'){
+            const char* newline = strchr(data.get(), '\n');
+            if (! newline)
+                return true; // file of just shebang treated same as empty file
+            offset = newline - data.get();
+        }
+
+        StringData code (data.get() + offset, L - offset);
         
-        return exec( data , filename , printResult , reportError , assertOnError, timeoutMs );
+        return exec( code , filename , printResult , reportError , assertOnError, timeoutMs );
     }
 
     void Scope::storedFuncMod(){
@@ -167,6 +184,7 @@ namespace mongo {
         
         static DBClientBase * db = createDirectClient();
         auto_ptr<DBClientCursor> c = db->query( coll , Query() );
+        assert( c.get() );
         
         set<string> thisTime;
         
@@ -376,7 +394,7 @@ namespace mongo {
             return _real->getError();
         }
         
-        bool exec( const string& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ){
+        bool exec( const StringData& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ){
             return _real->exec( code , name , printResult , reportError , assertOnError , timeoutMs );
         }
         bool execFile( const string& filename , bool printResult , bool reportError , bool assertOnError, int timeoutMs = 0 ){

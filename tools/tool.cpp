@@ -38,7 +38,7 @@ namespace mongo {
     Tool::Tool( string name , bool localDBAllowed , string defaultDB , 
                 string defaultCollection , bool usesstdout ) :
         _name( name ) , _db( defaultDB ) , _coll( defaultCollection ) , 
-        _usesstdout(usesstdout), _noconnection(false), _conn(0), _paired(false) {
+        _usesstdout(usesstdout), _noconnection(false), _autoreconnect(false), _conn(0), _paired(false) {
         
         _options = new po::options_description( "options" );
         _options->add_options()
@@ -76,12 +76,10 @@ namespace mongo {
             delete _conn;
     }
 
-    void Tool::printExtraHelp( ostream & out ){
-    }
-
     void Tool::printHelp(ostream &out) {
         printExtraHelp(out);
         _options->print(out);
+        printExtraHelpAfter(out);
     }
 
     int Tool::main( int argc , char ** argv ){
@@ -154,24 +152,18 @@ namespace mongo {
             if ( _noconnection ){
                 // do nothing
             }
-            else if ( _host.find( "," ) == string::npos ){
-                DBClientConnection * c = new DBClientConnection();
-                _conn = c;
-
+            else {
                 string errmsg;
-                if ( ! c->connect( _host , errmsg ) ){
-                    cerr << "couldn't connect to [" << _host << "] " << errmsg << endl;
+
+                ConnectionString cs = ConnectionString::parse( _host , errmsg );
+                if ( ! cs.isValid() ){
+                    cerr << "invalid hostname [" << _host << "] " << errmsg << endl;
                     return -1;
                 }
-            }
-            else {
-                log(1) << "using pairing" << endl;
-                DBClientPaired * c = new DBClientPaired();
-                _paired = true;
-                _conn = c;
-
-                if ( ! c->connect( _host ) ){
-                    cerr << "couldn't connect to paired server: " << _host << endl;
+                
+                _conn = cs.connect( errmsg );
+                if ( ! _conn ){
+                    cerr << "couldn't connect to [" << _host << "] " << errmsg << endl;
                     return -1;
                 }
             }
@@ -191,7 +183,7 @@ namespace mongo {
             try {
                 acquirePathLock();
             }
-            catch ( DBException& e ){
+            catch ( DBException& ){
                 cerr << endl << "If you are running a mongod on the same "
                     "path you should connect to that instead of direct data "
                     "file access" << endl << endl;
@@ -237,8 +229,9 @@ namespace mongo {
     }
 
     DBClientBase& Tool::conn( bool slaveIfPaired ){
-        if ( _paired && slaveIfPaired )
-            return ((DBClientPaired*)_conn)->slaveConn();
+        // TODO: _paired is deprecated
+        if ( slaveIfPaired && _conn->type() == ConnectionString::SET )
+            return ((DBClientReplicaSet*)_conn)->slaveConn();
         return *_conn;
     }
 
@@ -261,7 +254,7 @@ namespace mongo {
             pcrecpp::RE re("([#\\w\\.\\s\\-]+),?" );
             while ( re.Consume( &input, &f ) ){
                 _fields.push_back( f );
-                b.append( f.c_str() , 1 );
+                b.append( f , 1 );
             }
         
             _fieldsObj = b.obj();
@@ -282,7 +275,7 @@ namespace mongo {
                 file.getline( line , BUF_SIZE );
                 const char * cur = line;
                 while ( isspace( cur[0] ) ) cur++;
-                if ( strlen( cur ) == 0 )
+                if ( cur[0] == '\0' )
                     continue;
 
                 _fields.push_back( cur );
@@ -313,6 +306,105 @@ namespace mongo {
 
         throw UserException( 9997 , (string)"auth failed: " + errmsg );
     }
+
+    BSONTool::BSONTool( const char * name , bool objcheck ) 
+        : Tool( name , true , "" , "" ) , _objcheck( objcheck ){
+        
+        add_options()
+            ("objcheck" , "validate object before inserting" )
+            ("filter" , po::value<string>() , "filter to apply before inserting" )
+            ;
+    }
+
+
+    int BSONTool::run(){
+        _objcheck = hasParam( "objcheck" );
+        
+        if ( hasParam( "filter" ) )
+            _matcher.reset( new Matcher( fromjson( getParam( "filter" ) ) ) );
+        
+        return doRun();
+    }
+
+    long long BSONTool::processFile( const path& root ){
+        string fileString = root.string();
+        
+        long long fileLength = file_size( root );
+
+        if ( fileLength == 0 ) {
+            out() << "file " << fileString << " empty, skipping" << endl;
+            return 0;
+        }
+
+
+        FILE* file = fopen( fileString.c_str() , "rb" );
+        if ( ! file ){
+            log() << "error opening file: " << fileString << endl;
+            return 0;
+        }
+
+#if !defined(__sunos__) && defined(POSIX_FADV_SEQUENTIAL)
+        posix_fadvise(fileno(file), 0, fileLength, POSIX_FADV_SEQUENTIAL);
+#endif
+
+        log(1) << "\t file size: " << fileLength << endl;
+
+        long long read = 0;
+        long long num = 0;
+        long long processed = 0;
+
+        const int BUF_SIZE = 1024 * 1024 * 5;
+        boost::scoped_array<char> buf_holder(new char[BUF_SIZE]);
+        char * buf = buf_holder.get();
+
+        ProgressMeter m( fileLength );
+
+        while ( read < fileLength ) {
+            int readlen = fread(buf, 4, 1, file);
+            int size = ((int*)buf)[0];
+            if ( size >= BUF_SIZE ){
+                cerr << "got an object of size: " << size << "  terminating..." << endl;
+            }
+            uassert( 10264 ,  "invalid object size" , size < BUF_SIZE );
+
+            readlen = fread(buf+4, size-4, 1, file);
+
+            BSONObj o( buf );
+            if ( _objcheck && ! o.valid() ){
+                cerr << "INVALID OBJECT - going try and pring out " << endl;
+                cerr << "size: " << size << endl;
+                BSONObjIterator i(o);
+                while ( i.more() ){
+                    BSONElement e = i.next();
+                    try {
+                        e.validate();
+                    }
+                    catch ( ... ){
+                        cerr << "\t\t NEXT ONE IS INVALID" << endl;
+                    }
+                    cerr << "\t name : " << e.fieldName() << " " << e.type() << endl;
+                    cerr << "\t " << e << endl;
+                }
+            }
+            
+            if ( _matcher.get() == 0 || _matcher->matches( o ) ){
+                gotObject( o );
+                processed++;
+            }
+
+            read += o.objsize();
+            num++;
+
+            m.hit( o.objsize() );
+        }
+
+        uassert( 10265 ,  "counts don't match" , m.done() == fileLength );
+        out() << "\t "  << m.hits() << " objects found" << endl;
+        if ( _matcher.get() )
+            out() << "\t "  << processed << " objects processed" << endl;
+        return processed;
+    }
+            
 
 
     void setupSignals(){}

@@ -126,6 +126,29 @@ assert.eq( { _id : "fun" , a : { b : { c : { x : 6848 , y : 911 } } } } , as.b.f
 check( "b 4" );
 
 
+// lots of indexes
+
+am.lotOfIndexes.insert( { x : 1 } )
+for ( i=0; i<200; i++ ){
+    var idx = {}
+    idx["x"+i] = 1;
+    am.lotOfIndexes.ensureIndex( idx );
+    am.getLastError()
+}
+
+
+assert.soon( function(){ return am.lotOfIndexes.getIndexes().length == as.lotOfIndexes.getIndexes().length; } , "lots of indexes a" )
+
+assert.eq( am.lotOfIndexes.getIndexes().length , as.lotOfIndexes.getIndexes().length , "lots of indexes b" )
+
+// multi-update with $inc
+
+am.mu1.update( { _id : 1 , $atomic : 1 } , { $inc : { x : 1 } } , true , true )
+x = { _id : 1 , x : 1 }
+assert.eq( x , am.mu1.findOne() , "mu1" );
+assert.soon( function(){ z = as.mu1.findOne(); printjson( z ); return friendlyEqual( x , z ); } , "mu2" )
+
+
 
 rt.stop();
 

@@ -27,7 +27,7 @@ namespace mongo {
 
     inline void time_t_to_String(time_t t, char *buf) {
 #if defined(_WIN32)
-        ctime_s(buf, 64, &t);
+        ctime_s(buf, 32, &t);
 #else
         ctime_r(&t, buf);
 #endif
@@ -35,13 +35,37 @@ namespace mongo {
     }
 
     inline string time_t_to_String(time_t t = time(0) ){
-        char buf[32];
+        char buf[64];
 #if defined(_WIN32)
-        ctime_s(buf, 64, &t);
+        ctime_s(buf, sizeof(buf), &t);
 #else
         ctime_r(&t, buf);
 #endif
         buf[24] = 0; // don't want the \n
+        return buf;
+    }
+
+    inline string time_t_to_String_no_year(time_t t) {
+        char buf[64];
+#if defined(_WIN32)
+        ctime_s(buf, sizeof(buf), &t);
+#else
+        ctime_r(&t, buf);
+#endif
+        buf[19] = 0;
+        return buf;
+    }
+
+    inline string time_t_to_String_short(time_t t) {
+        char buf[64];
+#if defined(_WIN32)
+        ctime_s(buf, sizeof(buf), &t);
+#else
+        ctime_r(&t, buf);
+#endif
+        buf[19] = 0;
+        if( buf[0] && buf[1] && buf[2] && buf[3] )
+            return buf + 4; // skip day of week
         return buf;
     }
 
@@ -54,9 +78,17 @@ namespace mongo {
         operator const unsigned long long&() const { return millis; }
         string toString() const { 
             char buf[64];
-            time_t_to_String(millis, buf);
+            time_t_to_String(millis/1000, buf);
             return buf;
         }
     };
-   
+
+    // Like strlen, but only scans up to n bytes.
+    // Returns -1 if no '0' found.
+    inline int strnlen( const char *s, int n ) {
+        for( int i = 0; i < n; ++i )
+            if ( !s[ i ] )
+                return i;
+        return -1;
+    }
 }

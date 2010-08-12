@@ -56,8 +56,6 @@ namespace mongo {
         }
     };
 
-    const int MaxExtentSize = 0x7ff00000;
-
     map<string, unsigned> BackgroundOperation::dbsInProg;
     set<string> BackgroundOperation::nsInProg;
 
@@ -111,7 +109,7 @@ namespace mongo {
     string dbpath = "/data/db/";
     bool directoryperdb = false;
     string repairpath;
-    string lockfilepath;
+    string pidfilepath;
 
     DataFileMgr theDataFileMgr;
     DatabaseHolder dbHolder;
@@ -123,7 +121,7 @@ namespace mongo {
     void ensureIdIndexForNewNs(const char *ns) {
         if ( ( strstr( ns, ".system." ) == 0 || legalClientSystemNS( ns , false ) ) &&
              strstr( ns, ".$freelist" ) == 0 ){
-            log( 1 ) << "adding _id index for new collection" << endl;
+            log( 1 ) << "adding _id index for collection " << ns << endl;
             ensureHaveIdIndex( ns );
         }        
     }
@@ -161,25 +159,25 @@ namespace mongo {
         return z;
     }
 
-    bool _userCreateNS(const char *ns, const BSONObj& j, string& err) {
+    bool _userCreateNS(const char *ns, const BSONObj& options, string& err, bool *deferIdIndex) {
         if ( nsdetails(ns) ) {
             err = "collection already exists";
             return false;
         }
 
-        log(1) << "create collection " << ns << ' ' << j << '\n';
+        log(1) << "create collection " << ns << ' ' << options << '\n';
 
         /* todo: do this only when we have allocated space successfully? or we could insert with a { ok: 0 } field
            and then go back and set to ok : 1 after we are done.
         */
         bool isFreeList = strstr(ns, ".$freelist") != 0;
         if( !isFreeList )
-            addNewNamespaceToCatalog(ns, j.isEmpty() ? 0 : &j);
+            addNewNamespaceToCatalog(ns, options.isEmpty() ? 0 : &options);
 
         long long size = initialExtentSize(128);
-        BSONElement e = j.getField("size");
+        BSONElement e = options.getField("size");
         if ( e.isNumber() ) {
-            size = (long long) e.number();
+            size = e.numberLong();
             size += 256;
             size &= 0xffffffffffffff00LL;
         }
@@ -188,18 +186,18 @@ namespace mongo {
 
         bool newCapped = false;
         int mx = 0;
-        e = j.getField("capped");
+        e = options.getField("capped");
         if ( e.type() == Bool && e.boolean() ) {
             newCapped = true;
-            e = j.getField("max");
+            e = options.getField("max");
             if ( e.isNumber() ) {
-                mx = (int) e.number();
+                mx = e.numberInt();
             }
         }
 
         // $nExtents just for debug/testing.  We create '$nExtents' extents,
         // each of size 'size'.
-        e = j.getField( "$nExtents" );
+        e = options.getField( "$nExtents" );
         int nExtents = int( e.number() );
         Database *database = cc().database();
         if ( nExtents > 0 ) {
@@ -223,14 +221,21 @@ namespace mongo {
         NamespaceDetails *d = nsdetails(ns);
         assert(d);
 
-        if ( j.getField( "autoIndexId" ).type() ) {
-            if ( j["autoIndexId"].trueValue() ){
-                ensureIdIndexForNewNs( ns );
+        bool ensure = false;
+        if ( options.getField( "autoIndexId" ).type() ) {
+            if ( options["autoIndexId"].trueValue() ){
+                ensure = true;
             }
         } else {
             if ( !newCapped ) {
-                ensureIdIndexForNewNs( ns );
+                ensure=true;
             }
+        }
+        if( ensure ) { 
+            if( deferIdIndex )
+                *deferIdIndex = true;
+            else
+                ensureIdIndexForNewNs( ns );
         }
 
         if ( mx > 0 )
@@ -239,23 +244,25 @@ namespace mongo {
         return true;
     }
 
-    // { ..., capped: true, size: ..., max: ... }
-    // returns true if successful
-    bool userCreateNS(const char *ns, BSONObj j, string& err, bool logForReplication) {
+    /** { ..., capped: true, size: ..., max: ... }
+        @param deferIdIndex - if not not, defers id index creation.  sets the bool value to true if we wanted to create the id index.
+        @return true if successful
+    */
+    bool userCreateNS(const char *ns, BSONObj options, string& err, bool logForReplication, bool *deferIdIndex) {
         const char *coll = strchr( ns, '.' ) + 1;
         massert( 10356 ,  "invalid ns", coll && *coll );
         char cl[ 256 ];
         nsToDatabase( ns, cl );
-        bool ok = _userCreateNS(ns, j, err);
+        bool ok = _userCreateNS(ns, options, err, deferIdIndex);
         if ( logForReplication && ok ) {
-            if ( j.getField( "create" ).eoo() ) {
+            if ( options.getField( "create" ).eoo() ) {
                 BSONObjBuilder b;
                 b << "create" << coll;
-                b.appendElements( j );
-                j = b.obj();
+                b.appendElements( options );
+                options = b.obj();
             }
             string logNs = string( cl ) + ".$cmd";
-            logOp("c", logNs.c_str(), j);
+            logOp("c", logNs.c_str(), options);
         }
         return ok;
     }
@@ -263,10 +270,13 @@ namespace mongo {
     /*---------------------------------------------------------------------*/
 
     int MongoDataFile::maxSize() {
-        if ( sizeof( int* ) == 4 )
+        if ( sizeof( int* ) == 4 ) {
             return 512 * 1024 * 1024;
-        else
+        } else if ( cmdLine.smallfiles ) {
+            return 0x7ff00000 >> 2;
+        } else {
             return 0x7ff00000;
+        }
     }
 
     int MongoDataFile::defaultSize( const char *filename ) const {
@@ -343,6 +353,10 @@ namespace mongo {
         header->init(fileNo, size);
     }
 
+    void MongoDataFile::flush( bool sync ){
+        mmf.flush( sync );
+    }
+
     void addNewExtentToNamespace(const char *ns, Extent *e, DiskLoc eloc, DiskLoc emptyLoc, bool capped) { 
         DiskLoc oldExtentLoc;
         NamespaceIndex *ni = nsindex(ns);
@@ -367,7 +381,7 @@ namespace mongo {
 
     Extent* MongoDataFile::createExtent(const char *ns, int approxSize, bool newCapped, int loops) {
         massert( 10357 ,  "shutdown in progress", !goingAway );
-        massert( 10358 ,  "bad new extent size", approxSize >= 0 && approxSize <= MaxExtentSize );
+        massert( 10358 ,  "bad new extent size", approxSize >= 0 && approxSize <= Extent::maxSize() );
         massert( 10359 ,  "header==0 on new extent: 32 bit mmap space exceeded?", header ); // null if file open failed
         int ExtentSize = approxSize <= header->unusedLength ? approxSize : header->unusedLength;
         DiskLoc loc;
@@ -555,6 +569,14 @@ namespace mongo {
       }
     */
 
+    int Extent::maxSize() {
+        int maxExtentSize = 0x7ff00000;
+        if ( cmdLine.smallfiles ) {
+            maxExtentSize >>= 2;
+        }
+        return maxExtentSize;
+    }
+    
     /*---------------------------------------------------------------------*/
 
     shared_ptr<Cursor> DataFileMgr::findAll(const char *ns, const DiskLoc &startLoc) {
@@ -679,7 +701,7 @@ namespace mongo {
             NamespaceDetails *freeExtents = nsdetails(s.c_str());
             if( freeExtents == 0 ) { 
                 string err;
-                _userCreateNS(s.c_str(), BSONObj(), err);
+                _userCreateNS(s.c_str(), BSONObj(), err, 0);
                 freeExtents = nsdetails(s.c_str());
                 massert( 10361 , "can't create .$freelist", freeExtents);
             }
@@ -706,7 +728,8 @@ namespace mongo {
     void dropCollection( const string &name, string &errmsg, BSONObjBuilder &result ) {
         log(1) << "dropCollection: " << name << endl;
         NamespaceDetails *d = nsdetails(name.c_str());
-        assert( d );
+        if( d == 0 )
+            return;
 
         BackgroundOperation::assertNoBgOpInProgForNs(name.c_str());
 
@@ -722,6 +745,7 @@ namespace mongo {
         log(1) << "\t dropIndexes done" << endl;
         result.append("ns", name.c_str());
         ClientCursor::invalidate(name.c_str());
+        Client::invalidateNS( name );
         Top::global.collectionDropped( name );
         dropNS(name);        
     }
@@ -847,7 +871,7 @@ namespace mongo {
         NamespaceDetails *d,
         NamespaceDetailsTransient *nsdt,
         Record *toupdate, const DiskLoc& dl,
-        const char *_buf, int _len, OpDebug& debug, bool &changedId)
+        const char *_buf, int _len, OpDebug& debug, bool &changedId, bool god)
     {
         StringBuilder& ss = debug.str;
         dassert( toupdate == dl.rec() );
@@ -884,7 +908,7 @@ namespace mongo {
             if ( cc().database()->profile )
                 ss << " moved ";
             deleteRecord(ns, toupdate, dl);
-            return insert(ns, objNew.objdata(), objNew.objsize(), false);
+            return insert(ns, objNew.objdata(), objNew.objsize(), god);
         }
 
         nsdt->notifyOfWriteOp();
@@ -932,15 +956,15 @@ namespace mongo {
     }
 
     int followupExtentSize(int len, int lastExtentLen) {
-        assert( len < MaxExtentSize );
+        assert( len < Extent::maxSize() );
         int x = initialExtentSize(len);
         int y = (int) (lastExtentLen < 4000000 ? lastExtentLen * 4.0 : lastExtentLen * 1.2);
         int sz = y > x ? y : x;
 
         if ( sz < lastExtentLen )
             sz = lastExtentLen;
-        else if ( sz > MaxExtentSize )
-            sz = MaxExtentSize;
+        else if ( sz > Extent::maxSize() )
+            sz = Extent::maxSize();
         
         sz = ((int)sz) & 0xffffff00;
         assert( sz > len );
@@ -966,7 +990,7 @@ namespace mongo {
                                             *i, ordering, dupsAllowed, idx);
             }
             catch (AssertionException& e) {
-                if( e.code == 10287 && idxNo == d->nIndexes ) { 
+                if( e.getCode() == 10287 && idxNo == d->nIndexes ) { 
                     DEV log() << "info: caught key already in index on bg indexing (ok)" << endl;
                     continue;
                 }
@@ -1343,13 +1367,13 @@ namespace mongo {
             }
         }        
     }
-    
+
     /* note: if god==true, you may pass in obuf of NULL and then populate the returned DiskLoc 
              after the call -- that will prevent a double buffer copy in some cases (btree.cpp).
     */
     DiskLoc DataFileMgr::insert(const char *ns, const void *obuf, int len, bool god, const BSONElement &writeId, bool mayAddIndex) {
         bool wouldAddIndex = false;
-        massert( 10093 , "cannot insert into reserved $ collection", god || strchr(ns, '$') == 0 );
+        massert( 10093 , "cannot insert into reserved $ collection", god || nsDollarCheck( ns ) );
         uassert( 10094 , "invalid ns", strchr( ns , '.' ) > 0 );
         const char *sys = strstr(ns, "system.");
         if ( sys ) {
@@ -1452,7 +1476,7 @@ namespace mongo {
                 }
             }
             if ( loc.isNull() ) {
-                log() << "out of space in datafile " << ns << " capped:" << d->capped << endl;
+                log() << "insert: couldn't alloc space for object ns:" << ns << " capped:" << d->capped << endl;
                 assert(d->capped);
                 return DiskLoc();
             }
@@ -1591,6 +1615,7 @@ namespace mongo {
         }
 
         d->nrecords++;
+        d->datasize += r->netLength();
 
         return r;
     }
@@ -1601,14 +1626,29 @@ namespace mongo {
 
 namespace mongo {
 
+    void dropAllDatabasesExceptLocal() { 
+        writelock lk("");
+
+        vector<string> n;
+        getDatabaseNames(n);
+        if( n.size() == 0 ) return;
+        log() << "dropAllDatabasesExceptLocal " << n.size() << endl;
+        for( vector<string>::iterator i = n.begin(); i != n.end(); i++ ) {
+            if( *i != "local" ) {
+                Client::Context ctx(*i);
+                dropDatabase(*i);
+            }
+        }
+    }
+
     void dropDatabase(string db) {
         log(1) << "dropDatabase " << db << endl;
+        assert( cc().database() );
         assert( cc().database()->name == db );
 
         BackgroundOperation::assertNoBgOpInProgForDb(db.c_str());
 
-        Client * c = currentClient.get();
-        c->dropAllTempCollectionsInDB(db);
+        Client::invalidateDB( db );
 
         closeDatabase( db.c_str() );
         _deleteDataFiles( db.c_str() );
@@ -1616,6 +1656,16 @@ namespace mongo {
 
     typedef boost::filesystem::path Path;
 
+    void boostRenameWrapper( const Path &from, const Path &to ) {
+        try {
+            boost::filesystem::rename( from, to );
+        } catch ( const boost::filesystem::filesystem_error & ) {
+            // boost rename doesn't work across partitions
+            boost::filesystem::copy_file( from, to);
+            boost::filesystem::remove( from );
+        }
+    }
+    
     // back up original database files to 'temp' dir
     void _renameForBackup( const char *database, const Path &reservedPath ) {
         Path newPath( reservedPath );
@@ -1629,7 +1679,7 @@ namespace mongo {
             virtual bool apply( const Path &p ) {
                 if ( !boost::filesystem::exists( p ) )
                     return false;
-                boost::filesystem::rename( p, newPath_ / ( p.leaf() + ".bak" ) );
+                boostRenameWrapper( p, newPath_ / ( p.leaf() + ".bak" ) );
                 return true;
             }
             virtual const char * op() const {
@@ -1652,7 +1702,7 @@ namespace mongo {
             virtual bool apply( const Path &p ) {
                 if ( !boost::filesystem::exists( p ) )
                     return false;
-                boost::filesystem::rename( p, newPath_ / p.leaf() );
+                boostRenameWrapper( p, newPath_ / p.leaf() );
                 return true;
             }
             virtual const char * op() const {
@@ -1706,10 +1756,10 @@ namespace mongo {
 #include <sys/statvfs.h>
 namespace mongo {
 #endif
-    boost::intmax_t freeSpace() {
+    boost::intmax_t freeSpace ( const string &path ) {
 #if !defined(_WIN32)
         struct statvfs info;
-        assert( !statvfs( dbpath.c_str() , &info ) );
+        assert( !statvfs( path.c_str() , &info ) );
         return boost::intmax_t( info.f_bavail ) * info.f_frsize;
 #else
         return -1;
@@ -1732,7 +1782,7 @@ namespace mongo {
         BackgroundOperation::assertNoBgOpInProgForDb(dbName);
 
         boost::intmax_t totalSize = dbSize( dbName );
-        boost::intmax_t freeSize = freeSpace();
+        boost::intmax_t freeSize = freeSpace( repairpath );
         if ( freeSize > -1 && freeSize < totalSize ) {
             stringstream ss;
             ss << "Cannot repair database " << dbName << " having size: " << totalSize
@@ -1831,6 +1881,8 @@ namespace mongo {
             dbs.insert( i->first );
         }
         
+        currentClient.get()->getContext()->clear();
+
         BSONObjBuilder bb( result.subarrayStart( "dbs" ) );
         int n = 0;
         int nNotClosed = 0;
@@ -1844,7 +1896,7 @@ namespace mongo {
             }
             else {
                 closeDatabase( name.c_str() , path );
-                bb.append( bb.numStr( n++ ).c_str() , name );
+                bb.append( bb.numStr( n++ ) , name );
             }
         }
         bb.done();

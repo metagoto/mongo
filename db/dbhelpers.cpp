@@ -24,6 +24,7 @@
 #include "queryoptimizer.h"
 #include "btree.h"
 #include "pdfile.h"
+#include "oplog.h"
 
 namespace mongo {
 
@@ -108,18 +109,25 @@ namespace mongo {
             }
             if ( matcher()->matches( c_->currKey(), c_->currLoc() ) ) {
                 one_ = c_->current();
+                loc_ = c_->currLoc();
                 setStop();
             } else {
                 c_->advance();
             }
         }
+        virtual long long nscanned() {
+            assert( c_.get() );
+            return c_->nscanned();
+        }
         virtual bool mayRecordPlan() const { return false; }
         virtual QueryOp *_createChild() const { return new FindOne( requireIndex_ ); }
         BSONObj one() const { return one_; }
+        DiskLoc loc() const { return loc_; }
     private:
         bool requireIndex_;
         shared_ptr<Cursor> c_;
         BSONObj one_;
+        DiskLoc loc_;
     };
     
     /* fetch a single object from collection ns that matches query 
@@ -129,11 +137,24 @@ namespace mongo {
         MultiPlanScanner s( ns, query, BSONObj(), 0, !requireIndex );
         FindOne original( requireIndex );
         shared_ptr< FindOne > res = s.runOp( original );
-        massert( 10302 ,  res->exceptionMessage(), res->complete() );
+        if ( ! res->complete() )
+            throw MsgAssertionException( res->exception() );
         if ( res->one().isEmpty() )
             return false;
         result = res->one();
         return true;
+    }
+
+    /* fetch a single object from collection ns that matches query 
+       set your db SavedContext first
+    */
+    DiskLoc Helpers::findOne(const char *ns, const BSONObj &query, bool requireIndex) { 
+        MultiPlanScanner s( ns, query, BSONObj(), 0, !requireIndex );
+        FindOne original( requireIndex );
+        shared_ptr< FindOne > res = s.runOp( original );
+        if ( ! res->complete() )
+            throw MsgAssertionException( res->exception() );
+        return res->loc();
     }
 
     auto_ptr<CursorIterator> Helpers::find( const char *ns , BSONObj query , bool requireIndex ){
@@ -143,9 +164,9 @@ namespace mongo {
         return i;
     }
     
-    
     bool Helpers::findById(Client& c, const char *ns, BSONObj query, BSONObj& result ,
                            bool * nsFound , bool * indexFound ){
+        dbMutex.assertAtLeastReadLocked();
         Database *database = c.database();
         assert( database );
         NamespaceDetails *d = database->namespaceIndex.details(ns);
@@ -169,6 +190,14 @@ namespace mongo {
             return false;
         result = loc.obj();
         return true;
+    }
+
+     DiskLoc Helpers::findById(NamespaceDetails *d, BSONObj idquery) {
+         int idxNo = d->findIdIndex();
+         uassert(13430, "no _id index", idxNo>=0);
+         IndexDetails& i = d->idx( idxNo );        
+         BSONObj key = i.getKeyFromQuery( idquery );
+         return i.head.btree()->findSingle( i , i.head , key );
     }
 
     bool Helpers::isEmpty(const char *ns) {
@@ -202,6 +231,16 @@ namespace mongo {
         return true;
     }
 
+    void Helpers::upsert( const string& ns , const BSONObj& o ){
+        BSONElement e = o["_id"];
+        assert( e.type() );
+        BSONObj id = e.wrap();
+        
+        OpDebug debug;
+        Client::Context context(ns);
+        updateObjects(ns.c_str(), o, /*pattern=*/id, /*upsert=*/true, /*multi=*/false , /*logtheop=*/true , debug );
+    }
+
     void Helpers::putSingleton(const char *ns, BSONObj obj) {
         OpDebug debug;
         Client::Context context(ns);
@@ -212,6 +251,63 @@ namespace mongo {
         OpDebug debug;
         Client::Context context(ns);
         _updateObjects(/*god=*/true, ns, obj, /*pattern=*/BSONObj(), /*upsert=*/true, /*multi=*/false , logTheOp , debug );
+    }
+
+    BSONObj Helpers::toKeyFormat( const BSONObj& o , BSONObj& key ){
+        BSONObjBuilder me;
+        BSONObjBuilder k;
+
+        BSONObjIterator i( o );
+        while ( i.more() ){
+            BSONElement e = i.next();
+            k.append( e.fieldName() , 1 );
+            me.appendAs( e , "" );
+        }
+        key = k.obj();
+        return me.obj();
+    }
+    
+    long long Helpers::removeRange( const string& ns , const BSONObj& min , const BSONObj& max , bool yield , bool maxInclusive , RemoveCallback * callback ){
+        BSONObj keya , keyb;
+        BSONObj minClean = toKeyFormat( min , keya );
+        BSONObj maxClean = toKeyFormat( max , keyb );
+        assert( keya == keyb );
+
+        Client::Context ctx(ns);
+        NamespaceDetails* nsd = nsdetails( ns.c_str() );
+        if ( ! nsd )
+            return 0;
+
+        int ii = nsd->findIndexByKeyPattern( keya );
+        assert( ii >= 0 );
+        
+        long long num = 0;
+        
+        IndexDetails& i = nsd->idx( ii );
+
+        shared_ptr<Cursor> c( new BtreeCursor( nsd , ii , i , minClean , maxClean , maxInclusive, 1 ) );
+        auto_ptr<ClientCursor> cc( new ClientCursor( QueryOption_NoCursorTimeout , c , ns ) );
+        cc->setDoingDeletes( true );
+        
+        while ( c->ok() ){
+            DiskLoc rloc = c->currLoc();
+            BSONObj key = c->currKey();
+
+            if ( callback )
+                callback->goingToDelete( c->current() );
+            
+            c->advance();
+            c->noteLocation();
+            
+            logOp( "d" , ns.c_str() , rloc.obj()["_id"].wrap() );
+            theDataFileMgr.deleteRecord(ns.c_str() , rloc.rec(), rloc);
+            num++;
+
+            c->checkLocation();
+
+        }
+
+        return num;
     }
 
     void Helpers::emptyCollection(const char *ns) {
@@ -268,5 +364,48 @@ namespace mongo {
             deleteObjects( name_.c_str(), obj, true, false, false );
         }                        
     }
+
+    RemoveSaver::RemoveSaver( const string& a , const string& b , const string& why) : _out(0){
+        static int NUM = 0;
+        
+        _root = dbpath;
+        if ( a.size() )
+            _root /= a;
+        if ( b.size() )
+            _root /= b;
+        assert( a.size() || b.size() );
+        
+        _file = _root;
+        
+        stringstream ss;
+        ss << why << "." << terseCurrentTime(false) << "." << NUM++ << ".bson";
+        _file /= ss.str();
+
+    }
+    
+    RemoveSaver::~RemoveSaver(){
+        if ( _out ){
+            _out->close();
+            delete _out;
+            _out = 0;
+        }
+    }
+    
+    void RemoveSaver::goingToDelete( const BSONObj& o ){
+        if ( ! _out ){
+            create_directories( _root );
+            _out = new ofstream();
+            _out->open( _file.string().c_str() , ios_base::out | ios_base::binary );
+            if ( ! _out->good() ){
+                log( LL_WARNING ) << "couldn't create file: " << _file.string() << " for remove saving" << endl;
+                delete _out;
+                _out = 0;
+                return;
+            }
+            
+        }
+        _out->write( o.objdata() , o.objsize() );
+    }
+    
         
 } // namespace mongo

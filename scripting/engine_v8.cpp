@@ -57,9 +57,12 @@ namespace mongo {
 
         _global->Set(v8::String::New("load"),
                      v8::FunctionTemplate::New(loadCallback, v8::External::New(this))->GetFunction() );
-
-              _wrapper = Persistent< v8::Function >::New( getObjectWrapperTemplate()->GetFunction() );
         
+        _wrapper = Persistent< v8::Function >::New( getObjectWrapperTemplate()->GetFunction() );
+        
+        _global->Set(v8::String::New("gc"), v8::FunctionTemplate::New(GCV8)->GetFunction() );
+
+
         installDBTypes( _global );
     }
 
@@ -329,7 +332,7 @@ namespace mongo {
         return 0;
     }
 
-    bool V8Scope::exec( const string& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs ){
+    bool V8Scope::exec( const StringData& code , const string& name , bool printResult , bool reportError , bool assertOnError, int timeoutMs ){
         if ( timeoutMs ){
             static bool t = 1;
             if ( t ){
@@ -342,7 +345,7 @@ namespace mongo {
         
         TryCatch try_catch;
     
-        Handle<Script> script = v8::Script::Compile( v8::String::New( code.c_str() ) , 
+        Handle<Script> script = v8::Script::Compile( v8::String::New( code.data() ) , 
                                                      v8::String::New( name.c_str() ) );
         if (script.IsEmpty()) {
             stringstream ss;
@@ -383,6 +386,7 @@ namespace mongo {
     }        
     
     void V8Scope::gc() {
+        cout << "in gc" << endl;
         Locker l;
         while( V8::IdleNotification() );
     }
@@ -402,7 +406,7 @@ namespace mongo {
 
         //_global->Set( v8::String::New( "Mongo" ) , _engine->_externalTemplate->GetFunction() );
         _global->Set( v8::String::New( "Mongo" ) , getMongoFunctionTemplate( true )->GetFunction() );
-        exec( jsconcatcode , "localConnect 1" , false , true , true , 0 );
+        execCoreFiles();
         exec( "_mongo = new Mongo();" , "local connect 2" , false , true , true , 0 );
         exec( (string)"db = _mongo.getDB(\"" + dbName + "\");" , "local connect 3" , false , true , true , 0 );
         _connectState = LOCAL;
@@ -419,7 +423,7 @@ namespace mongo {
 
         installFork( _global, _context );
         _global->Set( v8::String::New( "Mongo" ) , getMongoFunctionTemplate( false )->GetFunction() );
-        exec( jsconcatcode , "shell setup" , false , true , true , 0 );
+        execCoreFiles();
         _connectState = EXTERNAL;
     }
 

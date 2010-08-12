@@ -19,12 +19,10 @@
 
 #include "pch.h"
 #include "../db/queryoptimizer.h"
-
 #include "../db/db.h"
 #include "../db/dbhelpers.h"
 #include "../db/instance.h"
 #include "../db/query.h"
-
 #include "dbtests.h"
 
 namespace mongo {
@@ -47,7 +45,7 @@ namespace QueryOptimizerTests {
         public:
             virtual ~Base() {}
             void run() {
-                FieldRangeSet s( "ns", query() );
+                const FieldRangeSet s( "ns", query() );
                 checkElt( lower(), s.range( "a" ).min() );
                 checkElt( upper(), s.range( "a" ).max() );
                 ASSERT_EQUALS( lowerInclusive(), s.range( "a" ).minInclusive() );
@@ -336,6 +334,366 @@ namespace QueryOptimizerTests {
 			}
 		};
         
+        class DiffBase {
+        public:
+            virtual ~DiffBase() {}
+            void run() {
+                FieldRangeSet frs( "", fromjson( obj().toString() ) );
+                FieldRange ret = frs.range( "a" );
+                ret -= frs.range( "b" );
+                check( ret );                
+            }
+        protected:
+            void check( const FieldRange &fr ) {
+                vector< FieldInterval > fi = fr.intervals();
+                ASSERT_EQUALS( len(), fi.size() );
+                int i = 0;
+                for( vector< FieldInterval >::const_iterator j = fi.begin(); j != fi.end(); ++j ) {
+                    ASSERT_EQUALS( nums()[ i ], j->_lower._bound.numberInt() );
+                    ASSERT_EQUALS( incs()[ i ], j->_lower._inclusive );
+                    ++i;
+                    ASSERT_EQUALS( nums()[ i ], j->_upper._bound.numberInt() );
+                    ASSERT_EQUALS( incs()[ i ], j->_upper._inclusive );
+                    ++i;
+                }
+            }
+            virtual unsigned len() const = 0;
+            virtual const int *nums() const = 0;
+            virtual const bool *incs() const = 0;
+            virtual BSONObj obj() const = 0;
+        };
+
+        class TwoRangeBase : public DiffBase {
+        public:
+            TwoRangeBase( string obj, int low, int high, bool lowI, bool highI )
+            : _obj( obj ) {
+                _n[ 0 ] = low;
+                _n[ 1 ] = high;
+                _b[ 0 ] = lowI;
+                _b[ 1 ] = highI;
+            }
+        private:
+            virtual unsigned len() const { return 1; }
+            virtual const int *nums() const { return _n; }
+            virtual const bool *incs() const { return _b; }
+            virtual BSONObj obj() const { return fromjson( _obj ); }
+            string _obj;
+            int _n[ 2 ];
+            bool _b[ 2 ];
+        };
+        
+        struct Diff1 : public TwoRangeBase {
+            Diff1() : TwoRangeBase( "{a:{$gt:1,$lt:2},b:{$gt:3,$lt:4}}", 1, 2, false, false ) {}
+        };
+
+        struct Diff2 : public TwoRangeBase {
+            Diff2() : TwoRangeBase( "{a:{$gt:1,$lt:2},b:{$gt:2,$lt:4}}", 1, 2, false, false ) {}
+        };
+        
+        struct Diff3 : public TwoRangeBase {
+            Diff3() : TwoRangeBase( "{a:{$gt:1,$lte:2},b:{$gt:2,$lt:4}}", 1, 2, false, true ) {}
+        };
+
+        struct Diff4 : public TwoRangeBase {
+            Diff4() : TwoRangeBase( "{a:{$gt:1,$lt:2},b:{$gte:2,$lt:4}}", 1, 2, false, false) {}
+        };
+        
+        struct Diff5 : public TwoRangeBase {
+            Diff5() : TwoRangeBase( "{a:{$gt:1,$lte:2},b:{$gte:2,$lt:4}}", 1, 2, false, false) {}
+        };
+        
+        struct Diff6 : public TwoRangeBase {
+            Diff6() : TwoRangeBase( "{a:{$gt:1,$lte:3},b:{$gte:2,$lt:4}}", 1, 2, false, false) {}
+        };
+
+        struct Diff7 : public TwoRangeBase {
+            Diff7() : TwoRangeBase( "{a:{$gt:1,$lte:3},b:{$gt:2,$lt:4}}", 1, 2, false, true) {}
+        };
+        
+        struct Diff8 : public TwoRangeBase {
+            Diff8() : TwoRangeBase( "{a:{$gt:1,$lt:4},b:{$gt:2,$lt:4}}", 1, 2, false, true) {}
+        };
+
+        struct Diff9 : public TwoRangeBase {
+            Diff9() : TwoRangeBase( "{a:{$gt:1,$lt:4},b:{$gt:2,$lte:4}}", 1, 2, false, true) {}
+        };
+
+        struct Diff10 : public TwoRangeBase {
+            Diff10() : TwoRangeBase( "{a:{$gt:1,$lte:4},b:{$gt:2,$lte:4}}", 1, 2, false, true) {}
+        };        
+        
+        struct Diff11 : public TwoRangeBase {
+            Diff11() : TwoRangeBase( "{a:{$gt:1,$lte:4},b:{$gt:2,$lt:4}}", 1, 4, false, true) {}
+        };
+
+        struct Diff12 : public TwoRangeBase {
+            Diff12() : TwoRangeBase( "{a:{$gt:1,$lt:5},b:{$gt:2,$lt:4}}", 1, 5, false, false) {}
+        };
+        
+        struct Diff13 : public TwoRangeBase {
+            Diff13() : TwoRangeBase( "{a:{$gt:1,$lt:5},b:{$gt:1,$lt:4}}", 4, 5, true, false) {}
+        };
+        
+        struct Diff14 : public TwoRangeBase {
+            Diff14() : TwoRangeBase( "{a:{$gte:1,$lt:5},b:{$gt:1,$lt:4}}", 1, 5, true, false) {}
+        };
+
+        struct Diff15 : public TwoRangeBase {
+            Diff15() : TwoRangeBase( "{a:{$gt:1,$lt:5},b:{$gte:1,$lt:4}}", 4, 5, true, false) {}
+        };
+
+        struct Diff16 : public TwoRangeBase {
+            Diff16() : TwoRangeBase( "{a:{$gte:1,$lt:5},b:{$gte:1,$lt:4}}", 4, 5, true, false) {}
+        };
+
+        struct Diff17 : public TwoRangeBase {
+            Diff17() : TwoRangeBase( "{a:{$gt:1,$lt:5},b:{$gt:0,$lt:4}}", 4, 5, true, false) {}
+        };
+
+        struct Diff18 : public TwoRangeBase {
+            Diff18() : TwoRangeBase( "{a:{$gt:1,$lt:5},b:{$gt:0,$lte:4}}", 4, 5, false, false) {}
+        };
+
+        struct Diff19 : public TwoRangeBase {
+            Diff19() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:{$gte:0,$lte:1}}", 1, 5, false, true) {}
+        };
+
+        struct Diff20 : public TwoRangeBase {
+            Diff20() : TwoRangeBase( "{a:{$gt:1,$lte:5},b:{$gte:0,$lte:1}}", 1, 5, false, true) {}
+        };
+
+        struct Diff21 : public TwoRangeBase {
+            Diff21() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:{$gte:0,$lt:1}}", 1, 5, true, true) {}
+        };
+
+        struct Diff22 : public TwoRangeBase {
+            Diff22() : TwoRangeBase( "{a:{$gt:1,$lte:5},b:{$gte:0,$lt:1}}", 1, 5, false, true) {}
+        };
+
+        struct Diff23 : public TwoRangeBase {
+            Diff23() : TwoRangeBase( "{a:{$gt:1,$lte:5},b:{$gte:0,$lt:0.5}}", 1, 5, false, true) {}
+        };
+
+        struct Diff24 : public TwoRangeBase {
+            Diff24() : TwoRangeBase( "{a:{$gt:1,$lte:5},b:0}", 1, 5, false, true) {}
+        };
+
+        struct Diff25 : public TwoRangeBase {
+            Diff25() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:0}", 1, 5, true, true) {}
+        };
+        
+        struct Diff26 : public TwoRangeBase {
+            Diff26() : TwoRangeBase( "{a:{$gt:1,$lte:5},b:1}", 1, 5, false, true) {}
+        };
+
+        struct Diff27 : public TwoRangeBase {
+            Diff27() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:1}", 1, 5, false, true) {}
+        };
+
+        struct Diff28 : public TwoRangeBase {
+            Diff28() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:3}", 1, 5, true, true) {}
+        };
+
+        struct Diff29 : public TwoRangeBase {
+            Diff29() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:5}", 1, 5, true, false) {}
+        };
+        
+        struct Diff30 : public TwoRangeBase {
+            Diff30() : TwoRangeBase( "{a:{$gte:1,$lt:5},b:5}", 1, 5, true, false) {}
+        };
+
+        struct Diff31 : public TwoRangeBase {
+            Diff31() : TwoRangeBase( "{a:{$gte:1,$lt:5},b:6}", 1, 5, true, false) {}
+        };
+        
+        struct Diff32 : public TwoRangeBase {
+            Diff32() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:6}", 1, 5, true, true) {}
+        };
+
+        class EmptyBase : public DiffBase {
+        public:
+            EmptyBase( string obj )
+            : _obj( obj ) {}
+        private:
+            virtual unsigned len() const { return 0; }
+            virtual const int *nums() const { return 0; }
+            virtual const bool *incs() const { return 0; }
+            virtual BSONObj obj() const { return fromjson( _obj ); }
+            string _obj;
+        };
+                
+        struct Diff33 : public EmptyBase {
+            Diff33() : EmptyBase( "{a:{$gte:1,$lte:5},b:{$gt:0,$lt:6}}" ) {}
+        };
+
+        struct Diff34 : public EmptyBase {
+            Diff34() : EmptyBase( "{a:{$gte:1,$lte:5},b:{$gte:1,$lt:6}}" ) {}
+        };
+
+        struct Diff35 : public EmptyBase {
+            Diff35() : EmptyBase( "{a:{$gt:1,$lte:5},b:{$gte:1,$lt:6}}" ) {}
+        };
+
+        struct Diff36 : public EmptyBase {
+            Diff36() : EmptyBase( "{a:{$gt:1,$lte:5},b:{$gt:1,$lt:6}}" ) {}
+        };
+
+        struct Diff37 : public TwoRangeBase {
+            Diff37() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:{$gt:1,$lt:6}}", 1, 1, true, true ) {}
+        };
+
+        struct Diff38 : public EmptyBase {
+            Diff38() : EmptyBase( "{a:{$gt:1,$lt:5},b:{$gt:0,$lt:5}}" ) {}
+        };
+
+        struct Diff39 : public EmptyBase {
+            Diff39() : EmptyBase( "{a:{$gt:1,$lt:5},b:{$gt:0,$lte:5}}" ) {}
+        };
+
+        struct Diff40 : public EmptyBase {
+            Diff40() : EmptyBase( "{a:{$gt:1,$lte:5},b:{$gt:0,$lte:5}}" ) {}
+        };
+        
+        struct Diff41 : public TwoRangeBase {
+            Diff41() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:{$gt:0,$lt:5}}", 5, 5, true, true ) {}
+        };
+
+        struct Diff42 : public EmptyBase {
+            Diff42() : EmptyBase( "{a:{$gt:1,$lt:5},b:{$gt:1,$lt:5}}" ) {}
+        };
+
+        struct Diff43 : public EmptyBase {
+            Diff43() : EmptyBase( "{a:{$gt:1,$lt:5},b:{$gt:1,$lte:5}}" ) {}
+        };
+
+        struct Diff44 : public EmptyBase {
+            Diff44() : EmptyBase( "{a:{$gt:1,$lt:5},b:{$gte:1,$lt:5}}" ) {}
+        };
+
+        struct Diff45 : public EmptyBase {
+            Diff45() : EmptyBase( "{a:{$gt:1,$lt:5},b:{$gte:1,$lte:5}}" ) {}
+        };
+
+        struct Diff46 : public TwoRangeBase {
+            Diff46() : TwoRangeBase( "{a:{$gt:1,$lte:5},b:{$gt:1,$lt:5}}", 5, 5, true, true ) {}
+        };
+
+        struct Diff47 : public EmptyBase {
+            Diff47() : EmptyBase( "{a:{$gt:1,$lte:5},b:{$gt:1,$lte:5}}" ) {}
+        };
+
+        struct Diff48 : public TwoRangeBase {
+            Diff48() : TwoRangeBase( "{a:{$gt:1,$lte:5},b:{$gte:1,$lt:5}}", 5, 5, true, true ) {}
+        };
+
+        struct Diff49 : public EmptyBase {
+            Diff49() : EmptyBase( "{a:{$gt:1,$lte:5},b:{$gte:1,$lte:5}}" ) {}
+        };
+
+        struct Diff50 : public TwoRangeBase {
+            Diff50() : TwoRangeBase( "{a:{$gte:1,$lt:5},b:{$gt:1,$lt:5}}", 1, 1, true, true ) {}
+        };
+
+        struct Diff51 : public TwoRangeBase {
+            Diff51() : TwoRangeBase( "{a:{$gte:1,$lt:5},b:{$gt:1,$lte:5}}", 1, 1, true, true ) {}
+        };
+
+        struct Diff52 : public EmptyBase {
+            Diff52() : EmptyBase( "{a:{$gte:1,$lt:5},b:{$gte:1,$lt:5}}" ) {}
+        };
+
+        struct Diff53 : public EmptyBase {
+            Diff53() : EmptyBase( "{a:{$gte:1,$lt:5},b:{$gte:1,$lte:5}}" ) {}
+        };
+
+        struct Diff54 : public TwoRangeBase {
+            Diff54() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:{$gt:1,$lt:5}}", 1, 5, true, true ) {}
+        };
+
+        struct Diff55 : public TwoRangeBase {
+            Diff55() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:{$gt:1,$lte:5}}", 1, 1, true, true ) {}
+        };
+
+        struct Diff56 : public TwoRangeBase {
+            Diff56() : TwoRangeBase( "{a:{$gte:1,$lte:5},b:{$gte:1,$lt:5}}", 5, 5, true, true ) {}
+        };
+
+        struct Diff57 : public EmptyBase {
+            Diff57() : EmptyBase( "{a:{$gte:1,$lte:5},b:{$gte:1,$lte:5}}" ) {}
+        };
+        
+        struct Diff58 : public TwoRangeBase {
+            Diff58() : TwoRangeBase( "{a:1,b:{$gt:1,$lt:5}}", 1, 1, true, true ) {}
+        };
+
+        struct Diff59 : public EmptyBase {
+            Diff59() : EmptyBase( "{a:1,b:{$gte:1,$lt:5}}" ) {}
+        };
+
+        struct Diff60 : public EmptyBase {
+            Diff60() : EmptyBase( "{a:2,b:{$gte:1,$lt:5}}" ) {}
+        };
+
+        struct Diff61 : public EmptyBase {
+            Diff61() : EmptyBase( "{a:5,b:{$gte:1,$lte:5}}" ) {}
+        };
+
+        struct Diff62 : public TwoRangeBase {
+            Diff62() : TwoRangeBase( "{a:5,b:{$gt:1,$lt:5}}", 5, 5, true, true ) {}
+        };
+
+        struct Diff63 : public EmptyBase {
+            Diff63() : EmptyBase( "{a:5,b:5}" ) {}
+        };
+        
+        class DiffMulti1 : public DiffBase {
+        public:
+            void run() {
+                FieldRangeSet frs( "", fromjson( "{a:{$gt:1,$lt:9},b:{$gt:0,$lt:2},c:3,d:{$gt:4,$lt:5},e:{$gt:7,$lt:10}}" ) );
+                FieldRange ret = frs.range( "a" );
+                FieldRange other = frs.range( "b" );
+                other |= frs.range( "c" );
+                other |= frs.range( "d" );
+                other |= frs.range( "e" );
+                ret -= other;
+                check( ret );                
+            }
+        protected:
+            virtual unsigned len() const { return 1; }
+            virtual const int *nums() const { static int n[] = { 2, 7 }; return n; }
+            virtual const bool *incs() const { static bool b[] = { true, true }; return b; }
+            virtual BSONObj obj() const { return BSONObj(); }
+        };
+
+        class DiffMulti2 : public DiffBase {
+        public:
+            void run() {
+                FieldRangeSet frs( "", fromjson( "{a:{$gt:1,$lt:9},b:{$gt:0,$lt:2},c:3,d:{$gt:4,$lt:5},e:{$gt:7,$lt:10}}" ) );
+                FieldRange mask = frs.range( "a" );
+                FieldRange ret = frs.range( "b" );
+                ret |= frs.range( "c" );
+                ret |= frs.range( "d" );
+                ret |= frs.range( "e" );
+                ret -= mask;
+                check( ret );                
+            }
+        protected:
+            virtual unsigned len() const { return 2; }
+            virtual const int *nums() const { static int n[] = { 0, 1, 9, 10 }; return n; }
+            virtual const bool *incs() const { static bool b[] = { false, true, true, false }; return b; }
+            virtual BSONObj obj() const { return BSONObj(); }
+        };
+        
+        class SetIntersect {
+        public:
+            void run() {
+                FieldRangeSet frs1( "", fromjson( "{b:{$in:[5,6]},c:7,d:{$in:[8,9]}}" ) );
+                FieldRangeSet frs2( "", fromjson( "{a:1,b:5,c:{$in:[7,8]},d:{$in:[8,9]},e:10}" ) );
+                frs1 &= frs2;
+                ASSERT_EQUALS( fromjson( "{a:1,b:5,c:7,d:{$gte:8,$lte:9},e:10}" ), frs1.simplifiedQuery( BSONObj() ) );
+            }
+        };
+        
     } // namespace FieldRangeTests
     
     namespace QueryPlanTests {
@@ -372,12 +730,10 @@ namespace QueryOptimizerTests {
                 return nsd()->idxNo( *index(key) );
             }
             BSONObj startKey( const QueryPlan &p ) const {
-                BoundList bl = p.indexBounds();
-                return bl[ 0 ].first.getOwned();
+                return p.frv()->startKey();
             }
             BSONObj endKey( const QueryPlan &p ) const {
-                BoundList bl = p.indexBounds();
-                return bl[ bl.size() - 1 ].second.getOwned();
+                return p.frv()->endKey();
             }
         private:
             dblock lk_;
@@ -636,10 +992,10 @@ namespace QueryOptimizerTests {
                 // see query.h for the protocol we are using here.
                 BufBuilder b;
                 int opts = queryOptions;
-                b.append(opts);
-                b.append(ns.c_str());
-                b.append(nToSkip);
-                b.append(nToReturn);
+                b.appendNum(opts);
+                b.appendStr(ns);
+                b.appendNum(nToSkip);
+                b.appendNum(nToReturn);
                 query.appendSelfToBufBuilder(b);
                 if ( fieldsToReturn )
                     fieldsToReturn->appendSelfToBufBuilder(b);
@@ -823,7 +1179,7 @@ namespace QueryOptimizerTests {
                 boost::shared_ptr< TestOp > done = s.runOp( *t );
                 ASSERT( threw );
                 ASSERT( done->complete() );
-                ASSERT( done->exceptionMessage().empty() );
+                ASSERT( done->exception().empty() );
                 ASSERT( !done->error() );
             }
         private:
@@ -844,6 +1200,7 @@ namespace QueryOptimizerTests {
                     return op;
                 }
                 virtual bool mayRecordPlan() const { return true; }
+                virtual long long nscanned() { return 0; }
             private:
                 bool iThrow_;
                 bool &threw_;
@@ -863,7 +1220,7 @@ namespace QueryOptimizerTests {
                 auto_ptr< TestOp > t( new TestOp() );
                 boost::shared_ptr< TestOp > done = s.runOp( *t );
                 ASSERT( !done->complete() );
-                ASSERT_EQUALS( "throw", done->exceptionMessage() );
+                ASSERT_EQUALS( "throw", done->exception().msg );
                 ASSERT( done->error() );
             }
         private:
@@ -877,6 +1234,7 @@ namespace QueryOptimizerTests {
                     return new TestOp();
                 }
                 virtual bool mayRecordPlan() const { return true; }
+                virtual long long nscanned() { return 0; }
             };
         };
         
@@ -949,6 +1307,7 @@ namespace QueryOptimizerTests {
                     return new TestOp();
                 }
                 virtual bool mayRecordPlan() const { return true; }
+                virtual long long nscanned() { return 0; }
             };
             class NoRecordTestOp : public TestOp {
                 virtual bool mayRecordPlan() const { return false; }
@@ -976,6 +1335,7 @@ namespace QueryOptimizerTests {
         private:
             class TestOp : public QueryOp {
             public:
+                TestOp() {}
                 virtual void _init() {}
                 virtual void next() {
                     if ( qp().indexKey().firstElement().fieldName() == string( "$natural" ) )
@@ -986,6 +1346,7 @@ namespace QueryOptimizerTests {
                     return new TestOp();
                 }
                 virtual bool mayRecordPlan() const { return true; }
+                virtual long long nscanned() { return 1; }
             };
             class ScanOnlyTestOp : public TestOp {
                 virtual void next() {
@@ -1024,7 +1385,7 @@ namespace QueryOptimizerTests {
                 theDataFileMgr.insertWithObjMod( ns(), one );
                 deleteObjects( ns(), BSON( "a" << 1 ), false );
                 ASSERT( BSON( "a" << 1 ).woCompare( NamespaceDetailsTransient::_get( ns() ).indexForPattern( FieldRangeSet( ns(), BSON( "a" << 1 ) ).pattern() ) ) == 0 );
-                ASSERT_EQUALS( 2, NamespaceDetailsTransient::_get( ns() ).nScannedForPattern( FieldRangeSet( ns(), BSON( "a" << 1 ) ).pattern() ) );
+                ASSERT_EQUALS( 1, NamespaceDetailsTransient::_get( ns() ).nScannedForPattern( FieldRangeSet( ns(), BSON( "a" << 1 ) ).pattern() ) );
             }
         };
         
@@ -1089,7 +1450,7 @@ namespace QueryOptimizerTests {
                     runQuery( m2, q);
                 }
                 ASSERT( BSON( "a" << 1 ).woCompare( NamespaceDetailsTransient::_get( ns() ).indexForPattern( FieldRangeSet( ns(), BSON( "b" << 0 << "a" << GTE << 0 ) ).pattern() ) ) == 0 );                
-                ASSERT_EQUALS( 2, NamespaceDetailsTransient::_get( ns() ).nScannedForPattern( FieldRangeSet( ns(), BSON( "b" << 0 << "a" << GTE << 0 ) ).pattern() ) );
+                ASSERT_EQUALS( 3, NamespaceDetailsTransient::_get( ns() ).nScannedForPattern( FieldRangeSet( ns(), BSON( "b" << 0 << "a" << GTE << 0 ) ).pattern() ) );
             }
         };
         
@@ -1164,14 +1525,64 @@ namespace QueryOptimizerTests {
                 auto_ptr< FieldRangeSet > frs( new FieldRangeSet( ns(), fromjson( "{a:{$gte:5},b:{$in:[2,3,6,9,11]}}" ) ) );
                 QueryPlan qp( nsd(), 1, *frs, fromjson( "{a:{$gte:5},b:{$in:[2,3,6,9,11]}}" ), BSONObj() );
                 boost::shared_ptr<Cursor> c = qp.newCursor();
-                for( int i = 2; i < 10; ++i, c->advance() ) {
-                    ASSERT_EQUALS( i, c->current().getField( "b" ).number() );
+                int matches[] = { 2, 3, 6, 9 };
+                for( int i = 0; i < 4; ++i, c->advance() ) {
+                    ASSERT_EQUALS( matches[ i ], c->current().getField( "b" ).number() );
                 }
                 ASSERT( !c->ok() );
             }
         };
 
     } // namespace QueryPlanSetTests
+    
+    class Base {
+    public:
+        Base() : _ctx( ns() ) {
+            string err;
+            userCreateNS( ns(), BSONObj(), err, false );
+        }
+        ~Base() {
+            if ( !nsd() )
+                return;
+            string s( ns() );
+            dropNS( s );
+        }
+    protected:
+        static const char *ns() { return "unittests.BaseTests"; }
+        static NamespaceDetails *nsd() { return nsdetails( ns() ); }
+    private:
+        dblock lk_;
+        Client::Context _ctx;
+    };
+        
+    class BestGuess : public Base {
+    public:
+        void run() {
+            Helpers::ensureIndex( ns(), BSON( "a" << 1 ), false, "a_1" );
+            Helpers::ensureIndex( ns(), BSON( "b" << 1 ), false, "b_1" );
+            BSONObj temp = BSON( "a" << 1 );
+            theDataFileMgr.insertWithObjMod( ns(), temp );
+            temp = BSON( "b" << 1 );
+            theDataFileMgr.insertWithObjMod( ns(), temp );
+            
+            boost::shared_ptr< Cursor > c = bestGuessCursor( ns(), BSON( "b" << 1 ), BSON( "a" << 1 ) );
+            ASSERT_EQUALS( string( "a" ), c->indexKeyPattern().firstElement().fieldName() );
+            c = bestGuessCursor( ns(), BSON( "a" << 1 ), BSON( "b" << 1 ) );
+            ASSERT_EQUALS( string( "b" ), c->indexKeyPattern().firstElement().fieldName() );
+            boost::shared_ptr< MultiCursor > m = dynamic_pointer_cast< MultiCursor >( bestGuessCursor( ns(), fromjson( "{b:1,$or:[{z:1}]}" ), BSON( "a" << 1 ) ) );
+            ASSERT_EQUALS( string( "a" ), m->sub_c()->indexKeyPattern().firstElement().fieldName() );
+            m = dynamic_pointer_cast< MultiCursor >( bestGuessCursor( ns(), fromjson( "{a:1,$or:[{y:1}]}" ), BSON( "b" << 1 ) ) );
+            ASSERT_EQUALS( string( "b" ), m->sub_c()->indexKeyPattern().firstElement().fieldName() );
+            
+            FieldRangeSet frs( "ns", BSON( "a" << 1 ) );
+            {
+                scoped_lock lk(NamespaceDetailsTransient::_qcMutex);
+                NamespaceDetailsTransient::get_inlock( ns() ).registerIndexForPattern( frs.pattern( BSON( "b" << 1 ) ), BSON( "a" << 1 ), 0 );  
+            }
+            m = dynamic_pointer_cast< MultiCursor >( bestGuessCursor( ns(), fromjson( "{a:1,$or:[{y:1}]}" ), BSON( "b" << 1 ) ) );
+            ASSERT_EQUALS( string( "b" ), m->sub_c()->indexKeyPattern().firstElement().fieldName() );
+        }
+    };
     
     class All : public Suite {
     public:
@@ -1201,6 +1612,72 @@ namespace QueryOptimizerTests {
             add< FieldRangeTests::InLowerBound >();
             add< FieldRangeTests::InUpperBound >();
             add< FieldRangeTests::MultiBound >();
+            add< FieldRangeTests::Diff1 >();
+            add< FieldRangeTests::Diff2 >();
+            add< FieldRangeTests::Diff3 >();
+            add< FieldRangeTests::Diff4 >();
+            add< FieldRangeTests::Diff5 >();
+            add< FieldRangeTests::Diff6 >();
+            add< FieldRangeTests::Diff7 >();
+            add< FieldRangeTests::Diff8 >();
+            add< FieldRangeTests::Diff9 >();
+            add< FieldRangeTests::Diff10 >();
+            add< FieldRangeTests::Diff11 >();
+            add< FieldRangeTests::Diff12 >();
+            add< FieldRangeTests::Diff13 >();
+            add< FieldRangeTests::Diff14 >();
+            add< FieldRangeTests::Diff15 >();
+            add< FieldRangeTests::Diff16 >();
+            add< FieldRangeTests::Diff17 >();
+            add< FieldRangeTests::Diff18 >();
+            add< FieldRangeTests::Diff19 >();
+            add< FieldRangeTests::Diff20 >();
+            add< FieldRangeTests::Diff21 >();
+            add< FieldRangeTests::Diff22 >();
+            add< FieldRangeTests::Diff23 >();
+            add< FieldRangeTests::Diff24 >();
+            add< FieldRangeTests::Diff25 >();
+            add< FieldRangeTests::Diff26 >();
+            add< FieldRangeTests::Diff27 >();
+            add< FieldRangeTests::Diff28 >();
+            add< FieldRangeTests::Diff29 >();
+            add< FieldRangeTests::Diff30 >();
+            add< FieldRangeTests::Diff31 >();
+            add< FieldRangeTests::Diff32 >();
+            add< FieldRangeTests::Diff33 >();
+            add< FieldRangeTests::Diff34 >();
+            add< FieldRangeTests::Diff35 >();
+            add< FieldRangeTests::Diff36 >();
+            add< FieldRangeTests::Diff37 >();
+            add< FieldRangeTests::Diff38 >();
+            add< FieldRangeTests::Diff39 >();
+            add< FieldRangeTests::Diff40 >();
+            add< FieldRangeTests::Diff41 >();
+            add< FieldRangeTests::Diff42 >();
+            add< FieldRangeTests::Diff43 >();
+            add< FieldRangeTests::Diff44 >();
+            add< FieldRangeTests::Diff45 >();
+            add< FieldRangeTests::Diff46 >();
+            add< FieldRangeTests::Diff47 >();
+            add< FieldRangeTests::Diff48 >();
+            add< FieldRangeTests::Diff49 >();
+            add< FieldRangeTests::Diff50 >();
+            add< FieldRangeTests::Diff51 >();
+            add< FieldRangeTests::Diff52 >();
+            add< FieldRangeTests::Diff53 >();
+            add< FieldRangeTests::Diff54 >();
+            add< FieldRangeTests::Diff55 >();
+            add< FieldRangeTests::Diff56 >();
+            add< FieldRangeTests::Diff57 >();
+            add< FieldRangeTests::Diff58 >();
+            add< FieldRangeTests::Diff59 >();
+            add< FieldRangeTests::Diff60 >();
+            add< FieldRangeTests::Diff61 >();
+            add< FieldRangeTests::Diff62 >();
+            add< FieldRangeTests::Diff63 >();
+            add< FieldRangeTests::DiffMulti1 >();
+            add< FieldRangeTests::DiffMulti2 >();
+            add< FieldRangeTests::SetIntersect >();
             add< QueryPlanTests::NoIndex >();
             add< QueryPlanTests::SimpleOrder >();
             add< QueryPlanTests::MoreIndexThanNeeded >();
@@ -1238,6 +1715,7 @@ namespace QueryOptimizerTests {
             add< QueryPlanSetTests::InQueryIntervals >();
             add< QueryPlanSetTests::EqualityThenIn >();
             add< QueryPlanSetTests::NotEqualityThenIn >();
+            add< BestGuess >();
         }
     } myall;
     

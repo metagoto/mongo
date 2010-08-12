@@ -21,21 +21,23 @@
 #include "../util/unittest.h"
 #include "../client/connpool.h"
 #include "../util/message_server.h"
+#include "../util/stringutils.h"
 #include "../util/version.h"
+#include "../db/dbwebserver.h"
 
 #include "server.h"
 #include "request.h"
 #include "config.h"
 #include "chunk.h"
 #include "balance.h"
+#include "grid.h"
+#include "cursors.h"
 
 namespace mongo {
-
+    
     CmdLine cmdLine;    
     Database *database = 0;
     string mongosCommand;
-    string ourHostname;
-    OID serverID;
     bool dbexitCalled = false;
 
     bool inShutdown(){
@@ -62,7 +64,8 @@ namespace mongo {
     class ShardingConnectionHook : public DBConnectionHook {
     public:
         virtual void onCreate( DBClientBase * conn ){
-            conn->simpleCommand( "admin" , 0 , "switchtoclienterrors" );
+            if ( conn->type() != ConnectionString::SYNC )
+                conn->simpleCommand( "admin" , 0 , "switchtoclienterrors" );
         }
         virtual void onHandedOut( DBClientBase * conn ){
             ClientInfo::get()->addShard( conn->getServerAddress() );
@@ -84,17 +87,20 @@ namespace mongo {
                 log(5) << "client id: " << hex << r.getClientId() << "\t" << r.getns() << "\t" << dec << r.op() << endl;
             }
             try {
+                r.init();
                 setClientId( r.getClientId() );
                 r.process();
             }
             catch ( DBException& e ){
+                log() << "DBException in process: " << e.what() << endl;
+                
                 le->raiseError( e.getCode() , e.what() );
                 
                 m.header()->id = r.id();
-                log() << "UserException: " << e.what() << endl;
+                
                 if ( r.expectResponse() ){
                     BSONObj err = BSON( "$err" << e.what() << "code" << e.getCode() );
-                    replyToQuery( QueryResult::ResultFlag_ErrSet, p , m , err );
+                    replyToQuery( ResultFlag_ErrSet, p , m , err );
                 }
             }
         }
@@ -123,12 +129,14 @@ namespace mongo {
 
     void start( const MessageServer::Options& opts ){
         balancer.go();
+        cursorCache.startTimeoutThread();
 
         log() << "waiting for connections on port " << cmdLine.port << endl;
         //DbGridListener l(port);
         //l.listen();
         ShardedMessageHandler handler;
         MessageServer * server = createServer( opts , &handler );
+        server->setAsTimeTracker();
         server->run();
     }
 
@@ -162,12 +170,11 @@ int main(int argc, char* argv[], char *envp[] ) {
     CmdLine::addGlobalOptions( options , hidden );
     
     options.add_options()
-        ("bind_ip", po::value<string>()->default_value(""),
-         "comma separated list of ip addresses to listen on - all local ips by default")
         ( "configdb" , po::value<string>() , "1 or 3 comma separated config servers" )
         ( "test" , "just run unit tests" )
         ( "upgrade" , "upgrade meta data version" )
         ( "chunkSize" , po::value<int>(), "maximum amount of data per chunk" )
+        ( "ipv6", "enable IPv6 support (disabled by default)" )
         ;
     
 
@@ -190,6 +197,10 @@ int main(int argc, char* argv[], char *envp[] ) {
         Chunk::MaxChunkSize = params["chunkSize"].as<int>() * 1024 * 1024;
     }
 
+    if ( params.count( "ipv6" ) ){
+        enableIPv6();
+    }
+
     if ( params.count( "test" ) ){
         logLevel = 5;
         UnitTest::runTests();
@@ -203,22 +214,32 @@ int main(int argc, char* argv[], char *envp[] ) {
     }
 
     vector<string> configdbs;
-    {
-        string s = params["configdb"].as<string>();
-        while ( true ){
-            size_t idx = s.find( ',' );
-            if ( idx == string::npos ){
-                configdbs.push_back( s );
-                break;
-            }
-            configdbs.push_back( s.substr( 0 , idx ) );
-            s = s.substr( idx + 1 );
-        }
-    }
-
+    splitStringDelim( params["configdb"].as<string>() , &configdbs , ',' );
     if ( configdbs.size() != 1 && configdbs.size() != 3 ){
         out() << "need either 1 or 3 configdbs" << endl;
         return 5;
+    }
+
+    // we either have a seeting were all process are in localhost or none is
+    for ( vector<string>::const_iterator it = configdbs.begin() ; it != configdbs.end() ; ++it ){
+        try {
+
+            HostAndPort configAddr( *it );  // will throw if address format is invalid
+
+            if ( it == configdbs.begin() ){
+                grid.setAllowLocalHost( configAddr.isLocalHost() );
+            }
+
+            if ( configAddr.isLocalHost() != grid.allowLocalHost() ){
+                out() << "cannot mix localhost and ip addresses in configdbs" << endl;
+                return 10;
+            }
+
+        } 
+        catch ( DBException& e) {
+            out() << "configdb: " << e.what() << endl;
+            return 9;
+        }
     }
     
     pool.addHook( &shardingConnectionHook );
@@ -238,11 +259,11 @@ int main(int argc, char* argv[], char *envp[] ) {
     printShardingVersionInfo();
     
     if ( ! configServer.init( configdbs ) ){
-        cout << "couldn't connectd to config db" << endl;
+        cout << "couldn't resolve config db address" << endl;
         return 7;
     }
     
-    if ( ! configServer.ok() ){
+    if ( ! configServer.ok( true ) ){
         cout << "configServer startup check failed" << endl;
         return 8;
     }
@@ -258,12 +279,14 @@ int main(int argc, char* argv[], char *envp[] ) {
         return configError;
     }
     configServer.reloadSettings();
-    
+
     init();
 
+    boost::thread web( webServerThread );
+    
     MessageServer::Options opts;
     opts.port = cmdLine.port;
-    opts.ipList = params["bind_ip"].as<string>();
+    opts.ipList = cmdLine.bind_ip;
     start(opts);
 
     dbexit( EXIT_CLEAN );

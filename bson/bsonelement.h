@@ -18,6 +18,8 @@
 #pragma once
 
 #include <vector>
+#include <string.h>
+#include "util/builder.h"
 
 namespace bson {
     typedef mongo::BSONElement be;
@@ -28,6 +30,11 @@ namespace bson {
 namespace mongo {
 
     class OpTime;
+    class BSONElement;
+
+    /* l and r MUST have same type when called: check that first. */
+    int compareElementValues(const BSONElement& l, const BSONElement& r);
+
 
 /** BSONElement represents an "element" in a BSONObj.  So for the object { a : 3, b : "abc" },
     'a : 3' is the first element (key+value).
@@ -79,9 +86,10 @@ public:
     */
     bool ok() const { return !eoo(); }
 
-    string toString( bool includeFieldName = true ) const;
-    operator string() const { return toString(); }
+    string toString( bool includeFieldName = true, bool full=false) const;
+    void toString(StringBuilder& s, bool includeFieldName = true, bool full=false) const;
     string jsonString( JsonStringFormat format, bool includeFieldNames = true, int pretty = 0 ) const;
+    operator string() const { return toString(); }
 
     /** Returns the type of the element */
     BSONType type() const { return (BSONType) *data; }
@@ -210,7 +218,9 @@ public:
         return type() == mongo::String ? valuestr() : "";
     }
     /** Get the string value of the element.  If not a string returns "". */
-    string str() const { return valuestrsafe(); }
+    string str() const {
+        return type() == mongo::String ? string(valuestr(), valuestrsize()-1) : string();
+    }
 
     /** Get javascript code of a CodeWScope data element. */
     const char * codeWScopeCode() const {
@@ -230,12 +240,23 @@ public:
 
     BSONObj codeWScopeObject() const;
 
-    /** Get binary data.  Element must be of type BinData */
+    /** Get raw binary data.  Element must be of type BinData. Doesn't handle type 2 specially */
     const char *binData(int& len) const { 
         // BinData: <int len> <byte subtype> <byte[len] data>
         assert( type() == BinData );
         len = valuestrsize();
         return value() + 5;
+    }
+    /** Get binary data.  Element must be of type BinData. Handles type 2 */
+    const char *binDataClean(int& len) const { 
+        // BinData: <int len> <byte subtype> <byte[len] data>
+        if (binDataType() != ByteArrayDeprecated){
+            return binData(len);
+        } else {
+            // Skip extra size
+            len = valuestrsize() - 4;
+            return value() + 5 + 4;
+        }
     }
         
     BinDataType binDataType() const {
@@ -268,7 +289,6 @@ public:
     bool operator==(const BSONElement& r) const {
         return woCompare( r , true ) == 0;
     }
-
 
     /** Well ordered comparison.
         @return <0: l<r. 0:l==r. >0:l>r
@@ -371,7 +391,11 @@ private:
     friend class BSONObjIterator;
     friend class BSONObj;
     const BSONElement& chk(int t) const { 
-        uassert(13111, "unexpected or missing type value in BSON object", t == type());
+        if ( t != type() ){
+            StringBuilder ss;
+            ss << "wrong type for BSONElement (" << fieldName() << ") " << type() << " != " << t;
+            uasserted(13111, ss.str() );
+        }
         return *this;
     }
     const BSONElement& chk(bool expr) const { 
@@ -521,6 +545,5 @@ private:
         fieldNameSize_ = 0;
         totalSize = 1;
     }
-
 
 }

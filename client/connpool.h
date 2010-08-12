@@ -65,6 +65,10 @@ namespace mongo {
         map<string,PoolForHost> _pools; // servername -> pool
         list<DBConnectionHook*> _hooks;
 
+        DBClientBase* _get( const string& ident );
+        
+        DBClientBase* _finishCreate( const string& ident , DBClientBase* conn );
+
     public:        
         DBConnectionPool() : _mutex("DBConnectionPool") { }
         ~DBConnectionPool();
@@ -74,7 +78,10 @@ namespace mongo {
         void onHandedOut( DBClientBase * conn );
 
         void flush();
+
         DBClientBase *get(const string& host);
+        DBClientBase *get(const ConnectionString& host);
+
         void release(const string& host, DBClientBase *c) {
             if ( c->isFailed() ){
                 delete c;
@@ -89,10 +96,18 @@ namespace mongo {
     
     extern DBConnectionPool pool;
 
+    class AScopedConnection : boost::noncopyable {
+    public:
+        virtual ~AScopedConnection(){}
+        virtual DBClientBase* get() = 0;
+        virtual void done() = 0;
+        virtual string getHost() const = 0;
+    };
+
     /** Use to get a connection from the pool.  On exceptions things
        clean up nicely.
     */
-    class ScopedDbConnection : boost::noncopyable {
+    class ScopedDbConnection : public AScopedConnection {
         const string _host;
         DBClientBase *_conn;
     public:
@@ -129,6 +144,11 @@ namespace mongo {
         
         ScopedDbConnection(const Shard& shard );
         ScopedDbConnection(const Shard* shard );
+
+        ScopedDbConnection(const ConnectionString& url )
+            : _host(url.toString()), _conn( pool.get(url) ) {
+        }
+
 
         string getHost() const { return _host; }
 

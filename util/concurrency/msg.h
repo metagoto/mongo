@@ -27,27 +27,33 @@ namespace mongo {
 
         typedef boost::function<void()> lam;
 
-        class Server : private Task { 
+        /** typical usage is: task::fork( new Server("threadname") ); */
+        class Server : public Task { 
         public:
             /** send a message to the port */
             void send(lam);
 
-            /** typical usage is: task::fork( foo.task() ); */
-            shared_ptr<Task> taskPtr() { return shared_ptr<Task>(static_cast<Task*>(this)); }
-
-            Server(string name) : _name(name) { }
+            Server(string name) : _name(name), rq(false) { }
             virtual ~Server() { }
 
             /** send message but block until function completes */
             void call(const lam&);
 
+            void requeue() { rq = true; }
+
+        protected:
+            /* REMINDER : for use in mongod, you will want to have this call Client::initThread(). */
+            virtual void starting() { }
+
         private:
+            virtual bool initClient() { return true; }
             virtual string name() { return _name; }
             void doWork();
             deque<lam> d;
             boost::mutex m;
             boost::condition c;
             string _name;
+            bool rq;
         };
 
     }

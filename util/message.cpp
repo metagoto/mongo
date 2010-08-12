@@ -28,11 +28,23 @@
 #include "../db/cmdline.h"
 #include "../client/dbclient.h"
 
+#ifndef _WIN32
+#include <sys/resource.h>
+#else
+
+// errno doesn't work for winsock.
+#undef errno
+#define errno WSAGetLastError()
+
+#endif
+
 namespace mongo {
 
     bool noUnixSocket = false;
 
     bool objcheck = false;
+
+    void checkTicketNumbers();
     
 // if you want trace output:
 #define mmm(x)
@@ -44,6 +56,8 @@ namespace mongo {
     const int portSendFlags = 0;
     const int portRecvFlags = 0;
 #endif
+
+    const Listener* Listener::_timeTracker;
 
     vector<SockAddr> ipToAddrs(const char* ips, int port){
         vector<SockAddr> out;
@@ -85,6 +99,7 @@ namespace mongo {
     /* listener ------------------------------------------------------------------- */
 
     void Listener::initAndListen() {
+        checkTicketNumbers();
         vector<SockAddr> mine = ipToAddrs(_ip.c_str(), _port);
         vector<int> socks;
         SOCKET maxfd = 0; // needed for select()
@@ -107,7 +122,7 @@ namespace mongo {
                     }
                 }
 #endif
-            }else if (me.getType() == AF_INET6){
+            } else if (me.getType() == AF_INET6) {
                 // IPv6 can also accept IPv4 connections as mapped addresses (::ffff:127.0.0.1)
                 // That causes a conflict if we don't do set it to IPV6_ONLY
                 const int one = 1;
@@ -139,6 +154,7 @@ namespace mongo {
         }
 
         static long connNumber = 0;
+        struct timeval maxSelectTime;
         while ( ! inShutdown() ) {
             fd_set fds[1];
             FD_ZERO(fds);
@@ -147,12 +163,21 @@ namespace mongo {
                 FD_SET(*it, fds);
             }
 
-            const int ret = select(maxfd+1, fds, NULL, NULL, NULL);
+            maxSelectTime.tv_sec = 0;
+            maxSelectTime.tv_usec = 10000;
+            const int ret = select(maxfd+1, fds, NULL, NULL, &maxSelectTime);
+            
             if (ret == 0){
-                log() << "select() returned 0" << endl;
+#if defined(__linux__)
+                _elapsedTime += ( 10000 - maxSelectTime.tv_usec ) / 1000;
+#else
+                _elapsedTime += 10;
+#endif
                 continue;
             }
-            else if (ret < 0){
+            _elapsedTime += ret; // assume 1ms to grab connection. very rough
+            
+            if (ret < 0){
                 int x = errno;
 #ifdef EINTR
                 if ( x == EINTR ){
@@ -243,12 +268,10 @@ namespace mongo {
     };
 
     class Ports { 
-        set<MessagingPort*>& ports;
+        set<MessagingPort*> ports;
         mongo::mutex m;
     public:
-        // we "new" this so it is still be around when other automatic global vars
-        // are being destructed during termination.
-        Ports() : ports( *(new set<MessagingPort*>()) ), m("Ports") {}
+        Ports() : ports(), m("Ports") {}
         void closeAll() { \
             scoped_lock bl(m);
             for ( set<MessagingPort*>::iterator i = ports.begin(); i != ports.end(); i++ )
@@ -262,7 +285,11 @@ namespace mongo {
             scoped_lock bl(m);
             ports.erase(p);
         }
-    } ports;
+    };
+
+    // we "new" this so it is still be around when other automatic global vars
+    // are being destructed during termination.
+    Ports& ports = *(new Ports());
 
 
 
@@ -357,14 +384,14 @@ namespace mongo {
     bool MessagingPort::recv(Message& m) {
         try {
         again:
-            mmm( out() << "*  recv() sock:" << this->sock << endl; )
+            mmm( log() << "*  recv() sock:" << this->sock << endl; )
             int len = -1;
             
             char *lenbuf = (char *) &len;
             int lft = 4;
             recv( lenbuf, lft );
             
-            if ( len < 0 || len > 16000000 ) {
+            if ( len < 16 || len > 16000000 ) { // messages must be large enough for headers
                 if ( len == -1 ) {
                     // Endian check from the database, after connecting, to see what mode server is running in.
                     unsigned foo = 0x10203040;
@@ -392,19 +419,21 @@ namespace mongo {
             assert(md);
             md->len = len;
             
-            if ( len <= 0 ) {
-                out() << "got a length of " << len << ", something is wrong" << endl;
-                return false;
-            }
-            
             char *p = (char *) &md->id;
             int left = len -4;
-            recv( p, left );
+
+            try {
+                recv( p, left );
+            } catch (...) {
+                free(md);
+                throw;
+            }
             
             m.setData(md, true);
             return true;
-
-        } catch ( const SocketException & ) {
+            
+        } catch ( const SocketException & e ) {
+            log(_logLevel + (e.shouldPrint() ? 0 : 1) ) << "SocketException: " << e << endl;
             m.reset();
             return false;
         }
@@ -419,38 +448,38 @@ namespace mongo {
     }
 
     bool MessagingPort::call(Message& toSend, Message& response) {
-        mmm( out() << "*call()" << endl; )
+        mmm( log() << "*call()" << endl; )
         MSGID old = toSend.header()->id;
         say(/*to,*/ toSend);
         while ( 1 ) {
             bool ok = recv(response);
             if ( !ok )
                 return false;
-            //out() << "got response: " << response.data->responseTo << endl;
+            //log() << "got response: " << response.data->responseTo << endl;
             if ( response.header()->responseTo == toSend.header()->id )
                 break;
-            out() << "********************" << endl;
-            out() << "ERROR: MessagingPort::call() wrong id got:" << (unsigned)response.header()->responseTo << " expect:" << (unsigned)toSend.header()->id << endl;
-            out() << "  toSend op: " << toSend.operation() << " old id:" << (unsigned)old << endl;
-            out() << "  response msgid:" << (unsigned)response.header()->id << endl;
-            out() << "  response len:  " << (unsigned)response.header()->len << endl;
-            out() << "  response op:  " << response.operation() << endl;
-            out() << "  farEnd: " << farEnd << endl;
+            log() << "********************" << endl;
+            log() << "ERROR: MessagingPort::call() wrong id got:" << hex << (unsigned)response.header()->responseTo << " expect:" << (unsigned)toSend.header()->id << endl;
+            log() << "  toSend op: " << toSend.operation() << " old id:" << (unsigned)old << endl;
+            log() << "  response msgid:" << (unsigned)response.header()->id << endl;
+            log() << "  response len:  " << (unsigned)response.header()->len << endl;
+            log() << "  response op:  " << response.operation() << endl;
+            log() << "  farEnd: " << farEnd << endl;
             assert(false);
             response.reset();
         }
-        mmm( out() << "*call() end" << endl; )
+        mmm( log() << "*call() end" << endl; )
         return true;
     }
 
     void MessagingPort::say(Message& toSend, int responseTo) {
         assert( !toSend.empty() );
-        mmm( out() << "*  say() sock:" << this->sock << " thr:" << GetCurrentThreadId() << endl; )
+        mmm( log() << "*  say() sock:" << this->sock << " thr:" << GetCurrentThreadId() << endl; )
         toSend.header()->id = nextMessageId();
         toSend.header()->responseTo = responseTo;
 
         if ( piggyBackData && piggyBackData->len() ) {
-            mmm( out() << "*     have piggy back" << endl; )
+            mmm( log() << "*     have piggy back" << endl; )
             if ( ( piggyBackData->len() + toSend.header()->len ) > 1300 ) {
                 // won't fit in a packet - so just send it off
                 piggyBackData->flush();
@@ -472,11 +501,11 @@ namespace mongo {
             if ( ret == -1 ) {
                 if ( errno != EAGAIN || _timeout == 0 ) {
                     log(_logLevel) << "MessagingPort " << context << " send() " << errnoWithDescription() << ' ' << farEnd.toString() << endl;
-                    throw SocketException();                    
+                    throw SocketException( SocketException::SEND_ERROR );                    
                 } else {
                     if ( !serverAlive( farEnd.toString() ) ) {
                         log(_logLevel) << "MessagingPort " << context << " send() remote dead " << farEnd.toString() << endl;
-                        throw SocketException();                        
+                        throw SocketException( SocketException::SEND_ERROR );                        
                     }
                 }
             } else {
@@ -516,11 +545,11 @@ namespace mongo {
             if ( ret == -1 ) {
                 if ( errno != EAGAIN || _timeout == 0 ) {
                     log(_logLevel) << "MessagingPort " << context << " send() " << errnoWithDescription() << ' ' << farEnd.toString() << endl;
-                    throw SocketException();                    
+                    throw SocketException( SocketException::SEND_ERROR );                    
                 } else {
                     if ( !serverAlive( farEnd.toString() ) ) {
                         log(_logLevel) << "MessagingPort " << context << " send() remote dead " << farEnd.toString() << endl;
-                        throw SocketException();                        
+                        throw SocketException( SocketException::SEND_ERROR );                        
                     }
                 }
             } else {
@@ -542,20 +571,30 @@ namespace mongo {
     }
 
     void MessagingPort::recv( char * buf , int len ){
+        unsigned retries = 0;
         while( len > 0 ) {
             int ret = ::recv( sock , buf , len , portRecvFlags );
             if ( ret == 0 ) {
                 log(3) << "MessagingPort recv() conn closed? " << farEnd.toString() << endl;
-                throw SocketException();
+                throw SocketException( SocketException::CLOSED );
             }
-            if ( ret == -1 ) {
-                if ( errno != EAGAIN || _timeout == 0 ) {                
-                    log(_logLevel) << "MessagingPort recv() " << errnoWithDescription() << " " << farEnd.toString()<<endl;
-                    throw SocketException();
+            if ( ret < 0 ) {
+                int e = errno;
+#if defined(EINTR) && !defined(_WIN32)
+                if( e == EINTR ) {
+                    if( ++retries == 1 ) {
+                        log() << "EINTR retry" << endl;
+                        continue;
+                    }
+                }
+#endif
+                if ( e != EAGAIN || _timeout == 0 ) {                
+                    log(_logLevel) << "MessagingPort recv() " << errnoWithDescription(e) << " " << farEnd.toString() <<endl;
+                    throw SocketException( SocketException::RECV_ERROR );
                 } else {
                     if ( !serverAlive( farEnd.toString() ) ) {
                         log(_logLevel) << "MessagingPort recv() remote dead " << farEnd.toString() << endl;
-                        throw SocketException();                        
+                        throw SocketException( SocketException::RECV_ERROR );                        
                     }
                 }
             } else {
@@ -634,6 +673,64 @@ namespace mongo {
     
     int getClientId(){
         return clientId.get();
+    }
+    
+    int getMaxConnections(){
+#ifdef _WIN32
+        return 20000;
+#else
+        struct rlimit limit;
+        assert( getrlimit(RLIMIT_NOFILE,&limit) == 0 );
+
+        int max = (int)(limit.rlim_cur * .8);
+
+        log(1) << "fd limit" 
+               << " hard:" << limit.rlim_max 
+               << " soft:" << limit.rlim_cur 
+               << " max conn: " << max
+               << endl;
+        
+        if ( max > 20000 )
+            max = 20000;
+
+        return max;
+#endif
+    }
+
+    void checkTicketNumbers(){
+        connTicketHolder.resize( getMaxConnections() );
+    }
+
+    TicketHolder connTicketHolder(20000);
+
+    namespace {
+        map<string, bool> isSelfCache; // host, isSelf
+    }
+    
+    bool HostAndPort::isSelf() const { 
+        int p = _port == -1 ? CmdLine::DefaultDBPort : _port;
+
+        if( p != cmdLine.port ){
+            return false;
+        } else if (sameHostname(getHostName(), _host) || isLocalHost()) {
+            return true;
+        } else {
+            map<string, bool>::const_iterator it = isSelfCache.find(_host);
+            if (it != isSelfCache.end()){
+                return it->second;
+            }
+
+            SockAddr addr (_host.c_str(), 0); // port 0 is dynamically assigned
+            SOCKET sock = ::socket(addr.getType(), SOCK_STREAM, 0);
+            assert(sock != INVALID_SOCKET);
+
+            bool ret = (::bind(sock, addr.raw(), addr.addressSize) == 0);
+            isSelfCache[_host] = ret;
+
+            closesocket(sock);
+
+            return ret;
+        }
     }
 
 } // namespace mongo

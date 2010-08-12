@@ -17,6 +17,7 @@
 
 #include "pch.h"
 #include "ntservice.h"
+#include "winutil.h"
 #include "text.h"
 #include <direct.h>
 
@@ -33,7 +34,7 @@ namespace mongo {
 	ServiceController::ServiceController() {
     }
     
-    bool ServiceController::installService( const std::wstring& serviceName, const std::wstring& displayName, const std::wstring& serviceDesc, int argc, char* argv[] ) {
+    bool ServiceController::installService( const std::wstring& serviceName, const std::wstring& displayName, const std::wstring& serviceDesc, const std::wstring& serviceUser, const std::wstring& servicePassword, const std::string dbpath, int argc, char* argv[] ) {
         assert(argc >= 1);
 
         stringstream commandLine;
@@ -47,43 +48,81 @@ namespace mongo {
         }
         
         for ( int i = 1; i < argc; i++ ) {
-			std::string arg( argv[ i ] );
-			
-			// replace install command to indicate process is being started as a service
-			if ( arg == "--install" ) {
-				arg = "--service";
-			}
-				
-			commandLine << arg << "  ";
-		}
-		
-		SC_HANDLE schSCManager = ::OpenSCManager( NULL, NULL, SC_MANAGER_ALL_ACCESS );
-		if ( schSCManager == NULL ) {
-			return false;
-		}
-		
-		std::basic_ostringstream< TCHAR > commandLineWide;
-        commandLineWide << commandLine.str().c_str();
+            std::string arg( argv[ i ] );
+            // replace install command to indicate process is being started as a service
+            if ( arg == "--install" || arg == "--reinstall" ) {
+                arg = "--service";
+            } else if ( arg == "--dbpath" && i + 1 < argc ) {
+                commandLine << arg << "  \"" << dbpath << "\"  ";
+                i++;
+                continue;
+            } else if ( arg.length() > 9 && arg.substr(0, 9) == "--service" ) {
+                // Strip off --service(Name|User|Password) arguments
+                continue;
+            }
+            commandLine << arg << "  ";
+        }
 
-		log() << "Creating service " << toUtf8String(serviceName) << "." << endl;
+        SC_HANDLE schSCManager = ::OpenSCManager( NULL, NULL, SC_MANAGER_ALL_ACCESS );
+        if ( schSCManager == NULL ) {
+            DWORD err = ::GetLastError();
+            cerr << "Error connecting to the Service Control Manager: " << GetWinErrMsg(err) << endl;
+            return false;
+        }
 
-		// create new service
-		SC_HANDLE schService = ::CreateService( schSCManager, serviceName.c_str(), displayName.c_str(),
-												SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
-												SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-												commandLineWide.str().c_str(), NULL, NULL, L"\0\0", NULL, NULL );
-
-		if ( schService == NULL ) {
-			log() << "Error creating service." << endl;
+		// Make sure servise doesn't already exist. 
+		// TODO: Check to see if service is in "Deleting" status, suggest the user close down Services MMC snap-ins.
+		SC_HANDLE schService = ::OpenService( schSCManager, serviceName.c_str(), SERVICE_ALL_ACCESS );
+		if ( schService != NULL ) {
+			cerr << "There is already a service named " << toUtf8String(serviceName) << ". Aborting" << endl;
+			::CloseServiceHandle( schService );
 			::CloseServiceHandle( schSCManager );
 			return false;
 		}
+		std::basic_ostringstream< TCHAR > commandLineWide;
+ 		commandLineWide << commandLine.str().c_str();
 
+		cerr << "Creating service " << toUtf8String(serviceName) << "." << endl;
+
+		// create new service
+		schService = ::CreateService( schSCManager, serviceName.c_str(), displayName.c_str(),
+												SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+												SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+												commandLineWide.str().c_str(), NULL, NULL, L"\0\0", NULL, NULL );
+        if ( schService == NULL ) {
+            DWORD err = ::GetLastError();
+            cerr << "Error creating service: " << GetWinErrMsg(err) << endl;
+            ::CloseServiceHandle( schSCManager );
+            return false;
+        }
+
+		cerr << "Service creation successful." << endl;
+		cerr << "Service can be started from the command line via 'net start \"" << toUtf8String(serviceName) << "\"'." << endl;
+
+		bool serviceInstalled;
+
+		// TODO: If neccessary grant user "Login as a Service" permission.
+		if ( !serviceUser.empty() ) {
+			std::wstring actualServiceUser;
+			if ( serviceUser.find(L"\\") == string::npos ) {
+				actualServiceUser = L".\\" + serviceUser;
+			}
+			else {
+				actualServiceUser = serviceUser;
+			}
+
+			cerr << "Setting service login credentials. User: " << toUtf8String(actualServiceUser) << endl;
+			serviceInstalled = ::ChangeServiceConfig( schService, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, actualServiceUser.c_str(), servicePassword.c_str(), NULL );
+			if ( !serviceInstalled ) {
+				cerr << "Setting service login failed. Service has 'LocalService' permissions." << endl;
+			}
+		}
+		
+		// set the service description
 		SERVICE_DESCRIPTION serviceDescription;
 		serviceDescription.lpDescription = (LPTSTR)serviceDesc.c_str();
-		
-		// set new service description
-		bool serviceInstalled = ::ChangeServiceConfig2( schService, SERVICE_CONFIG_DESCRIPTION, &serviceDescription );
+		serviceInstalled = ::ChangeServiceConfig2( schService, SERVICE_CONFIG_DESCRIPTION, &serviceDescription );
+
 		
 		if ( serviceInstalled ) {
 			SC_ACTION aActions[ 3 ] = { { SC_ACTION_RESTART, 0 }, { SC_ACTION_RESTART, 0 }, { SC_ACTION_RESTART, 0 } };
@@ -96,10 +135,9 @@ namespace mongo {
 			// set service recovery options
 			serviceInstalled = ::ChangeServiceConfig2( schService, SERVICE_CONFIG_FAILURE_ACTIONS, &serviceFailure );
 
-			log() << "Service creation successful." << endl;
 		}
 		else {
-			log() << "Service creation seems to have partially failed. Check the event log for more details." << endl;
+			cerr << "Could not set service description. Check the event log for more details." << endl;
 		}
 
 		::CloseServiceHandle( schService );
@@ -109,14 +147,16 @@ namespace mongo {
     }
     
     bool ServiceController::removeService( const std::wstring& serviceName ) {
-		SC_HANDLE schSCManager = ::OpenSCManager( NULL, NULL, SC_MANAGER_ALL_ACCESS );
-		if ( schSCManager == NULL ) {
-			return false;
-		}
+        SC_HANDLE schSCManager = ::OpenSCManager( NULL, NULL, SC_MANAGER_ALL_ACCESS );
+        if ( schSCManager == NULL ) {
+            DWORD err = ::GetLastError();
+            cerr << "Error connecting to the Service Control Manager: " << GetWinErrMsg(err) << endl;
+            return false;
+        }
 
 		SC_HANDLE schService = ::OpenService( schSCManager, serviceName.c_str(), SERVICE_ALL_ACCESS );
 		if ( schService == NULL ) {
-			log() << "Could not get a service handle for " << toUtf8String(serviceName) << "." << endl;
+			cerr << "Could not find a service named " << toUtf8String(serviceName) << " to uninstall." << endl;
 			::CloseServiceHandle( schSCManager );
 			return false;
 		}
@@ -125,7 +165,7 @@ namespace mongo {
 		
 		// stop service if its running
 		if ( ::ControlService( schService, SERVICE_CONTROL_STOP, &serviceStatus ) ) {
-			log() << "Service " << toUtf8String(serviceName) << " is currently running. Stopping service." << endl;
+			cerr << "Service " << toUtf8String(serviceName) << " is currently running. Stopping service." << endl;
 			while ( ::QueryServiceStatus( schService, &serviceStatus ) ) {
 				if ( serviceStatus.dwCurrentState == SERVICE_STOP_PENDING )
 				{
@@ -133,20 +173,20 @@ namespace mongo {
 				}
 				else { break; }
 			}
-			log() << "Service stopped." << endl;
+			cerr << "Service stopped." << endl;
 		}
 
-		log() << "Deleting service " << toUtf8String(serviceName) << "." << endl;
+		cerr << "Deleting service " << toUtf8String(serviceName) << "." << endl;
 		bool serviceRemoved = ::DeleteService( schService );
 		
 		::CloseServiceHandle( schService );
 		::CloseServiceHandle( schSCManager );
 
 		if (serviceRemoved) {
-			log() << "Service deleted successfully." << endl;
+			cerr << "Service deleted successfully." << endl;
 		}
 		else {
-			log() << "Failed to delete service." << endl;
+			cerr << "Failed to delete service." << endl;
 		}
 
 		return serviceRemoved;

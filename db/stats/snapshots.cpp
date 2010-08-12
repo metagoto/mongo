@@ -20,6 +20,8 @@
 #include "snapshots.h"
 #include "../client.h"
 #include "../clientcursor.h"
+#include "../dbwebserver.h"
+#include "../../util/mongoutils/html.h"
 
 /**
    handles snapshotting performance metrics and other such things
@@ -87,19 +89,16 @@ namespace mongo {
 
     void Snapshots::outputLockInfoHTML( stringstream& ss ){
         scoped_lock lk(_lock);
-        ss << "\n<table>";
-        ss << "<tr><th>elapsed(ms)</th><th>% write locked</th></tr>\n";
-        
+        ss << "\n<div>";
         for ( int i=0; i<numDeltas(); i++ ){
             SnapshotDelta d( getPrev(i+1) , getPrev(i) );
-            ss << "<tr>"
-               << "<td>" << ( d.elapsed() / 1000 ) << "</td>"
-               << "<td>" << (unsigned)(100*d.percentWriteLocked()) << "%</td>"
-               << "</tr>\n"
-                ;
+            unsigned e = (unsigned) d.elapsed() / 1000;
+            ss << (unsigned)(100*d.percentWriteLocked());
+            if( e < 3900 || e > 4100 ) 
+                ss << '(' << e / 1000.0 << "s)";
+            ss << ' ';
         }
-        
-        ss << "</table>\n";
+        ss << "</div>\n";
     }
 
     void SnapshotThread::run(){
@@ -136,6 +135,89 @@ namespace mongo {
         
         client.shutdown();
     }
+
+    using namespace mongoutils::html;
+
+    class WriteLockStatus : public WebStatusPlugin {
+    public:
+        WriteLockStatus() : WebStatusPlugin( "write lock" , 51 , "% time in write lock, by 4 sec periods" ){}
+        virtual void init(){}
+
+        virtual void run( stringstream& ss ){
+            statsSnapshots.outputLockInfoHTML( ss );
+
+            ss << "<a "
+                  "href=\"http://www.mongodb.org/pages/viewpage.action?pageId=7209296\" " 
+                  "title=\"snapshot: was the db in the write lock when this page was generated?\">";
+            ss << "write locked now:</a> " << (dbMutex.info().isLocked() ? "true" : "false") << "\n";
+        }
+
+    } writeLockStatus;
+
+    class DBTopStatus : public WebStatusPlugin {
+    public:
+        DBTopStatus() : WebStatusPlugin( "dbtop" , 50 , "(occurences|percent of elapsed)" ){}
+
+        void display( stringstream& ss , double elapsed , const Top::UsageData& usage ){
+            ss << "<td>";
+            ss << usage.count;
+            ss << "</td><td>";
+            double per = 100 * ((double)usage.time)/elapsed;
+            ss << setprecision(4) << fixed << per << "%";
+            ss << "</td>";
+        }
+
+        void display( stringstream& ss , double elapsed , const string& ns , const Top::CollectionData& data ){
+            if ( ns != "GLOBAL" && data.total.count == 0 )
+                return;
+            ss << "<tr><th>" << ns << "</th>";
+            
+            display( ss , elapsed , data.total );
+
+            display( ss , elapsed , data.readLock );
+            display( ss , elapsed , data.writeLock );
+
+            display( ss , elapsed , data.queries );
+            display( ss , elapsed , data.getmore );
+            display( ss , elapsed , data.insert );
+            display( ss , elapsed , data.update );
+            display( ss , elapsed , data.remove );
+            
+            ss << "</tr>\n";
+        }
+
+        void run( stringstream& ss ){
+            auto_ptr<SnapshotDelta> delta = statsSnapshots.computeDelta();
+            if ( ! delta.get() )
+                return;
+            
+            ss << "<table border=1 cellpadding=2 cellspacing=0>";
+            ss << "<tr align='left'><th>";
+            ss << a("http://www.mongodb.org/display/DOCS/Developer+FAQ#DeveloperFAQ-What%27sa%22namespace%22%3F", "namespace") << 
+                "NS</a></th>"
+                "<th colspan=2>total</th>"
+                "<th colspan=2>Reads</th>"
+                "<th colspan=2>Writes</th>"
+                "<th colspan=2>Queries</th>"
+                "<th colspan=2>GetMores</th>"
+                "<th colspan=2>Inserts</th>"
+                "<th colspan=2>Updates</th>"
+                "<th colspan=2>Removes</th>";
+            ss << "</tr>\n";
+            
+            display( ss , (double) delta->elapsed() , "GLOBAL" , delta->globalUsageDiff() );
+            
+            Top::UsageMap usage = delta->collectionUsageDiff();
+            for ( Top::UsageMap::iterator i=usage.begin(); i != usage.end(); i++ ){
+                display( ss , (double) delta->elapsed() , i->first , i->second );
+            }
+            
+            ss << "</table>";
+        
+        }
+
+        virtual void init(){}
+    } dbtopStatus;
 
     Snapshots statsSnapshots;
     SnapshotThread snapshotThread;    

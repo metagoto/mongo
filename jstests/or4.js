@@ -81,3 +81,18 @@ t.remove( {} );
 t.save( {a:[1,2]} );
 assert.eq.automsg( "1", "t.find( {$or:[{a:1},{a:2}]} ).toArray().length" );
 assert.eq.automsg( "1", "t.count( {$or:[{a:1},{a:2}]} )" );
+assert.eq.automsg( "1", "t.find( {$or:[{a:2},{a:1}]} ).toArray().length" );
+assert.eq.automsg( "1", "t.count( {$or:[{a:2},{a:1}]} )" );
+
+t.remove();
+
+assert.eq.automsg( "'BtreeCursor b_1'", "t.find( {$or:[{a:1}]} ).sort( {b:1} ).explain().cursor" );
+assert.eq.automsg( "'BtreeCursor b_1'", "t.find( {$or:[{}]} ).sort( {b:1} ).explain().cursor" );
+assert.eq.automsg( "'BtreeCursor b_1'", "t.find( {$or:[{a:1},{a:3}]} ).sort( {b:1} ).explain().cursor" );
+assert.eq.automsg( "'BtreeCursor b_1'", "t.find( {$or:[{a:1},{b:3}]} ).sort( {b:1} ).explain().cursor" );
+assert.eq.automsg( "'BtreeCursor b_1'", "t.find( {$or:[{b:1}]} ).sort( {b:1} ).explain().cursor" );
+assert.eq.automsg( "1", "t.find( {$or:[{b:1}]} ).sort( {b:1} ).explain().indexBounds.b[ 0 ][ 0 ].$minElement" );
+
+assert.eq.automsg( "'BtreeCursor b_1'", "t.find( {$or:[{a:1}]} ).hint( {b:1} ).explain().cursor" );
+assert.eq.automsg( "'BtreeCursor b_1'", "t.find( {$or:[{}]} ).hint( {b:1} ).explain().cursor" );
+assert.eq.automsg( "1", "t.find( {$or:[{b:1}]} ).hint( {b:1} ).explain().indexBounds.b[ 0 ][ 0 ]" );

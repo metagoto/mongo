@@ -44,14 +44,12 @@ namespace mongo {
             
             Query query( q.query );
 
-            vector<shared_ptr<ChunkRange> > shards;
-            info->getChunksForQuery( shards , query.getFilter()  );
+            set<Shard> shards;
+            info->getShardsForQuery( shards , query.getFilter()  );
             
             set<ServerAndQuery> servers;
-            for ( vector<shared_ptr<ChunkRange> >::iterator i = shards.begin(); i != shards.end(); i++ ){
-                shared_ptr<ChunkRange> c = *i;
-                //servers.insert( ServerAndQuery( c->getShard() , BSONObj() ) );
-                servers.insert( ServerAndQuery( c->getShard().getConnString() , c->getFilter() ) );
+            for ( set<Shard>::iterator i = shards.begin(); i != shards.end(); i++ ){
+                servers.insert( ServerAndQuery( i->getConnString() , BSONObj() ) ); 
             }
             
             if ( logLevel > 4 ){
@@ -69,36 +67,29 @@ namespace mongo {
             BSONObj sort = query.getSort();
             
             if ( sort.isEmpty() ){
-                // 1. no sort, can just hit them in serial
                 cursor = new SerialServerClusteredCursor( servers , q );
             }
             else {
-                int shardKeyOrder = info->getShardKey().canOrder( sort );
-                if ( shardKeyOrder ){
-                    // 2. sort on shard key, can do in serial intelligently
-                    set<ServerAndQuery> buckets;
-                    for ( vector<shared_ptr<ChunkRange> >::iterator i = shards.begin(); i != shards.end(); i++ ){
-                        shared_ptr<ChunkRange> s = *i;
-                        buckets.insert( ServerAndQuery( s->getShard().getConnString() , s->getFilter() , s->getMin() ) );
-                    }
-                    cursor = new SerialServerClusteredCursor( buckets , q , shardKeyOrder );
-                }
-                else {
-                    // 3. sort on non-sharded key, pull back a portion from each server and iterate slowly
-                    cursor = new ParallelSortClusteredCursor( servers , q , sort );
-                }
+                cursor = new ParallelSortClusteredCursor( servers , q , sort );
             }
 
             assert( cursor );
+
+            try {
+                cursor->init();
+
+                log(5) << "   cursor type: " << cursor->type() << endl;
+                shardedCursorTypes.hit( cursor->type() );
             
-            log(5) << "   cursor type: " << cursor->type() << endl;
-            shardedCursorTypes.hit( cursor->type() );
-            
-            if ( query.isExplain() ){
-                BSONObj explain = cursor->explain();
-                replyToQuery( 0 , r.p() , r.m() , explain );
-                delete( cursor );
-                return;
+                if ( query.isExplain() ){
+                    BSONObj explain = cursor->explain();
+                    replyToQuery( 0 , r.p() , r.m() , explain );
+                    delete( cursor );
+                    return;
+                }
+            } catch(...) {
+                delete cursor;
+                throw;
             }
 
             ShardedClientCursorPtr cc (new ShardedClientCursor( q , cursor ));
@@ -118,15 +109,17 @@ namespace mongo {
             ShardedClientCursorPtr cursor = cursorCache.get( id );
             if ( ! cursor ){
                 log(6) << "\t invalid cursor :(" << endl;
-                replyToQuery( QueryResult::ResultFlag_CursorNotFound , r.p() , r.m() , 0 , 0 , 0 );
+                replyToQuery( ResultFlag_CursorNotFound , r.p() , r.m() , 0 , 0 , 0 );
                 return;
             }
             
             if ( cursor->sendNextBatch( r , ntoreturn ) ){
-                log(6) << "\t cursor finished: " << id << endl;
+                // still more data
+                cursor->accessed();
                 return;
             }
             
+            // we've exhausted the cursor
             cursorCache.remove( id );
         }
         
@@ -153,13 +146,28 @@ namespace mongo {
                     
                 }
                 
-                ChunkPtr c = manager->findChunk( o );
-                log(4) << "  server:" << c->getShard().toString() << " " << o << endl;
-                insert( c->getShard() , r.getns() , o );
+                bool gotThrough = false;
+                for ( int i=0; i<10; i++ ){
+                    try {
+                        ChunkPtr c = manager->findChunk( o );
+                        log(4) << "  server:" << c->getShard().toString() << " " << o << endl;
+                        insert( c->getShard() , r.getns() , o );
+                        
+                        r.gotInsert();
+                        c->splitIfShould( o.objsize() );
+                        gotThrough = true;
+                        break;
+                    }
+                    catch ( StaleConfigException& ){
+                        log(1) << "retrying insert because of StaleConfigException: " << o << endl;
+                        r.reset();
+                        manager = r.getChunkManager();
+                    }
+                    sleepmillis( i * 200 );
+                }
 
-                r.gotInsert();
-                
-                c->splitIfShould( o.objsize() );
+                assert( gotThrough );
+
             }            
         }
 
@@ -175,8 +183,7 @@ namespace mongo {
             bool upsert = flags & UpdateOption_Upsert;
             bool multi = flags & UpdateOption_Multi;
 
-            if ( multi )
-                uassert( 10202 ,  "can't mix multi and upsert and sharding" , ! upsert );
+            uassert( 10202 ,  "can't mix multi and upsert and sharding" , ! ( upsert && multi ) );
 
             if ( upsert && !(manager->hasShardKey(toupdate) ||
                              (toupdate.firstElement().fieldName()[0] == '$' && manager->hasShardKey(query))))
@@ -188,7 +195,7 @@ namespace mongo {
             if ( ! manager->hasShardKey( query ) ){
                 if ( multi ){
                 }
-                else if ( query.nFields() != 1 || strcmp( query.firstElement().fieldName() , "_id" ) ){
+                else if ( strcmp( query.firstElement().fieldName() , "_id" ) || query.nFields() != 1 ){
                     throw UserException( 8013 , "can't do update with query that doesn't have the shard key" );
                 }
                 else {
@@ -219,21 +226,33 @@ namespace mongo {
             }
             
             if ( multi ){
-                vector<shared_ptr<ChunkRange> > chunks;
-                manager->getChunksForQuery( chunks , chunkFinder );
-                set<Shard> seen;
-                for ( vector<shared_ptr<ChunkRange> >::iterator i=chunks.begin(); i!=chunks.end(); i++){
-                    shared_ptr<ChunkRange> c = *i;
-                    if ( seen.count( c->getShard() ) )
-                        continue;
-                    doWrite( dbUpdate , r , c->getShard() );
-                    seen.insert( c->getShard() );
+                set<Shard> shards;
+                manager->getShardsForQuery( shards , chunkFinder );
+                int * x = (int*)(r.d().afterNS());
+                x[0] |= UpdateOption_Broadcast;
+                for ( set<Shard>::iterator i=shards.begin(); i!=shards.end(); i++){
+                    doWrite( dbUpdate , r , *i , false );
                 }
             }
             else {
-                ChunkPtr c = manager->findChunk( chunkFinder );
-                doWrite( dbUpdate , r , c->getShard() );
-                c->splitIfShould( d.msg().header()->dataLen() );
+                int left = 5;
+                while ( true ){
+                    try {
+                        ChunkPtr c = manager->findChunk( chunkFinder );
+                        doWrite( dbUpdate , r , c->getShard() );
+                        c->splitIfShould( d.msg().header()->dataLen() );
+                        break;
+                    }
+                    catch ( StaleConfigException& e ){
+                        if ( left <= 0 )
+                            throw e;
+                        left--;
+                        log() << "update failed b/c of StaleConfigException, retrying " 
+                              << " left:" << left << " ns: " << r.getns() << " query: " << query << endl;
+                        r.reset( false );
+                        manager = r.getChunkManager();
+                    }
+                }
             }
 
         }
@@ -246,24 +265,38 @@ namespace mongo {
             uassert( 10203 ,  "bad delete message" , d.moreJSObjs() );
             BSONObj pattern = d.nextJsObj();
 
-            vector<shared_ptr<ChunkRange> > chunks;
-            manager->getChunksForQuery( chunks , pattern );
-            log(2) << "delete : " << pattern << " \t " << chunks.size() << " justOne: " << justOne << endl;
-            if ( chunks.size() == 1 ){
-                doWrite( dbDelete , r , chunks[0]->getShard() );
-                return;
+            set<Shard> shards;
+            int left = 5;
+            
+            while ( true ){
+                try {
+                    manager->getShardsForQuery( shards , pattern );
+                    log(2) << "delete : " << pattern << " \t " << shards.size() << " justOne: " << justOne << endl;
+                    if ( shards.size() == 1 ){
+                        doWrite( dbDelete , r , *shards.begin() );
+                        return;
+                    }
+                    break;
+                }
+                catch ( StaleConfigException& e ){
+                    if ( left <= 0 )
+                        throw e;
+                    left--;
+                    log() << "update failed b/c of StaleConfigException, retrying " 
+                          << " left:" << left << " ns: " << r.getns() << " patt: " << pattern << endl;
+                    r.reset( false );
+                    shards.clear();
+                    manager = r.getChunkManager();
+                }
             }
             
             if ( justOne && ! pattern.hasField( "_id" ) )
                 throw UserException( 8015 , "can only delete with a non-shard key pattern if can delete as many as we find" );
             
-            set<Shard> seen;
-            for ( vector<shared_ptr<ChunkRange> >::iterator i=chunks.begin(); i!=chunks.end(); i++){
-                shared_ptr<ChunkRange> c = *i;
-                if ( seen.count( c->getShard() ) )
-                    continue;
-                seen.insert( c->getShard() );
-                doWrite( dbDelete , r , c->getShard() );
+            for ( set<Shard>::iterator i=shards.begin(); i!=shards.end(); i++){
+                int * x = (int*)(r.d().afterNS());
+                x[0] |= RemoveOption_Broadcast;
+                doWrite( dbDelete , r , *i , false );
             }
         }
         

@@ -61,7 +61,7 @@ namespace mongo {
             string backupName;
             {
                 stringstream ss;
-                ss << "config-backup-" << terseCurrentTime();
+                ss << "config-backup-" << terseCurrentTime(false);
                 backupName = ss.str();
             }
             log() << "backing up config to: " << backupName << endl;
@@ -134,7 +134,7 @@ namespace mongo {
                     }
 
                     BSONObj x = b.obj();
-                    cout << old << "\n\t" << x << endl;
+                    log() << old << "\n\t" << x << endl;
                     newDBs[old["name"].String()] = x;
                 }
 
@@ -169,7 +169,7 @@ namespace mongo {
                     }
                     
                     BSONObj n = b.obj();
-                    cout << x << "\n\t" << n << endl;
+                    log() << x << "\n\t" << n << endl;
                     chunks[id] = n;
                     num++;
                 }

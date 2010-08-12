@@ -24,7 +24,8 @@
 namespace mongo {
 
     void setThreadName(const char * name);
-
+    string getThreadName();
+    
     template<class T>
     inline string ToString(const T& t) { 
         stringstream s;
@@ -32,7 +33,7 @@ namespace mongo {
         return s.str();
     }
 
-#if !defined(_WIN32) && !defined(NOEXECINFO) && !defined(__freebsd__) && !defined(__sun__)
+#if !defined(_WIN32) && !defined(NOEXECINFO) && !defined(__freebsd__) && !defined(__openbsd__) && !defined(__sun__)
 
 } // namespace mongo
 
@@ -49,15 +50,16 @@ namespace mongo {
     inline void printStackTrace( ostream &o = cout ) {
         void *b[20];
         size_t size;
-        char **strings;
         size_t i;
 
         size = backtrace(b, 20);
-        strings = backtrace_symbols(b, size);
-
         for (i = 0; i < size; i++)
             o << hex << b[i] << dec << ' ';
-        o << '\n';
+        o << endl;
+
+        char **strings;
+
+        strings = backtrace_symbols(b, size);
         for (i = 0; i < size; i++)
             o << ' ' << strings[i] << '\n';
 
@@ -160,16 +162,16 @@ namespace mongo {
 #endif
     }
 
-    inline string terseCurrentTime(){
+    // uses ISO 8601 dates without trailing Z
+    // colonsOk should be false when creating filenames
+    inline string terseCurrentTime(bool colonsOk=true){
         struct tm t;
         time_t_to_Struct( time(0) , &t );
-        stringstream ss;
-        ss << ( 1900 + t.tm_year ) << "-"
-           << t.tm_mon << "-"
-           << t.tm_mday << "-"
-           << t.tm_hour << "-"
-           << t.tm_min;
-        return ss.str();
+
+        const char* fmt = (colonsOk ? "%Y-%m-%dT%H:%M:%S" : "%Y-%m-%dT%H-%M-%S");
+        char buf[32];
+        assert(strftime(buf, sizeof(buf), fmt, &t) == 19);
+        return buf;
     }
 
 #define MONGO_asctime _asctime_not_threadsafe_
@@ -280,17 +282,17 @@ namespace mongo {
         Timer( unsigned long long start ) {
             old = start;
         }
-        int seconds(){
+        int seconds() const {
             return (int)(micros() / 1000000);
         }
-        int millis() {
+        int millis() const {
             return (long)(micros() / 1000);
         }
-        unsigned long long micros() {
+        unsigned long long micros() const {
             unsigned long long n = curTimeMicros64();
             return n - old;
         }
-        unsigned long long micros(unsigned long long & n) { // returns cur time in addition to timer result
+        unsigned long long micros(unsigned long long & n) const { // returns cur time in addition to timer result
             n = curTimeMicros64();
             return n - old;
         }
@@ -350,15 +352,6 @@ namespace mongo {
         return swapEndian(x);
     }
 #endif
-
-    // Like strlen, but only scans up to n bytes.
-    // Returns -1 if no '0' found.
-    inline int strnlen( const char *s, int n ) {
-        for( int i = 0; i < n; ++i )
-            if ( !s[ i ] )
-                return i;
-        return -1;
-    }
     
 #if !defined(_WIN32)
     typedef int HANDLE;
@@ -600,7 +593,7 @@ namespace mongo {
             _buf = 0;
         }
         
-        operator string() const {
+        string toString() const {
             string s = _buf;
             return s;
         }
@@ -623,11 +616,11 @@ namespace mongo {
         }
 
         bool operator!=( const char * str ) const {
-            return strcmp( _buf , str );
+            return strcmp( _buf , str ) != 0;
         }
 
         bool empty() const {
-            return _buf[0] == 0;
+            return _buf == 0 || _buf[0] == 0;
         }
 
     private:

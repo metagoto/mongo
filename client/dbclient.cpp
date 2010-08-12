@@ -27,8 +27,73 @@
 #include "../db/cmdline.h"
 #include "connpool.h"
 #include "../s/util.h"
+#include "syncclusterconnection.h"
 
 namespace mongo {
+
+    DBClientBase* ConnectionString::connect( string& errmsg ) const {
+        switch ( _type ){
+        case MASTER: {
+            DBClientConnection * c = new DBClientConnection(true);
+            log(1) << "creating new connection to:" << _servers[0] << endl;
+            if ( ! c->connect( _servers[0] , errmsg ) ) {
+                delete c;
+                return 0;
+            }
+            return c;
+        }
+            
+        case PAIR: 
+        case SET: {
+            DBClientReplicaSet * set = new DBClientReplicaSet( _setName , _servers );
+            if( ! set->connect() ){
+                delete set;
+                errmsg = "connect failed to set ";
+                errmsg += toString();
+                return 0;
+            }
+            return set;
+        }
+            
+        case SYNC: {
+            // TODO , don't copy
+            list<HostAndPort> l;
+            for ( unsigned i=0; i<_servers.size(); i++ )
+                l.push_back( _servers[i] );
+            return new SyncClusterConnection( l );
+        }
+            
+        case INVALID:
+            throw UserException( 13421 , "trying to connect to invalid ConnectionString" );
+            break;
+        }
+        
+        assert( 0 );
+        return 0;
+    }
+
+    ConnectionString ConnectionString::parse( const string& host , string& errmsg ){
+        
+        string::size_type i = host.find( '/' );
+        if ( i != string::npos ){
+            // replica set
+            return ConnectionString( SET , host.substr( i + 1 ) , host.substr( 0 , i ) );
+        }
+
+        int numCommas = DBClientBase::countCommas( host );
+        
+        if( numCommas == 0 ) 
+            return ConnectionString( HostAndPort( host ) );
+        
+        if ( numCommas == 1 ) 
+            return ConnectionString( PAIR , host );
+
+        if ( numCommas == 2 )
+            return ConnectionString( SYNC , host );
+        
+        errmsg = (string)"invalid hostname [" + host + "]";
+        return ConnectionString(); // INVALID
+    }
 
     Query& Query::where(const string &jscode, BSONObj scope) { 
         /* use where() before sort() and hint() and explain(), else this will assert. */
@@ -128,6 +193,17 @@ namespace mongo {
         return o["ok"].trueValue();
     }
 
+    enum QueryOptions DBClientWithCommands::availableOptions() {
+        if ( !_haveCachedAvailableOptions ) {
+            BSONObj ret;
+            if ( runCommand( "admin", BSON( "availablequeryoptions" << 1 ), ret ) ) {
+                _cachedAvailableOptions = ( enum QueryOptions )( ret.getIntField( "options" ) );
+            }
+            _haveCachedAvailableOptions = true;
+        }
+        return _cachedAvailableOptions;
+    }
+    
     inline bool DBClientWithCommands::runCommand(const string &dbname, const BSONObj& cmd, BSONObj &info, int options) {
         string ns = dbname + ".$cmd";
         info = findOne(ns, cmd, 0 , options);
@@ -152,7 +228,7 @@ namespace mongo {
         BSONObj res;
         if( !runCommand(ns.db.c_str(), cmd, res, options) )
             uasserted(11010,string("count fails:") + res.toString());
-        return res.getIntField("n");
+        return res["n"].numberLong();
     }
 
     BSONObj getlasterrorcmdobj = fromjson("{getlasterror:1}");
@@ -246,13 +322,14 @@ namespace mongo {
 
     bool DBClientWithCommands::isMaster(bool& isMaster, BSONObj *info) {
         BSONObj o;
-        if ( info == 0 )	info = &o;
+        if ( info == 0 )	
+            info = &o;
         bool ok = runCommand("admin", ismastercmdobj, *info);
-        isMaster = (info->getIntField("ismaster") == 1);
+        isMaster = info->getField("ismaster").trueValue();
         return ok;
     }
 
-    bool DBClientWithCommands::createCollection(const string &ns, unsigned size, bool capped, int max, BSONObj *info) {
+    bool DBClientWithCommands::createCollection(const string &ns, long long size, bool capped, int max, BSONObj *info) {
         BSONObj o;
         if ( info == 0 )	info = &o;
         BSONObjBuilder b;
@@ -369,63 +446,8 @@ namespace mongo {
         
         string db = nsGetDB( ns ) + ".system.namespaces";
         BSONObj q = BSON( "name" << ns );
-        return count( db.c_str() , q );
+        return count( db.c_str() , q ) != 0;
     }
-
-
-    void testSort() { 
-        DBClientConnection c;
-        string err;
-        if ( !c.connect("localhost", err) ) {
-            out() << "can't connect to server " << err << endl;
-            return;
-        }
-
-        cout << "findOne returns:" << endl;
-        cout << c.findOne("test.foo", QUERY( "x" << 3 ) ).toString() << endl;
-        cout << c.findOne("test.foo", QUERY( "x" << 3 ).sort("name") ).toString() << endl;
-
-    }
-
-    /* TODO: unit tests should run this? */
-    void testDbEval() {
-        DBClientConnection c;
-        string err;
-        if ( !c.connect("localhost", err) ) {
-            out() << "can't connect to server " << err << endl;
-            return;
-        }
-
-        if( !c.auth("dwight", "u", "p", err) ) { 
-            out() << "can't authenticate " << err << endl;
-            return;
-        }
-
-        BSONObj info;
-        BSONElement retValue;
-        BSONObjBuilder b;
-        b.append("0", 99);
-        BSONObj args = b.done();
-        bool ok = c.eval("dwight", "function() { return args[0]; }", info, retValue, &args);
-        out() << "eval ok=" << ok << endl;
-        out() << "retvalue=" << retValue.toString() << endl;
-        out() << "info=" << info.toString() << endl;
-
-        out() << endl;
-
-        int x = 3;
-        assert( c.eval("dwight", "function() { return 3; }", x) );
-
-        out() << "***\n";
-
-        BSONObj foo = fromjson("{\"x\":7}");
-        out() << foo.toString() << endl;
-        int res=0;
-        ok = c.eval("dwight", "function(parm1) { return parm1.x; }", foo, res);
-        out() << ok << " retval:" << res << endl;
-    }
-
-	void testPaired();
 
     /* --- dbclientconnection --- */
 
@@ -445,13 +467,13 @@ namespace mongo {
 		return DBClientBase::auth(dbname, username, password.c_str(), errmsg, false);
 	}
 
-    BSONObj DBClientInterface::findOne(const string &ns, Query query, const BSONObj *fieldsToReturn, int queryOptions) {
+    BSONObj DBClientInterface::findOne(const string &ns, const Query& query, const BSONObj *fieldsToReturn, int queryOptions) {
         auto_ptr<DBClientCursor> c =
             this->query(ns, query, 1, 0, fieldsToReturn, queryOptions);
 
         uassert( 10276 ,  "DBClientBase::findOne: transport error", c.get() );
 
-        if ( c->hasResultFlag( QueryResult::ResultFlag_ShardConfigStale ) )
+        if ( c->hasResultFlag( ResultFlag_ShardConfigStale ) )
             throw StaleConfigException( ns , "findOne has stale config" );
 
         if ( !c->more() )
@@ -460,23 +482,17 @@ namespace mongo {
         return c->nextSafe().copy();
     }
 
-    bool DBClientConnection::connect(const string &_serverAddress, string& errmsg) {
-        serverAddress = _serverAddress;
+    bool DBClientConnection::connect(const HostAndPort& server, string& errmsg){
+        _server = server;
+        _serverString = _server.toString();
+        return _connect( errmsg );
+    }
 
-        string ip;
-        int port;
-        size_t idx = serverAddress.rfind( ":" );
-        if ( idx != string::npos ) {
-            port = strtol( serverAddress.substr( idx + 1 ).c_str(), 0, 10 );
-            ip = serverAddress.substr( 0 , idx );
-        } else {
-            port = CmdLine::DefaultDBPort;
-            ip = serverAddress;
-        }
-
+    bool DBClientConnection::_connect( string& errmsg ){
+        _serverString = _server.toString();
         // we keep around SockAddr for connection life -- maybe MessagingPort
         // requires that?
-        server.reset(new SockAddr(ip.c_str(), port));
+        server.reset(new SockAddr(_server.host().c_str(), _server.port()));
         p.reset(new MessagingPort( _timeout, _logLevel ));
 
         if (server->getAddr() == "0.0.0.0"){
@@ -486,7 +502,7 @@ namespace mongo {
 
         if ( !p->connect(*server) ) {
             stringstream ss;
-            ss << "couldn't connect to server {ip: \"" << ip <<  "\", port: " << port << '}';
+            ss << "couldn't connect to server " << _serverString << '}';
             errmsg = ss.str();
             failed = true;
             return false;
@@ -503,16 +519,15 @@ namespace mongo {
             return;
 
         lastReconnectTry = time(0);
-        log(_logLevel) << "trying reconnect to " << serverAddress << endl;
+        log(_logLevel) << "trying reconnect to " << _serverString << endl;
         string errmsg;
-        string tmp = serverAddress;
         failed = false;
-        if ( !connect(tmp.c_str(), errmsg) ) { 
-            log(_logLevel) << "reconnect " << serverAddress << " failed " << errmsg << endl;
+        if ( ! _connect(errmsg) ) { 
+            log(_logLevel) << "reconnect " << _serverString << " failed " << errmsg << endl;
 			return;
 		}
 
-		log(_logLevel) << "reconnect " << serverAddress << " ok" << endl;
+		log(_logLevel) << "reconnect " << _serverString << " ok" << endl;
 		for( map< string, pair<string,string> >::iterator i = authCache.begin(); i != authCache.end(); i++ ) { 
 			const char *dbname = i->first.c_str();
 			const char *username = i->second.first.c_str();
@@ -539,13 +554,76 @@ namespace mongo {
         return auto_ptr< DBClientCursor >( 0 );
     }
 
+    struct DBClientFunConvertor {
+        void operator()( DBClientCursorBatchIterator &i ) {
+            while( i.moreInCurrentBatch() ) {
+                _f( i.nextSafe() );
+            }
+        }
+        boost::function<void(const BSONObj &)> _f;
+    };
+    
+    unsigned long long DBClientConnection::query( boost::function<void(const BSONObj&)> f, const string& ns, Query query, const BSONObj *fieldsToReturn, int queryOptions ) {
+        DBClientFunConvertor fun;
+        fun._f = f;
+        boost::function<void(DBClientCursorBatchIterator &)> ptr( fun );
+        return DBClientConnection::query( ptr, ns, query, fieldsToReturn, queryOptions );
+    }
+        
+    unsigned long long DBClientConnection::query( boost::function<void(DBClientCursorBatchIterator &)> f, const string& ns, Query query, const BSONObj *fieldsToReturn, int queryOptions ) {
+        // mask options
+        queryOptions &= (int)( QueryOption_NoCursorTimeout | QueryOption_SlaveOk );
+        unsigned long long n = 0;
+
+        bool doExhaust = ( availableOptions() & QueryOption_Exhaust );
+        if ( doExhaust ) {
+            queryOptions |= (int)QueryOption_Exhaust;            
+        }
+        auto_ptr<DBClientCursor> c( this->query(ns, query, 0, 0, fieldsToReturn, queryOptions) );
+        massert( 13386, "socket error for mapping query", c.get() );
+        
+        if ( !doExhaust ) {
+            while( c->more() ) {
+                DBClientCursorBatchIterator i( *c );
+                f( i );
+                n += i.n();
+            }
+            return n;
+        }
+
+        try { 
+            while( 1 ) { 
+                while( c->moreInCurrentBatch() ) { 
+                    DBClientCursorBatchIterator i( *c );
+                    f( i );
+                    n += i.n();
+                }
+
+                if( c->getCursorId() == 0 ) 
+                    break;
+
+                c->exhaustReceiveMore();
+            }
+        }
+        catch(std::exception&) { 
+            /* connection CANNOT be used anymore as more data may be on the way from the server.
+               we have to reconnect.
+               */
+            failed = true;
+            p->shutdown();
+            throw;
+        }
+
+        return n;
+    }
+
     void DBClientBase::insert( const string & ns , BSONObj obj ) {
         Message toSend;
 
         BufBuilder b;
         int opts = 0;
-        b.append( opts );
-        b.append( ns );
+        b.appendNum( opts );
+        b.appendStr( ns );
         obj.appendSelfToBufBuilder( b );
 
         toSend.setData( dbInsert , b.buf() , b.len() );
@@ -558,8 +636,8 @@ namespace mongo {
         
         BufBuilder b;
         int opts = 0;
-        b.append( opts );
-        b.append( ns );
+        b.appendNum( opts );
+        b.appendStr( ns );
         for( vector< BSONObj >::const_iterator i = v.begin(); i != v.end(); ++i )
             i->appendSelfToBufBuilder( b );
         
@@ -573,13 +651,13 @@ namespace mongo {
 
         BufBuilder b;
         int opts = 0;
-        b.append( opts );
-        b.append( ns );
+        b.appendNum( opts );
+        b.appendStr( ns );
 
         int flags = 0;
         if ( justOne )
-            flags |= 1;
-        b.append( flags );
+            flags |= RemoveOption_JustOne;
+        b.appendNum( flags );
 
         obj.obj.appendSelfToBufBuilder( b );
 
@@ -591,13 +669,13 @@ namespace mongo {
     void DBClientBase::update( const string & ns , Query query , BSONObj obj , bool upsert , bool multi ) {
 
         BufBuilder b;
-        b.append( (int)0 ); // reserved
-        b.append( ns );
+        b.appendNum( (int)0 ); // reserved
+        b.appendStr( ns );
 
         int flags = 0;
         if ( upsert ) flags |= UpdateOption_Upsert;
         if ( multi ) flags |= UpdateOption_Multi;
-        b.append( flags );
+        b.appendNum( flags );
 
         query.obj.appendSelfToBufBuilder( b );
         obj.appendSelfToBufBuilder( b );
@@ -718,10 +796,10 @@ namespace mongo {
         // see query.h for the protocol we are using here.
         BufBuilder b;
         int opts = queryOptions;
-        b.append(opts);
-        b.append(ns.c_str());
-        b.append(nToSkip);
-        b.append(nToReturn);
+        b.appendNum(opts);
+        b.appendStr(ns);
+        b.appendNum(nToSkip);
+        b.appendNum(nToReturn);
         query.appendSelfToBufBuilder(b);
         if ( fieldsToReturn )
             fieldsToReturn->appendSelfToBufBuilder(b);
@@ -740,6 +818,10 @@ namespace mongo {
 
     void DBClientConnection::sayPiggyBack( Message &toSend ) {
         port().piggyBack( toSend );
+    }
+
+    void DBClientConnection::recv( Message &m ) { 
+        port().recv(m);
     }
 
     bool DBClientConnection::call( Message &toSend, Message &response, bool assertOk ) {
@@ -765,21 +847,22 @@ namespace mongo {
     void DBClientConnection::checkResponse( const char *data, int nReturned ) {
         /* check for errors.  the only one we really care about at
          this stage is "not master" */
-        if ( clientPaired && nReturned ) {
+        if ( clientSet && nReturned ) {
+            assert(data);
             BSONObj o(data);
             BSONElement e = o.firstElement();
             if ( strcmp(e.fieldName(), "$err") == 0 &&
                     e.type() == String && strncmp(e.valuestr(), "not master", 10) == 0 ) {
-                clientPaired->isntMaster();
+                clientSet->isntMaster();
             }
         }
     }
 
     void DBClientConnection::killCursor( long long cursorId ){
         BufBuilder b;
-        b.append( (int)0 ); // reserved
-        b.append( (int)1 ); // number
-        b.append( cursorId );
+        b.appendNum( (int)0 ); // reserved
+        b.appendNum( (int)1 ); // number
+        b.appendNum( cursorId );
         
         Message m;
         m.setData( dbKillCursors , b.buf() , b.len() );
@@ -789,44 +872,103 @@ namespace mongo {
 
     /* --- class dbclientpaired --- */
 
-    string DBClientPaired::toString() {
-        stringstream ss;
-        ss << "state: " << master << '\n';
-        ss << "left:  " << left.toStringLong() << '\n';
-        ss << "right: " << right.toStringLong() << '\n';
+    string DBClientReplicaSet::toString() {
+        return getServerAddress();
+    }
+
+    DBClientReplicaSet::DBClientReplicaSet( const string& name , const vector<HostAndPort>& servers )
+        : _name( name ) , _currentMaster( 0 ), _servers( servers ){
+        
+        for ( unsigned i=0; i<_servers.size(); i++ )
+            _conns.push_back( new DBClientConnection( true , this ) );
+    }
+    
+    DBClientReplicaSet::~DBClientReplicaSet(){
+        for ( unsigned i=0; i<_conns.size(); i++ )
+            delete _conns[i];
+        _conns.clear();
+    }
+    
+    string DBClientReplicaSet::getServerAddress() const {
+        StringBuilder ss;
+        if ( _name.size() )
+            ss << _name << "/";
+    
+        for ( unsigned i=0; i<_servers.size(); i++ ){
+            if ( i > 0 )
+                ss << ",";
+            ss << _servers[i].toString();
+        }
         return ss.str();
     }
 
-#pragma warning(disable: 4355)
-    DBClientPaired::DBClientPaired() :
-		left(true, this), right(true, this)
-    {
-        master = NotSetL;
-    }
-#pragma warning(default: 4355)
-
     /* find which server, the left or right, is currently master mode */
-    void DBClientPaired::_checkMaster() {
+    void DBClientReplicaSet::_checkMaster() {
+        
+        bool triedQuickCheck = false;
+        
+        log( _logLevel + 1) <<  "_checkMaster on: " << toString() << endl;
         for ( int retry = 0; retry < 2; retry++ ) {
-            int x = master;
-            for ( int pass = 0; pass < 2; pass++ ) {
-                DBClientConnection& c = x == 0 ? left : right;
+            for ( unsigned i=0; i<_conns.size(); i++ ){
+                DBClientConnection * c = _conns[i];
                 try {
                     bool im;
                     BSONObj o;
-                    c.isMaster(im, &o);
+                    c->isMaster(im, &o);
+                    
                     if ( retry )
-                        log(_logLevel) << "checkmaster: " << c.toString() << ' ' << o.toString() << '\n';
+                        log(_logLevel) << "checkmaster: " << c->toString() << ' ' << o << '\n';
+                    
+                    string maybePrimary;
+                    if ( o["hosts"].type() == Array ){
+                        if ( o["primary"].type() == String )
+                            maybePrimary = o["primary"].String();
+                        
+                        BSONObjIterator hi(o["hosts"].Obj());
+                        while ( hi.more() ){
+                            string toCheck = hi.next().String();
+                            int found = -1;
+                            for ( unsigned x=0; x<_servers.size(); x++ ){
+                                if ( toCheck == _servers[x].toString() ){
+                                    found = x;
+                                    break;
+                                }
+                            }
+                            
+                            if ( found == -1 ){
+                                HostAndPort h( toCheck );
+                                _servers.push_back( h );
+                                _conns.push_back( new DBClientConnection( true, this ) );
+                                string temp;
+                                _conns[ _conns.size() - 1 ]->connect( h , temp );
+                                log( _logLevel ) << "updated set to: " << toString() << endl;
+                            }
+                            
+                        }
+                    }
+
                     if ( im ) {
-                        master = (State) (x + 2);
+                        _currentMaster = c;
                         return;
                     }
+                    
+                    if ( maybePrimary.size() && ! triedQuickCheck ){
+                        for ( unsigned x=0; x<_servers.size(); x++ ){
+                            if ( _servers[i].toString() != maybePrimary )
+                                continue;
+                            triedQuickCheck = true;
+                            _conns[x]->isMaster( im , &o );
+                            if ( im ){
+                                _currentMaster = _conns[x];
+                                return;
+                            }
+                        }
+                    }
                 }
-                catch (AssertionException&) {
+                catch ( std::exception& e ) {
                     if ( retry )
-                        log(_logLevel) << "checkmaster: caught exception " << c.toString() << '\n';
+                        log(_logLevel) << "checkmaster: caught exception " << c->toString() << ' ' << e.what() << endl;
                 }
-                x = x^1;
             }
             sleepsecs(1);
         }
@@ -834,36 +976,54 @@ namespace mongo {
         uassert( 10009 , "checkmaster: no master found", false);
     }
 
-    inline DBClientConnection& DBClientPaired::checkMaster() {
-        if ( master > NotSetR ) {
+    DBClientConnection * DBClientReplicaSet::checkMaster() {
+        if ( _currentMaster ){
             // a master is selected.  let's just make sure connection didn't die
-            DBClientConnection& c = master == Left ? left : right;
-            if ( !c.isFailed() )
-                return c;
-            // after a failure, on the next checkMaster, start with the other
-            // server -- presumably it took over. (not critical which we check first,
-            // just will make the failover slightly faster if we guess right)
-            master = master == Left ? NotSetR : NotSetL;
+            if ( ! _currentMaster->isFailed() )
+                return _currentMaster;
+            _currentMaster = 0;
         }
 
         _checkMaster();
-        assert( master > NotSetR );
-        return master == Left ? left : right;
+        assert( _currentMaster );
+        return _currentMaster;
     }
 
-    DBClientConnection& DBClientPaired::slaveConn(){
-        DBClientConnection& m = checkMaster();
-        assert( ! m.isFailed() );
-        return master == Left ? right : left;
+    DBClientConnection& DBClientReplicaSet::masterConn(){
+        return *checkMaster();
     }
 
-    bool DBClientPaired::connect(const string &serverHostname1, const string &serverHostname2) {
+    DBClientConnection& DBClientReplicaSet::slaveConn(){
+        DBClientConnection * m = checkMaster();
+        assert( ! m->isFailed() );
+        
+        DBClientConnection * failedSlave = 0;
+
+        for ( unsigned i=0; i<_conns.size(); i++ ){
+            if ( m == _conns[i] )
+                continue;
+            failedSlave = _conns[i];
+            if ( _conns[i]->isFailed() )
+                continue;
+            return *_conns[i];
+        }
+
+        assert(failedSlave);
+        return *failedSlave;
+    }
+
+    bool DBClientReplicaSet::connect(){
         string errmsg;
-        bool l = left.connect(serverHostname1, errmsg);
-        bool r = right.connect(serverHostname2, errmsg);
-        master = l ? NotSetL : NotSetR;
-        if ( !l && !r ) // it would be ok to fall through, but checkMaster will then try an immediate reconnect which is slow
+
+        bool anyGood = false;
+        for ( unsigned i=0; i<_conns.size(); i++ ){
+            if ( _conns[i]->connect( _servers[i] , errmsg ) )
+                anyGood = true;
+        }
+        
+        if ( ! anyGood )
             return false;
+
         try {
             checkMaster();
         }
@@ -873,62 +1033,47 @@ namespace mongo {
         return true;
     }
 
-    bool DBClientPaired::connect(string hostpairstring) { 
-        size_t comma = hostpairstring.find( "," );
-        uassert( 10010 , "bad hostpairstring", comma != string::npos);
-        return connect( hostpairstring.substr( 0 , comma ) , hostpairstring.substr( comma + 1 ) );
-    }
-
-	bool DBClientPaired::auth(const string &dbname, const string &username, const string &pwd, string& errmsg) { 
-		DBClientConnection& m = checkMaster();
-		if( !m.auth(dbname, username, pwd, errmsg) )
+	bool DBClientReplicaSet::auth(const string &dbname, const string &username, const string &pwd, string& errmsg, bool digestPassword ) { 
+		DBClientConnection * m = checkMaster();
+		if( !m->auth(dbname, username, pwd, errmsg, digestPassword ) )
 			return false;
+        
 		/* we try to authentiate with the other half of the pair -- even if down, that way the authInfo is cached. */
-		string e;
-		try {
-			if( &m == &left ) 
-				right.auth(dbname, username, pwd, e);
-			else
-				left.auth(dbname, username, pwd, e);
-		}
-		catch( AssertionException&) { 
-		}
+        for ( unsigned i=0; i<_conns.size(); i++ ){
+            if ( _conns[i] == m )
+                continue;
+            try {
+                string e;
+                _conns[i]->auth( dbname , username , pwd , e , digestPassword );
+            }
+            catch ( AssertionException& ){
+            }
+        }
+
 		return true;
 	}
 
-    auto_ptr<DBClientCursor> DBClientPaired::query(const string &a, Query b, int c, int d,
-                                                   const BSONObj *e, int f, int g)
-    {
-        return checkMaster().query(a,b,c,d,e,f,g);
+    auto_ptr<DBClientCursor> DBClientReplicaSet::query(const string &a, Query b, int c, int d,
+                                                   const BSONObj *e, int f, int g){
+        // TODO: if slave ok is set go to a slave
+        return checkMaster()->query(a,b,c,d,e,f,g);
     }
 
-    BSONObj DBClientPaired::findOne(const string &a, Query b, const BSONObj *c, int d) {
-        return checkMaster().findOne(a,b,c,d);
+    BSONObj DBClientReplicaSet::findOne(const string &a, const Query& b, const BSONObj *c, int d) {
+        return checkMaster()->findOne(a,b,c,d);
     }
 
-	void testPaired() { 
-		DBClientPaired p;
-		log() << "connect returns " << p.connect("localhost:27017", "localhost:27018") << endl;
-
-		//DBClientConnection p(true);
-		string errmsg;
-		//		log() << "connect " << p.connect("localhost", errmsg) << endl;
-		log() << "auth " << p.auth("dwight", "u", "p", errmsg) << endl;
-
-		while( 1 ) { 
-			sleepsecs(3);
-			try { 
-				log() << "findone returns " << p.findOne("dwight.foo", BSONObj()).toString() << endl;
-				sleepsecs(3);
-				BSONObj info;
-				bool im;
-				log() << "ismaster returns " << p.isMaster(im,&info) << " info: " << info.toString() << endl;
-			}
-			catch(...) { 
-				cout << "caught exception" << endl;
-			}
-		}
-	}
+    bool DBClientReplicaSet::isMember( const DBConnector * conn ) const {
+        if ( conn == this )
+            return true;
+        
+        for ( unsigned i=0; i<_conns.size(); i++ )
+            if ( _conns[i]->isMember( conn ) )
+                return true;
+        
+        return false;
+    }
+    
 
     bool serverAlive( const string &uri ) {
         DBClientConnection c( false, 0, 20 ); // potentially the connection to server could fail while we're checking if it's alive - so use timeouts

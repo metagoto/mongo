@@ -240,11 +240,6 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="..\db\db.rc">
-      <Filter>misc and third party</Filter>
-    </ResourceCompile>
-  </ItemGroup>
-  <ItemGroup>
     <Library Include="..\..\js\js64r.lib">
       <Filter>misc and third party</Filter>
     </Library>
@@ -386,9 +381,6 @@
       <Filter>db\cpp</Filter>
     </ClCompile>
     <ClCompile Include="..\db\index.cpp">
-      <Filter>db\cpp</Filter>
-    </ClCompile>
-    <ClCompile Include="..\db\index_geo2d.cpp">
       <Filter>db\cpp</Filter>
     </ClCompile>
     <ClCompile Include="..\db\indexkey.cpp">
@@ -636,6 +628,75 @@
     </ClCompile>
     <ClCompile Include="..\util\text.cpp">
       <Filter>util\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\client\gridfs.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\d_writeback.cpp">
+      <Filter>shard</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\d_state.cpp">
+      <Filter>shard</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\geo\2d.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\chunk.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\config.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\shardkey.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\shard.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\client\model.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\client\parallel.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\stringutils.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\client\distlock.cpp">
+      <Filter>client</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\d_migrate.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\d_split.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\repl\rs_rollback.cpp">
+      <Filter>replsets</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\repl\rs_sync.cpp">
+      <Filter>replsets</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\repl\rs_initialsync.cpp">
+      <Filter>replsets</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\geo\haystack.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\cap.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\log.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\util\processinfo.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\s\grid.cpp">
+      <Filter>db\cpp</Filter>
+    </ClCompile>
+    <ClCompile Include="..\db\restapi.cpp">
+      <Filter>db\cpp</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

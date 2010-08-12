@@ -28,15 +28,15 @@ namespace mongo {
 
     namespace pms {
 
-        MessagingPort * grab = 0;
         MessageHandler * handler;
         
-        void threadRun(){
+        void threadRun( MessagingPort * inPort){
+            assert( inPort );
+            
+            setThreadName( "conn" );
             TicketHolderReleaser connTicketReleaser( &connTicketHolder );
-        
-            assert( grab );
-            auto_ptr<MessagingPort> p( grab );
-            grab = 0;
+
+            auto_ptr<MessagingPort> p( inPort );
         
             string otherSide;
     
@@ -82,34 +82,35 @@ namespace mongo {
         }
         
         virtual void accepted(MessagingPort * p) {
-            assert( ! pms::grab );
-            pms::grab = p;
             
             if ( ! connTicketHolder.tryAcquire() ){
-                log() << "connection refused because too many open connections" << endl;
+                log() << "connection refused because too many open connections: " << connTicketHolder.used() << endl;
 
                 // TODO: would be nice if we notified them...
                 p->shutdown();
-                
-                pms::grab = 0;
+                delete p;
+
                 sleepmillis(2); // otherwise we'll hard loop
                 return;
             }
 
             try {
-                boost::thread thr( pms::threadRun );
-                while ( pms::grab ){
-                    sleepmillis(1);
-                }
+                boost::thread thr( boost::bind( &pms::threadRun , p ) );
             }
             catch ( boost::thread_resource_error& ){
                 log() << "can't create new thread, closing connection" << endl;
+
                 p->shutdown();
-                pms::grab = 0;
+                delete p;
+
                 sleepmillis(2);
             }
         }
         
+        virtual void setAsTimeTracker(){
+            Listener::setAsTimeTracker();
+        }
+
         void run(){
             initAndListen();
         }
@@ -121,7 +122,6 @@ namespace mongo {
         return new PortMessageServer( opts , handler );
     }    
 
-    TicketHolder connTicketHolder(20000);
 }
 
 #endif

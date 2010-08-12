@@ -25,6 +25,7 @@
 
 namespace mongo { 
 
+    /* singleton config object is stored here */
     const string rsConfigNs = "local.system.replset";
 
     class ReplSetConfig {
@@ -48,9 +49,13 @@ namespace mongo {
             bool arbiterOnly;
             void check() const;   /* check validity, assert if not. */
             BSONObj asBson() const;
-            bool hot() const { 
-                return !arbiterOnly;
+            bool potentiallyHot() const { 
+                return !arbiterOnly && priority > 0;
             }
+            bool operator==(const MemberCfg& r) const { 
+                return _id==r._id && votes == r.votes && h == r.h && priority == r.priority && arbiterOnly == r.arbiterOnly;
+            }
+            bool operator!=(const MemberCfg& r) const { return !(*this == r); }
         };
         vector<MemberCfg> members;
         string _id;
@@ -69,8 +74,11 @@ namespace mongo {
         /** validate the settings. does not call check() on each member, you have to do that separately. */
         void check() const;
 
-        static void receivedNewConfig(BSONObj);
-        void saveConfigLocally(); // to local db
+        /** check if modification makes sense */
+        static bool legalChange(const ReplSetConfig& old, const ReplSetConfig& n, string& errmsg);
+
+        //static void receivedNewConfig(BSONObj);
+        void saveConfigLocally(BSONObj comment); // to local db
         string saveConfigEverywhere(); // returns textual info on what happened
 
         BSONObj asBson() const;

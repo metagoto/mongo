@@ -76,45 +76,42 @@ namespace mongo {
     // for an existing query (ie a ClientCursor), send back additional information.
     struct GetMoreWaitException { };
 
-    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& op, int pass );
-
+    QueryResult* processGetMore(const char *ns, int ntoreturn, long long cursorid , CurOp& op, int pass, bool& exhaust);
+    
     struct UpdateResult {
-        bool existing;
-        bool mod;
-        long long num;
+        bool existing; // if existing objects were modified
+        bool mod;      // was this a $ mod
+        long long num; // how many objects touched
+        OID upserted;  // if something was upserted, the new _id of the object
 
-        UpdateResult( bool e, bool m, unsigned long long n )
-            : existing(e) , mod(m), num(n ){}
+        UpdateResult( bool e, bool m, unsigned long long n , const BSONObj& upsertedObject = BSONObj() )
+            : existing(e) , mod(m), num(n){
+            upserted.clear();
 
-        int oldCode(){
-            if ( ! num )
-                return 0;
-            
-            if ( existing ){
-                if ( mod )
-                    return 2;
-                return 1;
+            BSONElement id = upsertedObject["_id"];
+            if ( ! e && n == 1 && id.type() == jstOID ){
+                upserted = id.OID();
             }
-            
-            if ( mod )
-                return 3;
-            return 4;
         }
+        
     };
+
+    class RemoveSaver;
     
     /* returns true if an existing object was updated, false if no existing object was found.
        multi - update multiple objects - mostly useful with things like $set
        god - allow access to system namespaces
     */
     UpdateResult updateObjects(const char *ns, const BSONObj& updateobj, BSONObj pattern, bool upsert, bool multi , bool logop , OpDebug& debug );
-    UpdateResult _updateObjects(bool god, const char *ns, const BSONObj& updateobj, BSONObj pattern, bool upsert, bool multi , bool logop , OpDebug& debug );
+    UpdateResult _updateObjects(bool god, const char *ns, const BSONObj& updateobj, BSONObj pattern, 
+                                bool upsert, bool multi , bool logop , OpDebug& debug , RemoveSaver * rs = 0 );
 
     // If justOne is true, deletedId is set to the id of the deleted object.
-    long long deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop = false, bool god=false);
+    long long deleteObjects(const char *ns, BSONObj pattern, bool justOne, bool logop = false, bool god=false, RemoveSaver * rs=0);
 
     long long runCount(const char *ns, const BSONObj& cmd, string& err);
-    
-    void runQuery(Message& m, QueryMessage& q, CurOp& curop, Message &result);
+
+    const char * runQuery(Message& m, QueryMessage& q, CurOp& curop, Message &result);
     
     /* This is for languages whose "objects" are not well ordered (JSON is well ordered).
        [ { a : ... } , { b : ... } ] -> { a : ..., b : ... }

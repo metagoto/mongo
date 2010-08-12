@@ -28,6 +28,7 @@ namespace mongo {
     class Cursor;
     class CoveredIndexMatcher;
     class Matcher;
+    class FieldRangeVector;
 
     class RegexMatcher {
     public:
@@ -140,8 +141,10 @@ namespace mongo {
 
         bool matches(const BSONObj& j, MatchDetails * details = 0 );
         
-        // until SERVER-109 $or is opaque to indexes
-        bool keyMatch() const { return !all && !haveSize && !hasArray && !haveNeg && _orMatchers.size() == 0; }
+        // fast rough check to see if we must load the real doc - we also
+        // compare field counts against covereed index matcher; for $or clauses
+        // we just compare field counts
+        bool keyMatch() const { return !all && !haveSize && !hasArray && !haveNeg; }
 
         bool atomic() const { return _atomic; }
         
@@ -151,8 +154,12 @@ namespace mongo {
             return jsobj.toString();
         }
 
-        void addOrConstraint( const BSONObj &o ) {
-            _norMatchers.push_back( shared_ptr< Matcher >( new Matcher( o ) ) );
+        void addOrConstraint( const shared_ptr< FieldRangeVector > &frv ) {
+            _orConstraints.push_back( frv );
+        }
+        
+        void popOrClause() {
+            _orMatchers.pop_front();
         }
         
         bool sameCriteriaCount( const Matcher &other ) const;
@@ -200,6 +207,7 @@ namespace mongo {
         vector< shared_ptr< BSONObjBuilder > > _builders;
         list< shared_ptr< Matcher > > _orMatchers;
         list< shared_ptr< Matcher > > _norMatchers;
+        vector< shared_ptr< FieldRangeVector > > _orConstraints;
 
         friend class CoveredIndexMatcher;
     };
@@ -216,8 +224,11 @@ namespace mongo {
         Matcher& docMatcher() { return *_docMatcher; }
 
         // once this is called, shouldn't use this matcher for matching any more
-        void addOrConstraint( const BSONObj &o ) {
-            _docMatcher->addOrConstraint( o );
+        void advanceOrClause( const shared_ptr< FieldRangeVector > &frv ) {
+            _docMatcher->addOrConstraint( frv );
+            // TODO this is not an optimal optimization, since we could skip an entire
+            // or clause (if a match is impossible) between calls to advanceOrClause()
+            _docMatcher->popOrClause();
         }
         
         CoveredIndexMatcher *nextClauseMatcher( const BSONObj &indexKeyPattern, bool alwaysUseRecord=false ) {

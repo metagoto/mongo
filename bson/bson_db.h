@@ -34,23 +34,25 @@ namespace mongo {
     Append a timestamp element to the object being ebuilt.
     @param time - in millis (but stored in seconds)
     */
-    inline BSONObjBuilder& BSONObjBuilder::appendTimestamp( const char *fieldName , unsigned long long time , unsigned int inc ){
+    inline BSONObjBuilder& BSONObjBuilder::appendTimestamp( const StringData& fieldName , unsigned long long time , unsigned int inc ){
         OpTime t( (unsigned) (time / 1000) , inc );
         appendTimestamp( fieldName , t.asDate() );
         return *this; 
     }
 
     inline OpTime BSONElement::_opTime() const {
-        return OpTime( *reinterpret_cast< const unsigned long long* >( value() ) );
+        if( type() == mongo::Date || type() == Timestamp )
+            return OpTime( *reinterpret_cast< const unsigned long long* >( value() ) );
+        return OpTime();
     }
 
     inline string BSONElement::_asCode() const {
         switch( type() ){
         case mongo::String:
         case Code:
-            return valuestr();
+            return string(valuestr(), valuestrsize()-1);
         case CodeWScope:
-            return codeWScopeCode();
+            return string(codeWScopeCode(), *(int*)(valuestr())-1);
         default:
             log() << "can't convert type: " << (int)(type()) << " to code" << endl;
         }

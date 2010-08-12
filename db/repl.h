@@ -32,12 +32,11 @@
 #include "dbhelpers.h"
 #include "query.h"
 #include "queryoptimizer.h"
-
 #include "../client/dbclient.h"
-
 #include "../util/optime.h"
-
 #include "oplog.h"
+#include "../util/concurrency/thread_pool.h"
+#include "oplogreader.h"
 
 namespace mongo {
 
@@ -77,10 +76,9 @@ namespace mongo {
     /* A replication exception */
     class SyncException : public DBException {
     public:
-        virtual const char* what() const throw() { return "sync exception"; }
-        virtual int getCode() const { return 10001; }
+        SyncException() : DBException( "sync exception" , 10001 ){}
     };
-    
+
     /* A Source is a source from which we can pull (replicate) data.
        stored in collection local.sources.
 
@@ -92,6 +90,8 @@ namespace mongo {
        not done (always use main for now).
     */
     class ReplSource {
+        auto_ptr<ThreadPool> tp;
+
         bool resync(string db);
 
         /* pull some operations from the master's oplog, and apply them. */
@@ -99,9 +99,6 @@ namespace mongo {
 
         void sync_pullOpLog_applyOperation(BSONObj& op, OpTime *localLogTail);
         
-        auto_ptr<DBClientConnection> conn;
-        auto_ptr<DBClientCursor> cursor;
-
         /* we only clone one database per pass, even if a lot need done.  This helps us
            avoid overflowing the master's transaction log by doing too much work before going
            back to read more transactions. (Imagine a scenario of slave startup where we try to
@@ -115,8 +112,6 @@ namespace mongo {
         
         // returns the dummy ns used to do the drop
         string resyncDrop( const char *db, const char *requester );
-        // returns true if connected on return
-        bool connect();
         // returns possibly unowned id spec for the operation.
         static BSONObj idForOp( const BSONObj &op, bool &mod );
         static void updateSetsWithOp( const BSONObj &op, bool mayUpdateStorage );
@@ -134,6 +129,8 @@ namespace mongo {
         unsigned _sleepAdviceTime;
         
     public:
+        OplogReader oplogReader;
+
         static void applyOperation(const BSONObj& op);
         bool replacing; // in "replace mode" -- see CmdReplacePeer
         bool paired; // --pair in use
@@ -165,10 +162,6 @@ namespace mongo {
         int sync(int& nApplied);
 
         void save(); // write ourself to local.sources
-        void resetConnection() {
-            cursor = auto_ptr<DBClientCursor>(0);
-            conn = auto_ptr<DBClientConnection>(0);
-        }
 
         // make a jsobj from our member fields of the form
         //   { host: ..., source: ..., syncedTo: ... }
@@ -177,7 +170,7 @@ namespace mongo {
         bool operator==(const ReplSource&r) const {
             return hostName == r.hostName && sourceName() == r.sourceName();
         }
-        operator string() const { return sourceName() + "@" + hostName; }
+        string toString() const { return sourceName() + "@" + hostName; }
         
         bool haveMoreDbsToSync() const { return !addDbNextPass.empty(); }        
         int sleepAdvice() const {

@@ -51,7 +51,19 @@ namespace mongoutils {
         inline string td(string x) { 
             return "<td>" + x + "</td>";
         }
+        inline string th(string x) { 
+            return "<th>" + x + "</th>";
+        }
 
+        inline void tablecell( stringstream& ss , bool b ){
+            ss << "<td>" << (b ? "<b>X</b>" : "") << "</td>";
+        }
+
+        template< typename T> 
+        inline void tablecell( stringstream& ss , const T& t ){
+            ss << "<td>" << t << "</td>";
+        }
+        
         inline string table(const char *headers[] = 0, bool border = true) { 
             stringstream ss;
             ss << "\n<table " 
@@ -89,6 +101,12 @@ namespace mongoutils {
             if( !color ) return contentHtml;
             stringstream ss;
             ss << "<span style=\"color:#A00;\">" << contentHtml << "</span>";
+            return ss.str();
+        }
+        inline string grey(string contentHtml, bool color=true) {
+            if( !color ) return contentHtml;
+            stringstream ss;
+            ss << "<span style=\"color:#888;\">" << contentHtml << "</span>";
             return ss.str();
         }
         inline string blue(string contentHtml, bool color=true) {

@@ -248,18 +248,21 @@ namespace JsonTests {
                 z[ 1 ] = 'b';
                 z[ 2 ] = 'c';
                 BSONObjBuilder b;
-                b.appendBinData( "a", 3, ByteArray, z );
-                ASSERT_EQUALS( "{ \"a\" : { \"$binary\" : \"YWJj\", \"$type\" : \"02\" } }",
-                              b.done().jsonString( Strict ) );
+                b.appendBinData( "a", 3, BinDataGeneral, z );
+
+                string o = b.done().jsonString( Strict );
+
+                ASSERT_EQUALS( "{ \"a\" : { \"$binary\" : \"YWJj\", \"$type\" : \"00\" } }",
+                               o );
 
                 BSONObjBuilder c;
-                c.appendBinData( "a", 2, ByteArray, z );
-                ASSERT_EQUALS( "{ \"a\" : { \"$binary\" : \"YWI=\", \"$type\" : \"02\" } }",
+                c.appendBinData( "a", 2, BinDataGeneral, z );
+                ASSERT_EQUALS( "{ \"a\" : { \"$binary\" : \"YWI=\", \"$type\" : \"00\" } }",
                               c.done().jsonString( Strict ) );
 
                 BSONObjBuilder d;
-                d.appendBinData( "a", 1, ByteArray, z );
-                ASSERT_EQUALS( "{ \"a\" : { \"$binary\" : \"YQ==\", \"$type\" : \"02\" } }",
+                d.appendBinData( "a", 1, BinDataGeneral, z );
+                ASSERT_EQUALS( "{ \"a\" : { \"$binary\" : \"YQ==\", \"$type\" : \"00\" } }",
                               d.done().jsonString( Strict ) );
             }
         };
@@ -341,6 +344,16 @@ namespace JsonTests {
                 b.appendTimestamp( "x" , 4000 , 10 );
                 BSONObj o = b.obj();
                 ASSERT_EQUALS( "{ \"x\" : { \"t\" : 4000 , \"i\" : 10 } }" , o.jsonString() );
+            }
+        };
+
+        class NullString {
+        public:
+            void run(){
+                BSONObjBuilder b;
+                b.append( "x" , "a\0b" , 4 );
+                BSONObj o = b.obj();
+                ASSERT_EQUALS( "{ \"x\" : \"a\\u0000b\" }" , o.jsonString() );
             }
         };
 
@@ -771,11 +784,11 @@ namespace JsonTests {
                 z[ 1 ] = 'b';
                 z[ 2 ] = 'c';
                 BSONObjBuilder b;
-                b.appendBinData( "a", 3, ByteArray, z );
+                b.appendBinData( "a", 3, BinDataGeneral, z );
                 return b.obj();
             }
             virtual string json() const {
-                return "{ \"a\" : { \"$binary\" : \"YWJj\", \"$type\" : \"02\" } }";
+                return "{ \"a\" : { \"$binary\" : \"YWJj\", \"$type\" : \"00\" } }";
             }
         };
 
@@ -785,11 +798,11 @@ namespace JsonTests {
                 z[ 0 ] = 'a';
                 z[ 1 ] = 'b';
                 BSONObjBuilder b;
-                b.appendBinData( "a", 2, ByteArray, z );
+                b.appendBinData( "a", 2, BinDataGeneral, z );
                 return b.obj();
             }
             virtual string json() const {
-                return "{ \"a\" : { \"$binary\" : \"YWI=\", \"$type\" : \"02\" } }";
+                return "{ \"a\" : { \"$binary\" : \"YWI=\", \"$type\" : \"00\" } }";
             }
         };
 
@@ -798,11 +811,11 @@ namespace JsonTests {
                 char z[ 1 ];
                 z[ 0 ] = 'a';
                 BSONObjBuilder b;
-                b.appendBinData( "a", 1, ByteArray, z );
+                b.appendBinData( "a", 1, BinDataGeneral, z );
                 return b.obj();
             }
             virtual string json() const {
-                return "{ \"a\" : { \"$binary\" : \"YQ==\", \"$type\" : \"02\" } }";
+                return "{ \"a\" : { \"$binary\" : \"YQ==\", \"$type\" : \"00\" } }";
             }
         };
 
@@ -816,11 +829,11 @@ namespace JsonTests {
                     0x5D, 0xB7, 0xE3, 0x9E, 0xBB, 0xF3, 0xDF, 0xBF
                 };
                 BSONObjBuilder b;
-                b.appendBinData( "a", 48, ByteArray, z );
+                b.appendBinData( "a", 48, BinDataGeneral, z );
                 return b.obj();
             }
             virtual string json() const {
-                return "{ \"a\" : { \"$binary\" : \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\", \"$type\" : \"02\" } }";
+                return "{ \"a\" : { \"$binary\" : \"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\", \"$type\" : \"00\" } }";
             }
         };
 
@@ -1053,7 +1066,17 @@ namespace JsonTests {
                 return "{ \"time.valid\" : { $gt : new Date(1257829200000) , $lt : new Date( 1257829200100 ) } }";
             }
         };
-        
+
+        class NullString : public Base {
+            virtual BSONObj bson() const {
+                BSONObjBuilder b;
+                b.append( "x" , "a\0b" , 4 );
+                return b.obj();
+            }
+            virtual string json() const {
+                return "{ \"x\" : \"a\\u0000b\" }";
+            }
+        };
 
     } // namespace FromJsonTests
 
@@ -1091,6 +1114,7 @@ namespace JsonTests {
             add< JsonStringTests::RegexManyOptions >();
             add< JsonStringTests::CodeTests >();
             add< JsonStringTests::TimestampTests >();
+            add< JsonStringTests::NullString >();
             add< JsonStringTests::AllTypes >();
             
             add< FromJsonTests::Empty >();
@@ -1143,6 +1167,7 @@ namespace JsonTests {
             add< FromJsonTests::EmbeddedDatesFormat1 >();
             add< FromJsonTests::EmbeddedDatesFormat2 >();
             add< FromJsonTests::EmbeddedDatesFormat3 >();
+            add< FromJsonTests::NullString >();
         }
     } myall;
 

@@ -39,14 +39,34 @@ namespace mongo {
          * is { }. 
          * @param balancedLastTime is the number of chunks effectively moved in the last round.
          * @returns NULL or ChunkInfo of the best move to make towards balacing the collection.
-         *
          */
-        static ChunkInfo* balance( const string& ns, const map< string, BSONObj>& shardLimitsMap,  
-                                   const map< string,vector<BSONObj> >& shardToChunksMap, int balancedLastTime );
+        typedef map< string,BSONObj > ShardToLimitsMap;
+        typedef map< string,vector<BSONObj> > ShardToChunksMap;
+        static ChunkInfo* balance( const string& ns, const ShardToLimitsMap& shardToLimitsMap,  
+                                   const ShardToChunksMap& shardToChunksMap, int balancedLastTime );
 
         // below exposed for testing purposes only -- treat it as private --
 
         static BSONObj pickChunk( const vector<BSONObj>& from, const vector<BSONObj>& to );
+
+        /**
+         * Returns true if a shard cannot receive any new chunks bacause it reache 'shardLimits'.
+         * Expects the optional fields "maxSize", can in size in MB, and "usedSize", currently used size
+         * in MB, on 'shardLimits'.
+         */
+        static bool isSizeMaxed( BSONObj shardLimits );
+
+        /**
+         * Returns true if 'shardLimist' contains a field "draining". Expects the optional field 
+         * "isDraining" on 'shrdLimits'.
+         */
+        static bool isDraining( BSONObj shardLimits );
+
+    private:
+        // Convenience types
+        typedef ShardToChunksMap::const_iterator ShardToChunksIter;
+        typedef ShardToLimitsMap::const_iterator ShardToLimitsIter;
+
     };
 
     struct BalancerPolicy::ChunkInfo {

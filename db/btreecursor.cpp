@@ -35,30 +35,40 @@ namespace mongo {
             multikey( d->isMultikey( idxNo ) ),
             indexDetails( _id ),
             order( _id.keyPattern() ),
+            _ordering( Ordering::make( order ) ),
             direction( _direction ),
-            boundIndex_(),
-            _spec( _id.getSpec() )
+            _spec( _id.getSpec() ),
+            _independentFieldRanges( false ),
+            _nscanned( 0 )
     {
         audit();
         init();
         DEV assert( dups.size() == 0 );
     }
 
-    BtreeCursor::BtreeCursor( NamespaceDetails *_d, int _idxNo, const IndexDetails& _id, const vector< pair< BSONObj, BSONObj > > &_bounds, int _direction )
+    BtreeCursor::BtreeCursor( NamespaceDetails *_d, int _idxNo, const IndexDetails& _id, const shared_ptr< FieldRangeVector > &_bounds, int _direction )
         :
             d(_d), idxNo(_idxNo), 
             endKeyInclusive_( true ),
             multikey( d->isMultikey( idxNo ) ),
             indexDetails( _id ),
             order( _id.keyPattern() ),
+            _ordering( Ordering::make( order ) ),
             direction( _direction ),
-            bounds_( _bounds ),
-            boundIndex_(),
-            _spec( _id.getSpec() )
+            bounds_( ( assert( _bounds.get() ), _bounds ) ),
+            _boundsIterator( new FieldRangeVector::Iterator( *bounds_  ) ),
+            _spec( _id.getSpec() ),
+            _independentFieldRanges( true ),
+            _nscanned( 0 )
     {
-        assert( !bounds_.empty() );
+        massert( 13384, "BtreeCursor FieldRangeVector constructor doesn't accept special indexes", !_spec.getType() );
         audit();
-        initInterval();
+        startKey = bounds_->startKey();
+        bool found;
+        _boundsIterator->advance( startKey ); // handles initialization
+        bucket = indexDetails.head.btree()->
+        locate(indexDetails, indexDetails.head, startKey, _ordering, keyOfs, found, direction > 0 ? minDiskLoc : maxDiskLoc, direction);
+        skipAndCheck();
         DEV assert( dups.size() == 0 );
     }
 
@@ -84,21 +94,46 @@ namespace mongo {
         }
         bool found;
         bucket = indexDetails.head.btree()->
-            locate(indexDetails, indexDetails.head, startKey, Ordering::make(order), keyOfs, found, direction > 0 ? minDiskLoc : maxDiskLoc, direction);
-        skipUnusedKeys();
-        checkEnd();        
+            locate(indexDetails, indexDetails.head, startKey, _ordering, keyOfs, found, direction > 0 ? minDiskLoc : maxDiskLoc, direction);
+        if ( ok() ) {
+            _nscanned = 1;
+        }        
+        skipUnusedKeys( false );
+        checkEnd();
     }
     
-    void BtreeCursor::initInterval() {
-        do {
-            startKey = bounds_[ boundIndex_ ].first;
-            endKey = bounds_[ boundIndex_ ].second;
-            init();
-        } while ( !ok() && ++boundIndex_ < bounds_.size() );
+    void BtreeCursor::skipAndCheck() {
+        skipUnusedKeys( true );
+        while( 1 ) {
+            if ( !skipOutOfRangeKeysAndCheckEnd() ) {
+                break;
+            }
+            while( skipOutOfRangeKeysAndCheckEnd() );
+            if ( !skipUnusedKeys( true ) ) {
+                break;
+            }
+        }
     }
-
+    
+    bool BtreeCursor::skipOutOfRangeKeysAndCheckEnd() {
+        if ( !ok() ) {
+            return false;
+        }
+        int ret = _boundsIterator->advance( currKeyNode().key );
+        if ( ret == -2 ) {
+            bucket = DiskLoc();
+            return false;
+        } else if ( ret == -1 ) {
+            ++_nscanned;
+            return false;
+        }
+        ++_nscanned;
+        advanceTo( currKeyNode().key, ret, _boundsIterator->cmp() );
+        return true;
+    }
+    
     /* skip unused keys. */
-    void BtreeCursor::skipUnusedKeys() {
+    bool BtreeCursor::skipUnusedKeys( bool mayJump ) {
         int u = 0;
         while ( 1 ) {
             if ( !ok() )
@@ -109,12 +144,18 @@ namespace mongo {
                 break;
             bucket = b->advance(bucket, keyOfs, direction, "skipUnusedKeys");
             u++;
+            //don't include unused keys in nscanned
+            //++_nscanned;
+            if ( mayJump && ( u % 10 == 0 ) ) {
+                skipOutOfRangeKeysAndCheckEnd();
+            }
         }
         if ( u > 10 )
             OCCASIONALLY log() << "btree unused skipped:" << u << '\n';
+        return u;
     }
 
-// Return a value in the set {-1, 0, 1} to represent the sign of parameter i.
+    // Return a value in the set {-1, 0, 1} to represent the sign of parameter i.
     int sgn( int i ) {
         if ( i == 0 )
             return 0;
@@ -132,17 +173,28 @@ namespace mongo {
                 bucket = DiskLoc();
         }
     }
-
+    
+    void BtreeCursor::advanceTo( const BSONObj &keyBegin, int keyBeginLen, const vector< const BSONElement * > &keyEnd) {
+        bucket.btree()->advanceTo( indexDetails, bucket, keyOfs, keyBegin, keyBeginLen, keyEnd, _ordering, direction );
+    }
+    
     bool BtreeCursor::advance() {
         killCurrentOp.checkForInterrupt();
         if ( bucket.isNull() )
             return false;
+
         bucket = bucket.btree()->advance(bucket, keyOfs, direction, "BtreeCursor::advance");
-        skipUnusedKeys();
-        checkEnd();
-        if( !ok() && ++boundIndex_ < bounds_.size() )
-            initInterval();
-        return !bucket.isNull();
+        
+        if ( !_independentFieldRanges ) {
+            skipUnusedKeys( false );
+            checkEnd();
+            if ( ok() ) {
+                ++_nscanned;
+            }
+        } else {
+            skipAndCheck();
+        }
+        return ok();
     }
 
     void BtreeCursor::noteLocation() {
@@ -183,7 +235,7 @@ namespace mongo {
                             /* we were deleted but still exist as an unused
                             marker key. advance.
                             */
-                            skipUnusedKeys();
+                            skipUnusedKeys( false );
                         }
                         return;
                 }
@@ -204,10 +256,10 @@ namespace mongo {
         bool found;
 
         /* TODO: Switch to keep indexdetails and do idx.head! */
-        bucket = indexDetails.head.btree()->locate(indexDetails, indexDetails.head, keyAtKeyOfs, Ordering::make(order), keyOfs, found, locAtKeyOfs, direction);
+        bucket = indexDetails.head.btree()->locate(indexDetails, indexDetails.head, keyAtKeyOfs, _ordering, keyOfs, found, locAtKeyOfs, direction);
         RARELY log() << "  key seems to have moved in the index, refinding. found:" << found << endl;
         if ( ! bucket.isNull() )
-            skipUnusedKeys();
+            skipUnusedKeys( false );
 
     }
 

@@ -37,6 +37,7 @@ namespace mongo {
         Task::Task() { 
             n = 0;
             repeat = 0;
+            deleteSelf = true;
         }
 
         void Task::halt() { repeat = 0; }
@@ -52,23 +53,22 @@ namespace mongo {
                 if( repeat == 0 )
                     break;
                 sleepmillis(repeat);
+                if( inShutdown() )
+                    break;
             }
         }
 
-        void Task::ending() { me.reset(); }
-
-        void Task::begin(shared_ptr<Task> t) {
-            me = t;
+        void Task::begin() {
             go();
         }
 
-        void fork(shared_ptr<Task> t) { 
-            t->begin(t);
+        void fork(Task *t) { 
+            t->begin();
         }
 
-        void repeat(shared_ptr<Task> t, unsigned millis) { 
+        void repeat(Task *t, unsigned millis) { 
             t->repeat = millis;
-            t->begin(t);
+            t->begin();
         }
 
     }
@@ -81,6 +81,7 @@ namespace mongo {
 namespace mongo {
     namespace task {
 
+        /* to get back a return value */
         struct Ret {
             Ret() : done(false) { }
             bool done;
@@ -115,22 +116,56 @@ namespace mongo {
         }
 
         void Server::doWork() { 
+            starting();
             while( 1 ) { 
                 lam f;
-                {
+                try {
                     boost::mutex::scoped_lock lk(m);
                     while( d.empty() )
                         c.wait(lk);
                     f = d.front();
                     d.pop_front();
                 }
+                catch(...) { 
+                    log() << "ERROR exception in Server:doWork?" << endl;
+                }
                 try {
                     f();
+                    if( rq ) {
+                        rq = false;
+                        {
+                            boost::mutex::scoped_lock lk(m);
+                            d.push_back(f);
+                        }
+                    }
                 } catch(std::exception& e) { 
                     log() << "Server::doWork() exception " << e.what() << endl;
+                } catch(...) {
+                    log() << "Server::doWork() unknown exception!" << endl;
                 }
             }
         }
-        
+
+        static Server *s;
+        static void abc(int i) { 
+            cout << "Hello " << i << endl;
+            s->requeue();
+        }
+        class TaskUnitTest : public mongo::UnitTest {
+        public:
+            virtual void run() { 
+                lam f = boost::bind(abc, 3);
+                //f();
+
+                s = new Server("unittest");
+                fork(s);
+                s->send(f);
+
+                sleepsecs(30);
+                cout <<" done" << endl;
+
+            }
+        }; // not running. taskunittest;
+
     }
 }

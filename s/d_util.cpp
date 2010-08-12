@@ -29,7 +29,12 @@ using namespace std;
 
 namespace mongo {
 
-    void checkShardVersion( DBClientBase & conn , const string& ns , bool authoritative ){
+    bool checkShardVersion( DBClientBase & conn , const string& ns , bool authoritative , int tryNumber ){
+        // no-op in mongod
+        return false;
+    }
+    
+    void resetShardVersion( DBClientBase * conn ){
         // no-op in mongod
     }
 
