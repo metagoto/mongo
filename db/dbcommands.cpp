@@ -180,32 +180,6 @@ namespace mongo {
         }
     } cmdGetPrevError;
 
-    class CmdSwitchToClientErrors : public Command {
-    public:
-        virtual bool requiresAuth() { return false; }
-        virtual bool logTheOp() {
-            return false;
-        }
-        virtual void help( stringstream& help ) const {
-            help << "convert to id based errors rather than connection based";
-        }
-        virtual bool slaveOk() const {
-            return true;
-        }
-        virtual LockType locktype() const { return NONE; } 
-        CmdSwitchToClientErrors() : Command("switchToClientErrors", false, "switchtoclienterrors") {}
-        bool run(const string& dbnamne , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            if ( lastError.getID() ){
-                errmsg = "already in client id mode";
-                return false;
-            }
-            LastError *le = lastError.disableForCommand();
-            le->overridenById = true;
-            result << "ok" << 1;
-            return true;
-        }
-    } cmdSwitchToClientErrors;
-
     class CmdDropDatabase : public Command {
     public:
         virtual bool logTheOp() {
@@ -271,6 +245,7 @@ namespace mongo {
             help << "enable or disable performance profiling\n";
             help << "{ profile : <n> }\n";
             help << "0=off 1=log slow ops 2=log all\n";
+            help << "-1 to get current values\n";
             help << "http://www.mongodb.org/display/DOCS/Database+Profiler";
         }
         virtual LockType locktype() const { return WRITE; } 
@@ -313,7 +288,6 @@ namespace mongo {
         }
 
         bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            
             long long start = Listener::getElapsedTimeMillis();
             BSONObjBuilder timeBuilder(128);
 
@@ -402,7 +376,13 @@ namespace mongo {
                 globalFlushCounters.append( bb );
                 bb.done();
             }
-
+            
+            {
+                BSONObjBuilder bb( result.subobjStart( "cursors" ) );
+                ClientCursor::appendStats( bb );
+                bb.done();
+            }
+            
             timeBuilder.appendNumber( "after counters" , Listener::getElapsedTimeMillis() - start );            
 
             if ( anyReplEnabled() ){
@@ -669,10 +649,10 @@ namespace mongo {
         virtual void help( stringstream& help ) const {
             help << "create a collection";
         }
-        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
+        virtual bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             string ns = dbname + '.' + cmdObj.firstElement().valuestr();
             string err;
-            bool ok = userCreateNS(ns.c_str(), cmdObj, err, true);
+            bool ok = userCreateNS(ns.c_str(), cmdObj, err, ! fromRepl );
             if ( !ok && !err.empty() )
                 errmsg = err;
             return ok;
@@ -731,12 +711,8 @@ namespace mongo {
 
     class CmdReIndex : public Command {
     public:
-        virtual bool logTheOp() {
-            return true;
-        }
-        virtual bool slaveOk() const {
-            return false;
-        }
+        virtual bool logTheOp() { return false; } // only reindexes on the one node
+        virtual bool slaveOk() const { return true; }    // can reindex on a secondary
         virtual LockType locktype() const { return WRITE; } 
         virtual void help( stringstream& help ) const {
             help << "re-index a collection";
@@ -786,9 +762,6 @@ namespace mongo {
 
     class CmdListDatabases : public Command {
     public:
-        virtual bool logTheOp() {
-            return false;
-        }
         virtual bool slaveOk() const {
             return true;
         }
@@ -961,20 +934,39 @@ namespace mongo {
         virtual void help( stringstream &help ) const {
             help <<
                 "determine data size for a set of data in a certain range"
-                "\nexample: { datasize:\"blog.posts\", keyPattern:{x:1}, min:{x:10}, max:{x:55} }"
+                "\nexample: { dataSize:\"blog.posts\", keyPattern:{x:1}, min:{x:10}, max:{x:55} }"
                 "\nkeyPattern, min, and max parameters are optional."
                 "\nnote: This command may take a while to run";
         }
         bool run(const string& dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+            Timer timer;
+
             string ns = jsobj.firstElement().String();
             BSONObj min = jsobj.getObjectField( "min" );
             BSONObj max = jsobj.getObjectField( "max" );
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
+            bool estimate = jsobj["estimate"].trueValue();
 
             Client::Context ctx( ns );
+            NamespaceDetails *d = nsdetails(ns.c_str());
             
+            if ( ! d || d->nrecords == 0 ){
+                result.appendNumber( "size" , 0 );
+                result.appendNumber( "numObjects" , 0 );
+                result.append( "millis" , timer.millis() );
+                return true;
+            }
+            
+            result.appendBool( "estimate" , estimate );
+
             shared_ptr<Cursor> c;
             if ( min.isEmpty() && max.isEmpty() ) {
+                if ( estimate ){
+                    result.appendNumber( "size" , d->datasize );
+                    result.appendNumber( "numObjects" , d->nrecords );
+                    result.append( "millis" , timer.millis() );
+                    return 1;
+                }
                 c = theDataFileMgr.findAll( ns.c_str() );
             } 
             else if ( min.isEmpty() || max.isEmpty() ) {
@@ -985,18 +977,24 @@ namespace mongo {
                 IndexDetails *idx = cmdIndexDetailsForRange( ns.c_str(), errmsg, min, max, keyPattern );
                 if ( idx == 0 )
                     return false;
-                NamespaceDetails *d = nsdetails(ns.c_str());
+                
                 c.reset( new BtreeCursor( d, d->idxNo(*idx), *idx, min, max, false, 1 ) );
             }
             
+            long long avgObjSize = d->datasize / d->nrecords;
+
             long long maxSize = jsobj["maxSize"].numberLong();
             long long maxObjects = jsobj["maxObjects"].numberLong();
 
-            Timer timer;
             long long size = 0;
             long long numObjects = 0;
             while( c->ok() ) {
-                size += c->currLoc().rec()->netLength();
+
+                if ( estimate )
+                    size += avgObjSize;
+                else
+                    size += c->currLoc().rec()->netLength();
+                
                 numObjects++;
                 
                 if ( ( maxSize && size > maxSize ) || 
@@ -1015,8 +1013,8 @@ namespace mongo {
             }
             logIfSlow( timer , os.str() );
 
-            result.append( "size", (double)size );
-            result.append( "numObjects" , (double)numObjects );
+            result.appendNumber( "size", size );
+            result.appendNumber( "numObjects" , numObjects );
             result.append( "millis" , timer.millis() );
             return true;
         }
@@ -1114,7 +1112,7 @@ namespace mongo {
         virtual bool slaveOk() const { return true; }
         virtual LockType locktype() const { return READ; } 
         virtual void help( stringstream &help ) const {
-            help << " example: { dbstats:1 } ";
+            help << " example: { dbStats:1 } ";
         }
         bool run(const string& dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             list<string> collections;
@@ -1504,8 +1502,8 @@ namespace mongo {
     public:
         virtual void help( stringstream &help ) const {
             help << 
-                "{ findandmodify: \"collection\", query: {processed:false}, update: {$set: {processed:true}}, new: true}\n"
-                "{ findandmodify: \"collection\", query: {processed:false}, remove: true, sort: {priority:-1}}\n"
+                "{ findAndModify: \"collection\", query: {processed:false}, update: {$set: {processed:true}}, new: true}\n"
+                "{ findAndModify: \"collection\", query: {processed:false}, remove: true, sort: {priority:-1}}\n"
                 "Either update or remove is required, all other fields have default values.\n"
                 "Output is in the \"value\" field\n";
         }
@@ -1596,9 +1594,6 @@ namespace mongo {
     class CmdWhatsMyUri : public Command {
     public:
         CmdWhatsMyUri() : Command("whatsmyuri") { }
-        virtual bool logTheOp() {
-            return false; // the modification will be logged directly
-        }
         virtual bool slaveOk() const {
             return true;
         }
@@ -1734,12 +1729,8 @@ namespace mongo {
     public:
         virtual LockType locktype() const { return NONE; } 
         virtual bool adminOnly() const { return true; }
-        virtual bool logTheOp() {
-            return false;
-        }
-        virtual bool slaveOk() const {
-            return true;
-        }
+        virtual bool logTheOp() { return false; }
+        virtual bool slaveOk() const { return true; }
         virtual void help( stringstream& help ) const {
             help << "internal testing command.  Makes db block (in a read lock) for 100 seconds\n";
             help << "w:true write lock";
@@ -1839,7 +1830,7 @@ namespace mongo {
         
 
         if ( c->adminOnly() && ! fromRepl && dbname != "admin" ) {
-            result.append( "errmsg" ,  "access denied- use admin db" );
+            result.append( "errmsg" ,  "access denied; use admin db" );
             log() << "command denied: " << cmdObj.toString() << endl;
             return false;
         }        

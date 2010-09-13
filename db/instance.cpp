@@ -62,7 +62,6 @@ namespace mongo {
     bool useCursors = true;
     bool useHints = true;
     
-    void closeAllSockets();
     void flushOpLog( stringstream &ss ) {
         if( _diaglog.f && _diaglog.f->is_open() ) {
             ss << "flushing op log and files\n";
@@ -332,9 +331,10 @@ namespace mongo {
                     }
                 }
                 catch ( AssertionException& e ) {
-                    tlog() << " Caught Assertion in " << opToString(op) << " , continuing" << endl;
+                    static int n;
+                    tlog(3) << " Caught Assertion in " << opToString(op) << ", continuing" << endl;
                     ss << " exception " + e.toString();
-                    log = true;
+                    log = ++n < 10;
                 }
             }
         }
@@ -389,7 +389,7 @@ namespace mongo {
     /* db - database name
        path - db directory
     */
-    void closeDatabase( const char *db, const string& path ) {
+    /*static*/ void Database::closeDatabase( const char *db, const string& path ) {
         assertInWriteLock();
         
         Client::Context * ctx = cc().getContext();
@@ -398,7 +398,7 @@ namespace mongo {
         Database *database = ctx->db();
         assert( database->name == db );
         
-        oplogCheckCloseDatabase( database );
+        oplogCheckCloseDatabase( database ); // oplog caches some things, dirty its caches
 
         if( BackgroundOperation::inProgForDb(db) ) { 
             log() << "warning: bg op in prog during close db? " << db << endl;
@@ -412,8 +412,8 @@ namespace mongo {
         NamespaceDetailsTransient::clearForPrefix( prefix.c_str() );
 
         dbHolder.erase( db, path );
-        delete database; // closes files
         ctx->clear();
+        delete database; // closes files
     }
 
     void receivedUpdate(Message& m, CurOp& op) {
@@ -446,6 +446,7 @@ namespace mongo {
 
         mongolock lk(1);
 
+        // if this ever moves to outside of lock, need to adjust check Client::Context::_finishInit
         if ( ! broadcast && handlePossibleShardedMessage( m , 0 ) )
             return;
 
@@ -460,6 +461,7 @@ namespace mongo {
         const char *ns = d.getns();
         assert(*ns);
         uassert( 10056 ,  "not master", isMasterNs( ns ) );
+        op.debug().str << ns << ' ';
         int flags = d.pullInt();
         bool justOne = flags & RemoveOption_JustOne;
         bool broadcast = flags & RemoveOption_Broadcast;
@@ -472,8 +474,10 @@ namespace mongo {
         }        
 
         writelock lk(ns);
+        // if this ever moves to outside of lock, need to adjust check Client::Context::_finishInit
         if ( ! broadcast & handlePossibleShardedMessage( m , 0 ) )
             return;
+        
         Client::Context ctx(ns);
         
         long long n = deleteObjects(ns, pattern, justOne, true);
@@ -496,6 +500,7 @@ namespace mongo {
         if( ntoreturn ) 
             ss << " ntoreturn:" << ntoreturn;
 
+		time_t start = 0;
         int pass = 0;        
         bool exhaust = false;
         QueryResult* msgdata;
@@ -508,6 +513,17 @@ namespace mongo {
             catch ( GetMoreWaitException& ) { 
                 exhaust = false;
                 massert(13073, "shutting down", !inShutdown() );
+				if( pass == 0 ) { 
+  				    start = time(0);
+				}
+				else { 
+				  if( time(0) - start >= 4 ) {
+					// after about 4 seconds, return.  this is a sanity check.  pass stops at 1000 normally 
+					// for DEV this helps and also if sleep is highly inaccurate on a platform.  we want to 
+					// return occasionally so slave can checkpoint.
+					pass = 10000;
+				  }
+				}
                 pass++;
                 DEV 
                     sleepmillis(20);
@@ -676,7 +692,14 @@ namespace mongo {
     }
 
     /* not using log() herein in case we are already locked */
-    void dbexit( ExitCode rc, const char *why) {        
+    void dbexit( ExitCode rc, const char *why, bool tryToGetLock ) {        
+        
+        auto_ptr<writelocktry> wlt;
+        if ( tryToGetLock ){
+            wlt.reset( new writelocktry( "" , 2 * 60 * 1000 ) );
+            uassert( 13455 , "dbexit timed out getting lock" , wlt->got() );
+        }
+        
         Client * c = currentClient.get();
         {
             scoped_lock lk( exitMutex );
@@ -686,16 +709,18 @@ namespace mongo {
                     ::_exit( rc );
                 }
                 stringstream ss;
-                ss << "dbexit: " << why << "; exiting immediately" << endl;
+                ss << "dbexit: " << why << "; exiting immediately";
                 tryToOutputFatal( ss.str() );
                 if ( c ) c->shutdown();
                 ::exit( rc );                
             }
         }
         
-        stringstream ss;
-        ss << "dbexit: " << why << endl;
-        tryToOutputFatal( ss.str() );
+        {
+            stringstream ss;
+            ss << "dbexit: " << why;
+            tryToOutputFatal( ss.str() );
+        }
         
         try {
             shutdown(); // gracefully shutdown instance
@@ -709,32 +734,32 @@ namespace mongo {
         }
         catch (...) { }
         
-        tryToOutputFatal( "dbexit: really exiting now\n" );
+        tryToOutputFatal( "dbexit: really exiting now" );
         if ( c ) c->shutdown();
         ::exit(rc);
     }
     
     void shutdown() {
 
-        log() << "\t shutdown: going to close listening sockets..." << endl;        
+        log() << "shutdown: going to close listening sockets..." << endl;        
         ListeningSockets::get()->closeAll();
 
-        log() << "\t shutdown: going to flush oplog..." << endl;
+        log() << "shutdown: going to flush oplog..." << endl;
         stringstream ss2;
         flushOpLog( ss2 );
         rawOut( ss2.str() );
 
         /* must do this before unmapping mem or you may get a seg fault */
-        log() << "\t shutdown: going to close sockets..." << endl;
-        boost::thread close_socket_thread(closeAllSockets);
+        log() << "shutdown: going to close sockets..." << endl;
+        boost::thread close_socket_thread( boost::bind(MessagingPort::closeAllSockets, 0) );
 
         // wait until file preallocation finishes
         // we would only hang here if the file_allocator code generates a
         // synchronous signal, which we don't expect
-        log() << "\t shutdown: waiting for fs preallocator..." << endl;
+        log() << "shutdown: waiting for fs preallocator..." << endl;
         theFileAllocator().waitUntilFinished();
         
-        log() << "\t shutdown: closing all files..." << endl;
+        log() << "shutdown: closing all files..." << endl;
         stringstream ss3;
         MemoryMappedFile::closeAllFiles( ss3 );
         rawOut( ss3.str() );
@@ -744,9 +769,9 @@ namespace mongo {
         
 #if !defined(_WIN32) && !defined(__sunos__)
         if ( lockFile ){
-            log() << "\t shutdown: removing fs lock..." << endl;
+            log() << "shutdown: removing fs lock..." << endl;
             if( ftruncate( lockFile , 0 ) ) 
-                log() << "\t couldn't remove fs lock " << errnoWithDescription() << endl;
+                log() << "couldn't remove fs lock " << errnoWithDescription() << endl;
             flock( lockFile, LOCK_UN );
         }
 #endif
@@ -766,12 +791,14 @@ namespace mongo {
 
         bool oldFile = false;
 
-        if ( boost::filesystem::exists( name ) && boost::filesystem::file_size( name ) > 0 ){
+        if ( boost::filesystem::exists( name ) && boost::filesystem::file_size( name ) > 0 ) {
             oldFile = true;
         }
 
         lockFile = open( name.c_str(), O_RDWR | O_CREAT , S_IRWXU | S_IRWXG | S_IRWXO );
-        uassert( 10309 ,  "Unable to create / open lock file for lockfilepath: " + name, lockFile > 0 );
+		if( lockFile <= 0 ) {
+		    uasserted( 10309 , str::stream() << "Unable to create / open lock file for lockfilepath: " << name << ' ' << errnoWithDescription());
+        }
         if (flock( lockFile, LOCK_EX | LOCK_NB ) != 0) {
             close ( lockFile );
             lockFile = 0;

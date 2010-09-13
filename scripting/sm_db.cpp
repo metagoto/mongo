@@ -95,7 +95,13 @@ namespace mongo {
 
     JSBool internal_cursor_hasNext(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
         DBClientCursor *cursor = getCursor( cx, obj );
-        *rval = cursor->more() ? JSVAL_TRUE : JSVAL_FALSE;
+        try {
+            *rval = cursor->more() ? JSVAL_TRUE : JSVAL_FALSE;
+        }
+        catch ( std::exception& e ){
+            JS_ReportError( cx , e.what() );
+            return JS_FALSE;
+        }
         return JS_TRUE;
     }
 
@@ -108,13 +114,23 @@ namespace mongo {
 
     JSBool internal_cursor_next(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
         DBClientCursor *cursor = getCursor( cx, obj );
-        if ( ! cursor->more() ){
-            JS_ReportError( cx , "cursor at the end" );
+
+        BSONObj n;        
+        
+        try {
+            if ( ! cursor->more() ){
+                JS_ReportError( cx , "cursor at the end" );
+                return JS_FALSE;
+            }
+
+            n = cursor->next();
+        }
+        catch ( std::exception& e ){
+            JS_ReportError( cx , e.what() );
             return JS_FALSE;
         }
-        Convertor c(cx);
 
-        BSONObj n = cursor->next();
+        Convertor c(cx);
         *rval = c.toval( &n );
         return JS_TRUE;
     }
@@ -156,7 +172,7 @@ namespace mongo {
     JSBool mongo_external_constructor( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
         Convertor c( cx );
         
-        uassert( 10238 ,  "0 or 1 args to Mongo" , argc <= 1 );
+        smuassert( cx ,  "0 or 1 args to Mongo" , argc <= 1 );
         
         string host = "127.0.0.1";
         if ( argc > 0 )
@@ -207,9 +223,9 @@ namespace mongo {
      };
 
     JSBool mongo_find(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){
-        uassert( 10240 ,  "mongo_find neesd 6 args" , argc == 6 );
+        smuassert( cx , "mongo_find needs 6 args" , argc == 6 );
         shared_ptr< DBClientWithCommands > * connHolder = (shared_ptr< DBClientWithCommands >*)JS_GetPrivate( cx , obj );
-        uassert( 10241 ,  "no connection!" , connHolder && connHolder->get() );
+        smuassert( cx ,  "no connection!" , connHolder && connHolder->get() );
         DBClientWithCommands *conn = connHolder->get();
                       
         Convertor c( cx );
@@ -310,7 +326,7 @@ namespace mongo {
     }
 
     JSBool mongo_remove(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
-        smuassert( cx ,  "mongo_remove needs 2 arguments" , argc == 2 );
+        smuassert( cx ,  "mongo_remove needs 2 or 3 arguments" , argc == 2 || argc == 3 );
         smuassert( cx ,  "2nd param to insert has to be an object" , JSVAL_IS_OBJECT( argv[1] ) );
 
         Convertor c( cx );
@@ -324,9 +340,12 @@ namespace mongo {
         
         string ns = c.toString( argv[0] );
         BSONObj o = c.toObject( argv[1] );
-
+        bool justOne = false;
+        if ( argc > 2 )
+            justOne = c.toBoolean( argv[2] );
+        
         try {
-            conn->remove( ns , o );
+            conn->remove( ns , o , justOne );
             return JS_TRUE;
         }
         catch ( ... ){
@@ -827,6 +846,12 @@ namespace mongo {
     JSBool numberlong_constructor( JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval ){
         smuassert( cx , "NumberLong needs 0 or 1 args" , argc == 0 || argc == 1 );
         
+        if ( ! JS_InstanceOf( cx , obj , &numberlong_class , 0 ) ){
+            obj = JS_NewObject( cx , &numberlong_class , 0 , 0 );
+            CHECKNEWOBJECT( obj, cx, "numberlong_constructor" );
+            *rval = OBJECT_TO_JSVAL( obj );
+        }
+
         Convertor c( cx );
         if ( argc == 0 ) {
             c.setProperty( obj, "floatApprox", c.toval( 0.0 ) );
@@ -861,12 +886,14 @@ namespace mongo {
     JSBool numberlong_tostring(JSContext *cx, JSObject *obj, uintN argc, jsval *argv, jsval *rval){    
         Convertor c(cx);
         stringstream ss;
-        if ( c.hasProperty( obj, "top" ) ) {
-            long long val = c.toNumberLongUnsafe( obj );
-            ss << "NumberLong( \"" << val << "\" )";            
-        } else {
-            ss << "NumberLong( " << c.getNumber( obj, "floatApprox" ) << " )";            
-        }
+        long long val = c.toNumberLongUnsafe( obj );
+        const long long limit = 2LL << 30;
+
+        if ( val <= -limit || limit <= val )
+            ss << "NumberLong(\"" << val << "\")";
+        else
+            ss << "NumberLong(" << val << ")";
+
         string ret = ss.str();
         return *rval = c.toval( ret.c_str() );
     }
@@ -1023,7 +1050,7 @@ namespace mongo {
         }
         
         if ( JS_InstanceOf( c->_context , o , &dbpointer_class , 0 ) ){
-            b.appendDBRef( name , c->getString( o , "ns" ).c_str() , c->toOID( c->getProperty( o , "id" ) ) );
+            b.appendDBRef( name , c->getString( o , "ns" ) , c->toOID( c->getProperty( o , "id" ) ) );
             return true;
         }
         

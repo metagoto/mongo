@@ -93,6 +93,14 @@
 
 namespace mongo {
 
+    /* this likely goes away later. to facilitate testing for a while without impacting other things. */
+#if defined(_DURABLE)
+    const bool durable = true;
+#error do not use this yet
+#else
+    const bool durable = false;
+#endif
+
     using namespace std;
     using boost::shared_ptr;
 
@@ -112,7 +120,7 @@ namespace mongo {
         EXIT_REPLICATION_ERROR = 3 ,
         EXIT_NEED_UPGRADE = 4 ,
         EXIT_KILL = 12 ,
-        EXIT_ABRUBT = 14 ,
+        EXIT_ABRUPT = 14 ,
         EXIT_NTSERVICE_ERROR = 20 ,
         EXIT_JAVA = 21 ,
         EXIT_OOM_MALLOC = 42 , 
@@ -126,7 +134,7 @@ namespace mongo {
 
     };
 
-    void dbexit( ExitCode returnCode, const char *whyMsg = "");
+    void dbexit( ExitCode returnCode, const char *whyMsg = "", bool tryToGetLock = false);
 
     /**
        this is here so you can't just type exit() to quit the program

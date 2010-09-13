@@ -42,11 +42,7 @@ jmp_buf jbuf;
 
 using namespace std;
 using namespace boost::filesystem;
-
-using mongo::BSONObj;
-using mongo::BSONObjBuilder;
-using mongo::BSONObjIterator;
-using mongo::BSONElement;
+using namespace mongo;
 
 string historyFile;
 bool gotInterrupted = 0;
@@ -169,27 +165,34 @@ void killOps() {
     if ( atPrompt )
         return;
 
-    if ( !autoKillOp ) {
-        cout << endl << "do you want to kill the current op on the server? (y/n): ";
-        cout.flush();
+    sleepmillis(10); // give current op a chance to finish
 
-        char yn;
-        cin >> yn;
+    for( map< string, set<string> >::const_iterator i = shellUtils::_allMyUris.begin(); i != shellUtils::_allMyUris.end(); ++i ){
+        string errmsg;
+        ConnectionString cs = ConnectionString::parse(i->first, errmsg);
+        if (!cs.isValid()) continue;
+        boost::scoped_ptr<DBClientWithCommands> conn (cs.connect(errmsg));
+        if (!conn) continue;
 
-        if (yn != 'y' && yn != 'Y')
-            return;
-    }
+        const set<string>& uris = i->second;
 
+        BSONObj inprog =  conn->findOne("admin.$cmd.sys.inprog", Query())["inprog"].embeddedObject().getOwned();
+        BSONForEach(op, inprog){
+            if ( uris.count(op["client"].String()) ) {
+                ONCE if ( !autoKillOp ) {
+                    cout << endl << "do you want to kill the current op(s) on the server? (y/n): ";
+                    cout.flush();
 
-    vector< string > uris;
-    for( map< const void*, string >::iterator i = mongo::shellUtils::_allMyUris.begin(); i != mongo::shellUtils::_allMyUris.end(); ++i )
-        uris.push_back( i->second );
-    mongo::BSONObj spec = BSON( "" << uris );
-    try {
-        auto_ptr< mongo::Scope > scope( mongo::globalScriptEngine->newScope() );        
-        scope->invoke( "function( x ) { killWithUris( x ); }", spec );
-    } catch ( ... ) {
-        mongo::rawOut( "exception while cleaning up any db ops started by this shell\n" );
+                    char yn;
+                    cin >> yn;
+
+                    if (yn != 'y' && yn != 'Y')
+                        return;
+                }
+
+                conn->findOne("admin.$cmd.sys.killop", QUERY("op"<< op["opid"]));
+            }
+        }
     }
 }
 
@@ -268,6 +271,14 @@ void quitAbruptly( int sig ) {
     exit(14);
 }
 
+// this will be called in certain c++ error cases, for example if there are two active
+// exceptions
+void myterminate() {
+    mongo::rawOut( "terminate() called in shell, printing stack:" );
+    mongo::printStackTrace();
+    exit(14);
+}
+
 void setupSignals() {
     signal( SIGINT , quitNicely );
     signal( SIGTERM , quitNicely );
@@ -276,6 +287,7 @@ void setupSignals() {
     signal( SIGSEGV , quitAbruptly );
     signal( SIGBUS , quitAbruptly );
     signal( SIGFPE , quitAbruptly );
+    set_terminate( myterminate );
 }
 #else
 inline void setupSignals() {}
@@ -342,6 +354,9 @@ bool isBalanced( string code ){
             i++;
             while ( i < code.size() && code[i] != '\'' ) i++;
             break;
+        case '\\':
+            if ( i+1 < code.size() && code[i+1] == '/') i++;
+            continue;
         }
     }
 
@@ -361,6 +376,8 @@ public:
         assert( isBalanced( "// {" ) );
         assert( ! isBalanced( "// \n {" ) );
         assert( ! isBalanced( "\"//\" {" ) );
+        assert( isBalanced( "{x:/x\\//}" ) );
+        assert( ! isBalanced( "{ \\/// }" ) );
 
     }
 } balnaced_test;
@@ -374,6 +391,10 @@ string finishCode( string code ){
             return "";
         if ( ! line )
             return "";
+
+        while (startsWith(line, "... "))
+            line += 4;
+
         code += line;
     }
     return code;
@@ -613,9 +634,13 @@ int _main(int argc, char* argv[]) {
             gotInterrupted = 0;
             char * line = shellReadline( "> " );
 
-            if ( line )
+            if ( line ){
+                while (startsWith(line, "> "))
+                    line += 2;
+
                 while ( line[0] == ' ' )
                     line++;
+            }
 
             if ( ! line || ( strlen(line) == 4 && strstr( line , "exit" ) ) ){
                 cout << "bye" << endl;

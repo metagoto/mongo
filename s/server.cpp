@@ -23,6 +23,7 @@
 #include "../util/message_server.h"
 #include "../util/stringutils.h"
 #include "../util/version.h"
+#include "../util/signal_handlers.h"
 #include "../db/dbwebserver.h"
 
 #include "server.h"
@@ -63,10 +64,7 @@ namespace mongo {
 
     class ShardingConnectionHook : public DBConnectionHook {
     public:
-        virtual void onCreate( DBClientBase * conn ){
-            if ( conn->type() != ConnectionString::SYNC )
-                conn->simpleCommand( "admin" , 0 , "switchtoclienterrors" );
-        }
+
         virtual void onHandedOut( DBClientBase * conn ){
             ClientInfo::get()->addShard( conn->getServerAddress() );
         }
@@ -118,6 +116,16 @@ namespace mongo {
     void setupSignals(){
         signal(SIGTERM, sighandler);
         signal(SIGINT, sighandler);
+
+#if defined(SIGQUIT)
+        signal( SIGQUIT , printStackAndExit );
+#endif
+        signal( SIGSEGV , printStackAndExit );
+        signal( SIGABRT , printStackAndExit );
+        signal( SIGFPE , printStackAndExit );
+#if defined(SIGBUS)
+        signal( SIGBUS , printStackAndExit );
+#endif
     }
 
     void init(){
@@ -163,21 +171,23 @@ int main(int argc, char* argv[], char *envp[] ) {
     static StaticObserver staticObserver;
     mongosCommand = argv[0];
 
-    po::options_description options("Sharding options");
+    po::options_description options("General options");
+    po::options_description sharding_options("Sharding options");
     po::options_description hidden("Hidden options");
     po::positional_options_description positional;
     
     CmdLine::addGlobalOptions( options , hidden );
     
-    options.add_options()
+    sharding_options.add_options()
         ( "configdb" , po::value<string>() , "1 or 3 comma separated config servers" )
         ( "test" , "just run unit tests" )
         ( "upgrade" , "upgrade meta data version" )
         ( "chunkSize" , po::value<int>(), "maximum amount of data per chunk" )
         ( "ipv6", "enable IPv6 support (disabled by default)" )
+        ( "jsonp","allow JSONP access via http (has security implications)" )
         ;
-    
 
+    options.add(sharding_options);
     // parse options
     po::variables_map params;
     if ( ! CmdLine::store( argc , argv , options , hidden , positional , params ) )
@@ -199,6 +209,10 @@ int main(int argc, char* argv[], char *envp[] ) {
 
     if ( params.count( "ipv6" ) ){
         enableIPv6();
+    }
+
+    if ( params.count( "jsonp" ) ){
+        cmdLine.jsonp = true;
     }
 
     if ( params.count( "test" ) ){
@@ -243,6 +257,7 @@ int main(int argc, char* argv[], char *envp[] ) {
     }
     
     pool.addHook( &shardingConnectionHook );
+    pool.setName( "mongos connectionpool" );
 
     if ( argc <= 1 ) {
         usage( argv );
@@ -294,8 +309,11 @@ int main(int argc, char* argv[], char *envp[] ) {
 }
 
 #undef exit
-void mongo::dbexit( ExitCode rc, const char *why) {
+void mongo::dbexit( ExitCode rc, const char *why, bool tryToGetLock ) {
     dbexitCalled = true;
-    log() << "dbexit: " << why << " rc:" << rc << endl;
+    log() << "dbexit: " << why 
+          << " rc:" << rc 
+          << " " << ( why ? why : "" )
+          << endl;
     ::exit(rc);
 }

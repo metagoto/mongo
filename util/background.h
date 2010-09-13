@@ -51,7 +51,7 @@ namespace mongo {
         */
         virtual void run() = 0;
         virtual string name() = 0;
-        virtual void ending() { } // hook for post processing if desired after everything else done. not called when deleteSelf=true
+        //virtual void ending() { } // hook for post processing if desired after everything else done. not called when deleteSelf=true
     public:
         enum State {
             NotStarted,
@@ -63,9 +63,12 @@ namespace mongo {
 
         bool deleteSelf; // delete self when Done?
 
+        bool nameThread; // thread should name itself to the OS / debugger. set to false if very short lived to avoid that call
+
         BackgroundJob() {
             deleteSelf = false;
             state = NotStarted;
+            nameThread = true;
         }
         virtual ~BackgroundJob() { }
 
@@ -85,29 +88,13 @@ namespace mongo {
         static void wait(list<BackgroundJob*>&, unsigned maxSleepInterval=1000);
 
     private:
-        static BackgroundJob *grab;
-        static mongo::mutex mutex;
-        static void thr();
+        //static BackgroundJob *grab;
+        //static mongo::mutex mutex;
+        void thr();
         volatile State state;
+        //boost::mutex _m;
+        //boost::condition _c;
     };
 
-    class PeriodicBackgroundJob : public BackgroundJob {
-    public:
-        PeriodicBackgroundJob( int millisToSleep ) 
-            : _millis( millisToSleep ){
-        }
-        
-        virtual ~PeriodicBackgroundJob(){}
-
-        /** this gets called every millisToSleep ms */
-        virtual void runLoop() = 0;
-        
-        virtual void run();
-
-
-    private:
-        int _millis;
-                
-    };
 
 } // namespace mongo

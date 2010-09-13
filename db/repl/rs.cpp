@@ -31,39 +31,48 @@ namespace mongo {
     extern string *discoveredSeed;
 
     void ReplSetImpl::sethbmsg(string s, int logLevel) { 
-      static time_t lastLogged;
-      if( s == _hbmsg ) { 
-	// unchanged
-	if( time(0)-lastLogged < 60 )
-	  return;
-      }
+        static time_t lastLogged;
+        _hbmsgTime = time(0);
 
-      unsigned sz = s.size();
-      if( sz >= 256 ) 
-	memcpy(_hbmsg, s.c_str(), 255);
-      else {
-	_hbmsg[sz] = 0;
-	memcpy(_hbmsg, s.c_str(), sz);
-      }
-      if( !s.empty() ) {
-	lastLogged = time(0);
-	log(logLevel) << "replSet " << s << rsLog;
-      }
+        if( s == _hbmsg ) { 
+            // unchanged
+            if( _hbmsgTime - lastLogged < 60 )
+                return;
+        }
+
+        unsigned sz = s.size();
+        if( sz >= 256 ) 
+            memcpy(_hbmsg, s.c_str(), 255);
+        else {
+            _hbmsg[sz] = 0;
+            memcpy(_hbmsg, s.c_str(), sz);
+        }
+        if( !s.empty() ) {
+            lastLogged = _hbmsgTime;
+            log(logLevel) << "replSet " << s << rsLog;
+        }
     }
 
     void ReplSetImpl::assumePrimary() { 
         assert( iAmPotentiallyHot() );
         writelock lk("admin."); // so we are synchronized with _logOp()
         box.setSelfPrimary(_self);
-        log() << "replSet PRIMARY" << rsLog; // self (" << _self->id() << ") is now primary" << rsLog;
+        //log() << "replSet PRIMARY" << rsLog; // self (" << _self->id() << ") is now primary" << rsLog;
     }
 
     void ReplSetImpl::changeState(MemberState s) { box.change(s, _self); }
 
     void ReplSetImpl::relinquish() { 
         if( box.getState().primary() ) {
+            log() << "replSet relinquishing primary state" << rsLog;
             changeState(MemberState::RS_RECOVERING);
-            log() << "replSet info relinquished primary state" << rsLog;
+            
+            /* close sockets that were talking to us */
+            /*log() << "replSet closing sockets after reqlinquishing primary" << rsLog;
+            MessagingPort::closeAllSockets(1);*/
+
+            // todo: >
+            //changeState(MemberState::RS_SECONDARY);
         }
         else if( box.getState().startup2() ) {
             // ? add comment
@@ -109,11 +118,18 @@ namespace mongo {
     }
 
     void ReplSetImpl::_fillIsMasterHost(const Member *m, vector<string>& hosts, vector<string>& passives, vector<string>& arbiters) {
+        if( m->config().hidden )
+            return;
+
         if( m->potentiallyHot() ) {
             hosts.push_back(m->h().toString());
         }
         else if( !m->config().arbiterOnly ) {
-            passives.push_back(m->h().toString());
+            if( m->config().slaveDelay ) {
+                /* hmmm - we don't list these as they are stale. */   
+            } else {
+                passives.push_back(m->h().toString());
+            }
         }
         else {
             arbiters.push_back(m->h().toString());
@@ -123,6 +139,7 @@ namespace mongo {
     void ReplSetImpl::_fillIsMaster(BSONObjBuilder& b) {
         const StateBox::SP sp = box.get();
         bool isp = sp.state.primary();
+        b.append("setName", name());
         b.append("ismaster", isp);
         b.append("secondary", sp.state.secondary());
         {
@@ -151,6 +168,10 @@ namespace mongo {
         }
         if( myConfig().arbiterOnly )
             b.append("arbiterOnly", true);
+        if( myConfig().slaveDelay )
+            b.append("slaveDelay", myConfig().slaveDelay);
+        if( myConfig().hidden )
+            b.append("hidden", true);
     }
 
     /** @param cfgString <setname>/<seedhost1>,<seedhost2> */
@@ -184,7 +205,7 @@ namespace mongo {
                 uassert(13096, "bad --replSet command line config string - dups?", seedSet.count(m) == 0 );
                 seedSet.insert(m);
                 //uassert(13101, "can't use localhost in replset host list", !m.isLocalHost());
-                if( m.isSelf() ) {
+                if( ListeningSockets::listeningOn(m) ) {
                     log(1) << "replSet ignoring seed " << m.toString() << " (=self)" << rsLog;
                 } else
                     seeds.push_back(m);
@@ -218,7 +239,7 @@ namespace mongo {
             replSetCmdline.seedSet.erase(m->h());
         }
         for( set<HostAndPort>::iterator i = replSetCmdline.seedSet.begin(); i != replSetCmdline.seedSet.end(); i++ ) {
-            if( i->isSelf() ) {
+            if( ListeningSockets::listeningOn(*i) ) {
                 if( sss == 1 ) 
                     log(1) << "replSet warning self is listed in the seed list and there are no other seeds listed did you intend that?" << rsLog;
             } else
@@ -245,7 +266,7 @@ namespace mongo {
             loadLastOpTimeWritten();
         }
         catch(std::exception& e) { 
-            log() << "replSet ERROR FATAL couldn't query the local " << rsoplog << " collection.  Terminating mongod after 30 seconds." << rsLog;
+            log() << "replSet error fatal couldn't query the local " << rsoplog << " collection.  Terminating mongod after 30 seconds." << rsLog;
             log() << e.what() << rsLog;
             sleepsecs(30);
             dbexit( EXIT_REPLICATION_ERROR );
@@ -283,7 +304,7 @@ namespace mongo {
             int me = 0;
             for( vector<ReplSetConfig::MemberCfg>::iterator i = c.members.begin(); i != c.members.end(); i++ ) { 
                 const ReplSetConfig::MemberCfg& m = *i;
-                if( m.h.isSelf() ) {
+                if( ListeningSockets::listeningOn(m.h) ) {
                     nfound++;
                     me++;
                     if( !reconf || (_self && _self->id() == (unsigned) m._id) )
@@ -359,7 +380,7 @@ namespace mongo {
         for( vector<ReplSetConfig::MemberCfg>::iterator i = _cfg->members.begin(); i != _cfg->members.end(); i++ ) { 
             const ReplSetConfig::MemberCfg& m = *i;
             Member *mi;
-            if( m.h.isSelf() ) {
+            if( ListeningSockets::listeningOn(m.h) ) {
                 assert( _self == 0 );
                 mi = _self = new Member(m.h, m._id, &m, true);
                 if( (int)mi->id() == oldPrimaryId )
@@ -472,6 +493,7 @@ namespace mongo {
                 startupStatusMsg = "replSet error loading set config (BADCONFIG)";
                 log() << "replSet error loading configurations " << e.toString() << rsLog;
                 log() << "replSet error replication will not start" << rsLog;
+                sethbmsg("error loading set config");
                 _fatal();
                 throw;
             }
@@ -485,10 +507,9 @@ namespace mongo {
     { 
         //lock l(this);
         box.set(MemberState::RS_FATAL, 0);
-        sethbmsg("fatal error");
-        log() << "replSet error fatal error, stopping replication" << rsLog; 
+        //sethbmsg("fatal error");
+        log() << "replSet error fatal, stopping replication" << rsLog; 
     }
-
 
     void ReplSet::haveNewConfig(ReplSetConfig& newConfig, bool addComment) { 
         lock l(this); // convention is to lock replset before taking the db rwlock
@@ -529,6 +550,20 @@ namespace mongo {
     */
     void startReplSets(ReplSetCmdline *replSetCmdline) {
         Client::initThread("startReplSets");
+
+        // Wait for network layer to be ready
+        for (int i=0; true; i++){
+            if (ListeningSockets::get()->isReady())
+                break;
+
+            massert(13466, "Network layer not up after 5 minutes. Giving up", i < 5*60);
+
+            if (i && i%10 == 0)
+                log() << "Network layer not up after " << i << " seconds. Will keep trying" << endl;
+
+            sleepsecs(1);
+        }
+
         try { 
             assert( theReplSet == 0 );
             if( replSetCmdline == 0 ) {

@@ -62,7 +62,7 @@ namespace mongo {
                 rsOplogDetails = nsdetails(logns);
                 massert(13389, "local.oplog.rs missing. did you drop it? if so restart server", rsOplogDetails);
             }
-            Client::Context ctx( "" , localDB, false );
+            Client::Context ctx( logns , localDB, false );
             {
                 int len = op.objsize();
                 Record *r = theDataFileMgr.fast_oplog_insert(rsOplogDetails, logns, len);
@@ -136,14 +136,16 @@ namespace mongo {
                 rsOplogDetails = nsdetails(logns);
                 massert(13347, "local.oplog.rs missing. did you drop it? if so restart server", rsOplogDetails);
             }
-            Client::Context ctx( "" , localDB, false );
+            Client::Context ctx( logns , localDB, false );
             r = theDataFileMgr.fast_oplog_insert(rsOplogDetails, logns, len);
             /* todo: now() has code to handle clock skew.  but if the skew server to server is large it will get unhappy.
                      this code (or code in now() maybe) should be improved.
                      */
             if( theReplSet ) {
-                if( !(theReplSet->lastOpTimeWritten<ts) ) 
-                    log() << "replSet ERROR possible failover clock skew issue? " << theReplSet->lastOpTimeWritten << ' ' << ts << endl;
+                if( !(theReplSet->lastOpTimeWritten<ts) ) {
+                    log() << "replSet ERROR possible failover clock skew issue? " << theReplSet->lastOpTimeWritten << ' ' << ts << rsLog;
+                    log() << "replSet " << theReplSet->isPrimary() << rsLog;
+                }
                 theReplSet->lastOpTimeWritten = ts;
                 theReplSet->lastH = hNew;
                 ctx.getClient()->setLastOp( ts.asDate() );
@@ -228,7 +230,7 @@ namespace mongo {
                 localOplogMainDetails = nsdetails(logNS);
                 assert( localOplogMainDetails );
             }
-            Client::Context ctx( "" , localDB, false );
+            Client::Context ctx( logNS , localDB, false );
             r = theDataFileMgr.fast_oplog_insert(localOplogMainDetails, logNS, len);
         } else {
             Client::Context ctx( logNS, dbpath, 0, false );
@@ -364,7 +366,7 @@ namespace mongo {
         BSONObj o = b.done();
         userCreateNS(ns, o, err, false);
         if( !rs )
-            logOp( "n", "dummy", BSONObj() );
+            logOp( "n", "", BSONObj() );
 
         /* sync here so we don't get any surprising lag later when we try to sync */
         MemoryMappedFile::flushAll(true);

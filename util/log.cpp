@@ -50,7 +50,11 @@ namespace mongo {
             // test path
             FILE * test = fopen( lp.c_str() , _append ? "a" : "w" );
             if ( ! test ){
-                cout << "can't open [" << lp << "] for log file: " << errnoWithDescription() << endl;
+                if (boost::filesystem::is_directory(lp)){
+                    cout << "logpath [" << lp << "] should be a file name not a directory" << endl;
+                } else {
+                    cout << "can't open [" << lp << "] for log file: " << errnoWithDescription() << endl;
+                }
                 dbexit( EXIT_BADOPTIONS );
                 assert( 0 );
             }
@@ -83,7 +87,7 @@ namespace mongo {
             }
             
             
-            FILE* tmp = fopen(_path.c_str(), (_append ? "a" : "w"));
+            FILE* tmp = freopen(_path.c_str(), (_append ? "a" : "w"), stdout);
             if (!tmp){
                 cerr << "can't open: " << _path.c_str() << " for log file" << endl;
                 dbexit( EXIT_BADOPTIONS );
@@ -91,10 +95,6 @@ namespace mongo {
             }
 
             Logstream::setLogFile(tmp); // after this point no thread will be using old file
-
-            if (_file){
-                fclose(_file);
-            }
 
             _file = tmp;
             _opened = time(0);

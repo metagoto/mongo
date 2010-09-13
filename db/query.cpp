@@ -285,7 +285,7 @@ namespace mongo {
 //        log() << "TEMP GETMORE " << ns << ' ' << cursorid << ' ' << pass << endl;
         exhaust = false;
         ClientCursor::Pointer p(cursorid);
-        ClientCursor *cc = p._c;
+        ClientCursor *cc = p.c();
         
         int bufSize = 512;
         if ( cc ){
@@ -324,7 +324,6 @@ namespace mongo {
 
             while ( 1 ) {
                 if ( !c->ok() ) {
-//                    log() << "TEMP Tailable : " << c->tailable() << ' ' << (queryOptions & QueryOption_AwaitData) << endl;
                     if ( c->tailable() ) {
                         /* when a tailable cursor hits "EOF", ok() goes false, and current() is null.  however 
                            advance() can still be retries as a reactivation attempt.  when there is new data, it will 
@@ -400,7 +399,7 @@ namespace mongo {
     class CountOp : public QueryOp {
     public:
         CountOp( const string& ns , const BSONObj &spec ) :
-            _ns(ns), count_(),
+            _ns(ns), count_(), _myCount(),
             skip_( spec["skip"].numberLong() ),
             limit_( spec["limit"].numberLong() ),
             bc_(){
@@ -477,7 +476,9 @@ namespace mongo {
             return ret;
         }
         long long count() const { return count_; }
-        virtual bool mayRecordPlan() const { return true; }
+        virtual bool mayRecordPlan() const {
+            return ( _myCount > limit_ / 2 ) || ( complete() && !stopRequested() );
+        }
     private:
         
         void _gotOne(){
@@ -492,11 +493,13 @@ namespace mongo {
             }
 
             count_++;
+            _myCount++;
         }
 
         string _ns;
         
         long long count_;
+        long long _myCount;
         long long skip_;
         long long limit_;
         shared_ptr<Cursor> c_;
@@ -585,7 +588,7 @@ namespace mongo {
                 BSONObjBuilder b;
                 b << "clauses" << _c->arr();
                 b.appendNumber( "nscanned", nscanned );
-                b.appendNumber( "nscanneObjects", nscannedObjects );
+                b.appendNumber( "nscannedObjects", nscannedObjects );
                 b << "n" << n;
                 b << "millis" << millis;
                 b.appendElements( suffix );
@@ -663,11 +666,12 @@ namespace mongo {
                 if ( !ClientCursor::recoverFromYield( _yieldData ) ) {
                     _c.reset();
                     _cc.reset();
+                    _so.reset();
                     massert( 13338, "cursor dropped during query", false );
                     // TODO maybe we want to prevent recording the winning plan as well?
                 } 
             }
-        }        
+        }
         
         virtual long long nscanned() {
             if ( _findingStartCursor.get() ) {
@@ -785,11 +789,15 @@ namespace mongo {
 
         // this plan won, so set data for response broadly
         void finish( bool stop ) {
+            if ( _c.get() ) {
+                _nscanned = _c->nscanned();
+            }
             if ( _pq.isExplain() ) {
                 _n = _inMemSort ? _so->size() : _n;
             } 
             else if ( _inMemSort ) {
-                _so->fill( _buf, _pq.getFields() , _n );
+                if( _so.get() )
+                    _so->fill( _buf, _pq.getFields() , _n );
             }
             
             if ( _pq.hasOption( QueryOption_CursorTailable ) && _pq.getNumToReturn() != 1 )
@@ -822,7 +830,9 @@ namespace mongo {
             _buf.decouple();
         }
         
-        virtual bool mayRecordPlan() const { return _pq.getNumToReturn() != 1; }
+        virtual bool mayRecordPlan() const {
+            return ( _pq.getNumToReturn() != 1 ) && ( ( _n > _pq.getNumToReturn() / 2 ) || ( complete() && !stopRequested() ) );
+        }
         
         virtual QueryOp *_createChild() const {
             if ( _pq.isExplain() ) {
@@ -910,7 +920,8 @@ namespace mongo {
             bb.skip(sizeof(QueryResult));
             BSONObjBuilder cmdResBuf;
             if ( runCommands(ns, jsobj, curop, bb, cmdResBuf, false, queryOptions) ) {
-                ss << " command: " << jsobj.toString();
+                ss << " command: ";
+                jsobj.toString( ss );
                 curop.markCommand();
                 auto_ptr< QueryResult > qr;
                 qr.reset( (QueryResult *) bb.buf() );
@@ -1059,14 +1070,13 @@ namespace mongo {
             if ( moreClauses ) {
                 // this MultiCursor will use a dumb NoOp to advance(), so no need to specify mayYield
                 shared_ptr< Cursor > multi( new MultiCursor( mps, cursor, dqo.matcher(), dqo ) );
-                cc = new ClientCursor(queryOptions, multi, ns);
+                cc = new ClientCursor(queryOptions, multi, ns, jsobj.getOwned());
             } else {
                 cursor->setMatcher( dqo.matcher() );
-                cc = new ClientCursor( queryOptions, cursor, ns );
+                cc = new ClientCursor( queryOptions, cursor, ns, jsobj.getOwned() );
             }
             cursorid = cc->cursorid;
-            cc->query = jsobj.getOwned();
-            DEV tlog() << "query has more, cursorid: " << cursorid << endl;
+            DEV tlog(2) << "query has more, cursorid: " << cursorid << endl;
             cc->pos = n;
             cc->pq = pq_shared;
             cc->fields = pq.getFieldPtr();

@@ -261,7 +261,7 @@ namespace mongo {
         case Symbol:
         case mongo::String: {
             int x = valuestrsize();
-            if ( x > 0 && valuestr()[x-1] == 0 )
+            if ( x > 0 && x < BSONObjMaxSize && valuestr()[x-1] == 0 )
                 return;
             StringBuilder buf;
             buf <<  "Invalid dbref/code/string/symbol size: " << x << " strnlen:" << mongo::strnlen( valuestr() , x );
@@ -347,7 +347,14 @@ namespace mongo {
             size_t len1 = ( maxLen == -1 ) ? strlen( p ) : mongo::strnlen( p, remain );
             //massert( 10318 ,  "Invalid regex string", len1 != -1 ); // ERH - 4/28/10 - don't think this does anything
             p = p + len1 + 1;
-            size_t len2 = ( maxLen == -1 ) ? strlen( p ) : mongo::strnlen( p, remain - len1 - 1 );
+            size_t len2;
+            if( maxLen == -1 )
+                len2 = strlen( p );
+            else {
+                size_t x = remain - len1 - 1;
+                assert( x <= 0x7fffffff );
+                len2 = mongo::strnlen( p, (int) x );
+            }
             //massert( 10319 ,  "Invalid regex options string", len2 != -1 ); // ERH - 4/28/10 - don't think this does anything
             x = (int) (len1 + 1 + len2 + 1);
         }
@@ -503,8 +510,11 @@ namespace mongo {
     }
 
     inline BSONObj::BSONObj() {
-        /* LITTLE ENDIAN */
-        static char p[] = { 5, 0, 0, 0, 0 };
+        /* little endian ordering here, but perhaps that is ok regardless as BSON is spec'd 
+           to be little endian external to the system. (i.e. the rest of the implementation of bson, 
+           not this part, fails to support big endian)
+        */
+        static char p[] = { /*size*/5, 0, 0, 0, /*eoo*/0 };
         _objdata = p;
     }
 

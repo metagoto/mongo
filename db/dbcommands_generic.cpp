@@ -60,6 +60,13 @@ namespace mongo {
         bool run(const string& dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             result << "version" << versionString << "gitVersion" << gitVersion() << "sysInfo" << sysInfo();
             result << "bits" << ( sizeof( int* ) == 4 ? 32 : 64 );
+            result.appendBool( "debug" , 
+#ifdef _DEBUG
+                               true
+#else
+                               false
+#endif
+                               );
             return true;
         }
     } cmdBuildInfo;
@@ -152,7 +159,7 @@ namespace mongo {
                 if (i->first != c->name)
                     continue;
 
-                BSONObjBuilder temp( b.subobjStart( c->name.c_str() ) );
+                BSONObjBuilder temp( b.subobjStart( c->name ) );
 
                 {
                     stringstream help;
@@ -182,17 +189,21 @@ namespace mongo {
         virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype() const { return WRITE; } 
+        virtual LockType locktype() const { return NONE; } 
         virtual void help( stringstream& help ) const {
             help << "shutdown the database.  must be ran against admin db and either (1) ran from localhost or (2) authenticated.\n";
         }
         CmdShutdown() : Command("shutdown") {}
         bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             Client * c = currentClient.get();
-            if ( c )
+            if ( c ) {
                 c->shutdown();
+            }
+            
             log() << "terminating, shutdown command received" << endl;
-            dbexit( EXIT_CLEAN ); // this never returns
+
+            dbexit( EXIT_CLEAN , "shutdown called" , true ); // this never returns
+            assert(0);
             return true;
         }
     } cmdShutdown;
@@ -218,5 +229,20 @@ namespace mongo {
     } cmdForceError;
 
     
+    class ServerIDCommand : public Command { 
+    public:
+        ServerIDCommand() : Command( "_serverID" ) { }
+        virtual bool requiresAuth() { return false; }
+        virtual bool slaveOk() const { return true; }
+        virtual LockType locktype() const { return NONE; } 
+        virtual void help(stringstream& h) const { h << "internal"; }
+        virtual bool adminOnly() const { return true; }
+
+        virtual bool run(const string& db, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            result.append("serverID", getServerID());
+            return 1;
+        }
+    } serverIDCommand;
+
 
 }

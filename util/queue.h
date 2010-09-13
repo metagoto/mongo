@@ -63,6 +63,32 @@ namespace mongo {
             _queue.pop();
             return t;    
         }
+
+        
+        /**
+         * blocks waiting for an object until maxSecondsToWait passes
+         * if got one, return true and set in t
+         * otherwise return false and t won't be changed
+         */
+        bool blockingPop( T& t , int maxSecondsToWait ){
+            
+            Timer timer;
+
+            boost::xtime xt;
+            boost::xtime_get(&xt, boost::TIME_UTC);
+            xt.sec += maxSecondsToWait;
+
+            scoped_lock l( _lock );
+            while( _queue.empty() ){
+                _condition.timed_wait( l.boost() , xt );
+                if ( timer.seconds() >= maxSecondsToWait )
+                    return false;
+            }
+            
+            t = _queue.front();
+            _queue.pop();
+            return true;
+        }
         
     private:
         std::queue<T> _queue;

@@ -30,7 +30,7 @@ namespace mongo {
     class PiggyBackData;
     typedef AtomicUInt MSGID;
 
-    class Listener {
+    class Listener : boost::noncopyable {
     public:
         Listener(const string &ip, int p, bool logConnect=true ) : _port(p), _ip(ip), _logConnect(logConnect), _elapsedTime(0){ }
         virtual ~Listener() {
@@ -66,6 +66,8 @@ namespace mongo {
             return 0;
         }
 
+        virtual bool primaryListener() const { return true; }
+
     private:
         string _ip;
         bool _logConnect;
@@ -74,7 +76,7 @@ namespace mongo {
         static const Listener* _timeTracker;
     };
 
-    class AbstractMessagingPort {
+    class AbstractMessagingPort : boost::noncopyable {
     public:
         virtual ~AbstractMessagingPort() { }
         virtual void reply(Message& received, Message& response, MSGID responseTo) = 0; // like the reply below, but doesn't rely on received.data still being available
@@ -97,7 +99,7 @@ namespace mongo {
         // in some cases the timeout will actually be 2x this value - eg we do a partial send,
         // then the timeout fires, then we try to send again, then the timeout fires again with
         // no data sent, then we detect that the other side is down
-        MessagingPort(int timeout = 0, int logLevel = 0 );
+        MessagingPort(double timeout = 0, int logLevel = 0 );
 
         virtual ~MessagingPort();
 
@@ -132,8 +134,13 @@ namespace mongo {
         PiggyBackData * piggyBackData;
     public:
         SockAddr farEnd;
-        int _timeout;
+        double _timeout;
         int _logLevel; // passed to log() when logging errors
+
+        static void closeAllSockets(unsigned tagMask = 0xffffffff);
+
+        /* ports can be tagged with various classes.  see closeAllSockets(tag). defaults to 0. */
+        unsigned tag;
 
         friend class PiggyBackData;
     };
@@ -168,6 +175,30 @@ namespace mongo {
             assert(0); 
             return "";
         }
+    }
+    
+    inline bool opIsWrite( int op ){
+        switch ( op ){
+
+        case 0: 
+        case opReply: 
+        case dbMsg: 
+        case dbQuery: 
+        case dbGetMore: 
+        case dbKillCursors: 
+            return false;
+            
+        case dbUpdate: 
+        case dbInsert: 
+        case dbDelete: 
+            return false;
+
+        default: 
+            PRINT(op);
+            assert(0); 
+            return "";
+        }
+        
     }
 
 #pragma pack(1)

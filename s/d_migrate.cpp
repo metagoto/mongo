@@ -107,7 +107,8 @@ namespace mongo {
 
         int loops = 0;
         Timer t;
-        while ( t.seconds() < 600 ){ // 10 minutes
+        while ( t.seconds() < 900 ){ // 15 minutes
+            assert( dbMutex.getState() == 0 );
             sleepmillis( 20 );
             
             set<CursorId> now;
@@ -160,7 +161,7 @@ namespace mongo {
         }
         
         virtual void help( stringstream& help ) const {
-            help << "internal should not be calling this directly" << endl;
+            help << "internal - should not be called directly" << endl;
         }
         virtual bool slaveOk() const { return false; }
         virtual bool adminOnly() const { return true; }
@@ -178,8 +179,7 @@ namespace mongo {
     class MigrateFromStatus {
     public:
         
-        MigrateFromStatus()
-            : _mutex( "MigrateFromStatus" ){
+        MigrateFromStatus(){
             _active = false;
             _inCriticalSection = false;
         }
@@ -204,12 +204,12 @@ namespace mongo {
         void done(){
             if ( ! _active )
                 return;
-            _active = false;
-            _inCriticalSection = false;
-
-            scoped_lock lk( _mutex );
+            
             _deleted.clear();
             _reload.clear();
+            
+            _active = false;
+            _inCriticalSection = false;
         }
         
         void logOp( const char * opstr , const char * ns , const BSONObj& obj , BSONObj * patt ){
@@ -240,7 +240,6 @@ namespace mongo {
                 
             case 'd': {
                 // can't filter deletes :(
-                scoped_lock lk( _mutex );
                 _deleted.push_back( ide.wrap() );
                 return;
             }
@@ -261,7 +260,6 @@ namespace mongo {
             if ( ! isInRange( it , _min , _max ) )
                 return;
             
-            scoped_lock lk( _mutex );
             _reload.push_back( ide.wrap() );
         }
 
@@ -294,6 +292,10 @@ namespace mongo {
             arr.done();
         }
 
+        /**
+         * called from the dest of a migrate
+         * transfers mods from src to dest
+         */
         bool transferMods( string& errmsg , BSONObjBuilder& b ){
             if ( ! _active ){
                 errmsg = "no active migration!";
@@ -305,8 +307,7 @@ namespace mongo {
             {
                 readlock rl( _ns );
                 Client::Context cx( _ns );
-                
-                scoped_lock lk( _mutex );
+
                 xfer( &_deleted , b , "deleted" , size , false );
                 xfer( &_reload , b , "reload" , size , true );
             }
@@ -329,8 +330,6 @@ namespace mongo {
         list<BSONObj> _reload;
         list<BSONObj> _deleted;
 
-        mongo::mutex _mutex;
-        
     } migrateFromStatus;
     
     struct MigrateStatusHolder {
@@ -519,6 +518,7 @@ namespace mongo {
             
             // 4. 
             for ( int i=0; i<86400; i++ ){ // don't want a single chunk move to take more than a day
+                assert( dbMutex.getState() == 0 );
                 sleepsecs( 1 ); 
                 ScopedDbConnection conn( to );
                 BSONObj res;
@@ -528,7 +528,8 @@ namespace mongo {
                 
                 log(0) << "_recvChunkStatus : " << res << endl;
                 
-                if ( ! ok ){
+                if ( ! ok || res["state"].String() == "fail" ){
+                    log( LL_ERROR ) << "_recvChunkStatus error : " << res << endl;
                     errmsg = "_recvChunkStatus error";
                     result.append( "cause" ,res );
                     return false;
@@ -536,6 +537,8 @@ namespace mongo {
 
                 if ( res["state"].String() == "steady" )
                     break;
+
+                killCurrentOp.checkForInterrupt();
             }
             timing.done(4);
 
@@ -686,10 +689,12 @@ namespace mongo {
             catch ( std::exception& e ){
                 state = FAIL;
                 errmsg = e.what();
+                log( LL_ERROR ) << "migrate failed: " << e.what() << endl;
             }
             catch ( ... ){
                 state = FAIL;
                 errmsg = "UNKNOWN ERROR";
+                log( LL_ERROR ) << "migrate failed with unknown exception" << endl;
             }
             active = false;
         }
@@ -740,7 +745,7 @@ namespace mongo {
                 auto_ptr<DBClientCursor> cursor = conn->query( ns , Query().minKey( min ).maxKey( max ) , /* QueryOption_Exhaust */ 0 );
                 assert( cursor.get() );
                 while ( cursor->more() ){
-                    BSONObj o = cursor->next();
+                    BSONObj o = cursor->next().getOwned();
                     {
                         writelock lk( ns );
                         Helpers::upsert( ns , o );
@@ -757,7 +762,11 @@ namespace mongo {
                     BSONObj res;
                     if ( ! conn->runCommand( "admin" , BSON( "_transferMods" << 1 ) , res ) ){
                         state = FAIL;
+                        errmsg = "_transferMods failed: ";
+                        errmsg += res.toString();
                         log( LL_ERROR ) << "_transferMods failed: " << res << endl;
+                        conn.done();
+                        return;
                     }
                     if ( res["size"].number() == 0 )
                         break;
@@ -776,6 +785,7 @@ namespace mongo {
                         log() << "_transferMods failed in STEADY state: " << res << endl;
                         errmsg = res.toString();
                         state = FAIL;
+                        conn.done();
                         return;
                     }
 
@@ -802,9 +812,10 @@ namespace mongo {
             b.append( "from" , from );
             b.append( "min" , min );
             b.append( "max" , max );
-
+            
             b.append( "state" , stateString() );
-
+            if ( state == FAIL )
+                b.append( "errmsg" , errmsg );
             {
                 BSONObjBuilder bb( b.subobjStart( "counts" ) );
                 bb.append( "cloned" , numCloned );

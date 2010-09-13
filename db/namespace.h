@@ -29,34 +29,7 @@ namespace mongo {
 
 	/* in the mongo source code, "client" means "database". */
 
-    const int MaxDatabaseLen = 256; // max str len for the db name, including null char
-
-	// "database.a.b.c" -> "database"
-    inline void nsToDatabase(const char *ns, char *database) {
-        const char *p = ns;
-        char *q = database;
-        while ( *p != '.' ) {
-            if ( *p == 0 )
-                break;
-            *q++ = *p++;
-        }
-        *q = 0;
-        if (q-database>=MaxDatabaseLen) {
-            log() << "nsToDatabase: ns too long. terminating, buf overrun condition" << endl;
-            dbexit( EXIT_POSSIBLE_CORRUPTION );
-        }
-    }
-    inline string nsToDatabase(const char *ns) {
-        char buf[MaxDatabaseLen];
-        nsToDatabase(ns, buf);
-        return buf;
-    }
-    inline string nsToDatabase(const string& ns) {
-        size_t i = ns.find( '.' );
-        if ( i == string::npos )
-            return ns;
-        return ns.substr( 0 , i );
-    }
+    const int MaxDatabaseNameLen = 256; // max str len for the db name, including null char
 
 	/* e.g.
 	   NamespaceString ns("acme.orders");
@@ -66,6 +39,11 @@ namespace mongo {
     public:
         string db;
         string coll; // note collection names can have periods in them for organizing purposes (e.g. "system.indexes")
+
+        NamespaceString( const char * ns ) { init(ns); }
+        NamespaceString( const string& ns ) { init(ns.c_str()); }
+        string ns() const { return db + '.' + coll; }
+        bool isSystem() const { return strncmp(coll.c_str(), "system.", 7) == 0; }
     private:
         void init(const char *ns) { 
             const char *p = strchr(ns, '.');
@@ -73,80 +51,38 @@ namespace mongo {
             db = string(ns, p - ns);
             coll = p + 1;
         }
-    public:
-        NamespaceString( const char * ns ) { init(ns); }
-        NamespaceString( const string& ns ) { init(ns.c_str()); }
-
-        string ns() const { 
-            return db + '.' + coll;
-        }
-
-        bool isSystem() { 
-            return strncmp(coll.c_str(), "system.", 7) == 0;
-        }
     };
 
 #pragma pack(1)
-	/* This helper class is used to make the HashMap below in NamespaceDetails */
+	/* This helper class is used to make the HashMap below in NamespaceDetails e.g. see line: 
+          HashTable<Namespace,NamespaceDetails,MMF::Pointer> *ht;
+    */
     class Namespace {
     public:
-        enum MaxNsLenValue { MaxNsLen = 128 };
-        Namespace(const char *ns) {
-            *this = ns;
-        }
-        Namespace& operator=(const char *ns) {
-            uassert( 10080 , "ns name too long, max size is 128", strlen(ns) < MaxNsLen);
-            //memset(buf, 0, MaxNsLen); /* this is just to keep stuff clean in the files for easy dumping and reading */
-            strcpy_s(buf, MaxNsLen, ns);
-            return *this;
-        }
+        explicit Namespace(const char *ns) { *this = ns; }
+        Namespace& operator=(const char *ns);
 
-        /* for more than 10 indexes -- see NamespaceDetails::Extra */
-        string extraName(int i) {
-            char ex[] = "$extra";
-            ex[5] += i;
-            string s = string(buf) + ex;
-            massert( 10348 , "$extra: ns name too long", s.size() < MaxNsLen);
-            return s;
-        }
-        bool isExtra() const { 
-            const char *p = strstr(buf, "$extr");
-            return p && p[5] && p[6] == 0; //==0 important in case an index uses name "$extra_1" for example
-        }
         bool hasDollarSign() const { return strchr( buf , '$' ) > 0;  }
         void kill() { buf[0] = 0x7f; }
         bool operator==(const char *r) const { return strcmp(buf, r) == 0; }
         bool operator==(const Namespace& r) const { return strcmp(buf, r.buf) == 0; }
-        int hash() const {
-            unsigned x = 0;
-            const char *p = buf;
-            while ( *p ) {
-                x = x * 131 + *p;
-                p++;
-            }
-            return (x & 0x7fffffff) | 0x8000000; // must be > 0
-        }
+        int hash() const; // value returned is always > 0
+        string toString() const { return (string) buf; }
+        operator string() const { return (string) buf; }
 
-        /**
-           ( foo.bar ).getSisterNS( "blah" ) == foo.blah
-		   perhaps this should move to the NamespaceString helper?
+        /* NamespaceDetails::Extra was added after fact to allow chaining of data blocks to support more than 10 indexes 
+           (more than 10 IndexDetails).  It's a bit hacky because of this late addition with backward 
+           file support. */
+        string extraName(int i) const;
+        bool isExtra() const; /* ends with $extr... -- when true an extra block not a normal NamespaceDetails block */
+
+        /** ( foo.bar ).getSisterNS( "blah" ) == foo.blah
+		    perhaps this should move to the NamespaceString helper?
          */
-        string getSisterNS( const char * local ) {
-            assert( local && local[0] != '.' );
-            string old(buf);
-            if ( old.find( "." ) != string::npos )
-                old = old.substr( 0 , old.find( "." ) );
-            return old + "." + local;
-        }
+        string getSisterNS( const char * local ) const;
 
-        string toString() const {
-            return (string)buf;
-        }
-
-        operator string() const {
-            return (string)buf;
-        }
-
+        enum MaxNsLenValue { MaxNsLen = 128 };
+    private:
         char buf[MaxNsLen];
     };
 #pragma pack()
@@ -170,21 +106,61 @@ namespace mongo {
     extern int bucketSizes[];
 
 #pragma pack(1)
-    /* this is the "header" for a collection that has all its details.  in the .ns file.
+    /* NamespaceDetails : this is the "header" for a collection that has all its details.  
+       It's in the .ns file and this is a memory mapped region (thus the pack pragma above).
     */
     class NamespaceDetails {
-        friend class NamespaceIndex;
-        enum { NIndexesExtra = 30,
-               NIndexesBase  = 10
-        };
     public:
-        struct ExtraOld {
-            // note we could use this field for more chaining later, so don't waste it:
-            unsigned long long reserved1;
-            IndexDetails details[NIndexesExtra];
-            unsigned reserved2;
-            unsigned reserved3;
-        };
+        enum { NIndexesMax = 64, NIndexesExtra = 30, NIndexesBase  = 10 };
+
+        /*-------- data fields, as present on disk : */
+        DiskLoc firstExtent;
+        DiskLoc lastExtent;
+        /* NOTE: capped collections v1 override the meaning of deletedList.  
+                 deletedList[0] points to a list of free records (DeletedRecord's) for all extents in
+                 the capped namespace.
+                 deletedList[1] points to the last record in the prev extent.  When the "current extent" 
+                 changes, this value is updated.  !deletedList[1].isValid() when this value is not 
+                 yet computed.
+        */
+        DiskLoc deletedList[Buckets];
+        // ofs 168 (8 byte aligned)
+        long long datasize;
+        long long nrecords;
+        int lastExtentSize;
+        int nIndexes;
+    private:
+        // ofs 192
+        IndexDetails _indexes[NIndexesBase];
+    public:
+        // ofs 352 (16 byte aligned)
+        int capped;
+        int max;                              // max # of objects for a capped table.  TODO: should this be 64 bit? 
+        double paddingFactor;                 // 1.0 = no padding.
+        // ofs 386 (16)
+        int flags;
+        DiskLoc capExtent;
+        DiskLoc capFirstNewRecord;
+		unsigned short dataFileVersion;       // NamespaceDetails version.  So we can do backward compatibility in the future. See filever.h
+		unsigned short indexFileVersion;
+        unsigned long long multiKeyIndexBits;
+    private:
+        // ofs 400 (16)
+        unsigned long long reservedA;
+        long long extraOffset;                // where the $extra info is located (bytes relative to this)
+    public:
+        int backgroundIndexBuildInProgress;   // 1 if in prog
+        unsigned reservedB;
+        // ofs 424 (8)
+        struct Capped2 { 
+            unsigned long long cc2_ptr;       // see capped.cpp
+            unsigned fileNumber;
+        } capped2;
+        char reserved[60];
+        /*-------- end data 496 bytes */
+
+        explicit NamespaceDetails( const DiskLoc &loc, bool _capped );
+
         class Extra { 
             long long _next;
 		public:
@@ -209,52 +185,17 @@ namespace mongo {
                 memcpy(this, &e, sizeof(Extra));
                 _next = 0;
             }
-        }; // Extra
-
+        };
         Extra* extra() { 
             if( extraOffset == 0 ) return 0;
             return (Extra *) (((char *) this) + extraOffset);
         }
-
-    public:
         /* add extra space for indexes when more than 10 */
         Extra* allocExtra(const char *ns, int nindexessofar);
-
         void copyingFrom(const char *thisns, NamespaceDetails *src); // must be called when renaming a NS to fix up extra
-
-        enum { NIndexesMax = 64 };
-
-        BOOST_STATIC_ASSERT( NIndexesMax <= NIndexesBase + NIndexesExtra*2 );
-        BOOST_STATIC_ASSERT( NIndexesMax <= 64 ); // multiKey bits
-		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::ExtraOld) == 496 );
-		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) == 496 );
-
         /* called when loaded from disk */
         void onLoad(const Namespace& k);
-
-        NamespaceDetails( const DiskLoc &loc, bool _capped );
-
-        DiskLoc firstExtent;
-        DiskLoc lastExtent;
-
-        /* NOTE: capped collections override the meaning of deleted list.  
-                 deletedList[0] points to a list of free records (DeletedRecord's) for all extents in
-                 the capped namespace.
-                 deletedList[1] points to the last record in the prev extent.  When the "current extent" 
-                 changes, this value is updated.  !deletedList[1].isValid() when this value is not 
-                 yet computed.
-        */
-        DiskLoc deletedList[Buckets];
-
         void dumpExtents();
-
-        long long datasize;
-        long long nrecords;
-        int lastExtentSize;
-        int nIndexes;
-
-    private:
-        IndexDetails _indexes[NIndexesBase];
 
     private:
         Extent *theCapExtent() const { return capExtent.ext(); }
@@ -263,6 +204,7 @@ namespace mongo {
         DiskLoc cappedAlloc(const char *ns, int len);
         DiskLoc &cappedFirstDeletedInCurExtent();
         bool nextIsInCapExtent( const DiskLoc &dl ) const;
+
     public:
         DiskLoc& cappedListOfAllDeletedRecords() { return deletedList[0]; }
         DiskLoc& cappedLastDelRecLastExtent()    { return deletedList[1]; }
@@ -273,29 +215,6 @@ namespace mongo {
         void cappedTruncateAfter(const char *ns, DiskLoc after, bool inclusive); /** remove rest of the capped collection from this point onward */
         void emptyCappedCollection(const char *ns);
         
-        int capped;
-
-        int max; // max # of objects for a capped table.  TODO: should this be 64 bit? 
-        double paddingFactor; // 1.0 = no padding.
-        int flags;
-
-        DiskLoc capExtent;
-        DiskLoc capFirstNewRecord;
-
-        /* NamespaceDetails version.  So we can do backward compatibility in the future.
-		   See filever.h
-        */
-		unsigned short dataFileVersion;
-		unsigned short indexFileVersion;
-
-        unsigned long long multiKeyIndexBits;
-    private:
-        unsigned long long reservedA;
-        long long extraOffset; // where the $extra info is located (bytes relative to this)
-    public:
-        int backgroundIndexBuildInProgress; // 1 if in prog
-        char reserved[76];
-
         /* when a background index build is in progress, we don't count the index in nIndexes until 
            complete, yet need to still use it in _indexRecord() - thus we use this function for that.
         */
@@ -401,7 +320,7 @@ namespace mongo {
                 paddingFactor = x;
         }
 
-        //returns offset in indexes[]
+        // @return offset in indexes[]
         int findIndexByName(const char *name) {
             IndexIterator i = ii();
             while( i.more() ) {
@@ -411,7 +330,7 @@ namespace mongo {
             return -1;
         }
 
-        //returns offset in indexes[]
+        // @return offset in indexes[]
         int findIndexByKeyPattern(const BSONObj& keyPattern) {
             IndexIterator i = ii();
             while( i.more() ) {
@@ -451,18 +370,13 @@ namespace mongo {
 
         /* allocate a new record.  lenToAlloc includes headers. */
         DiskLoc alloc(const char *ns, int lenToAlloc, DiskLoc& extentLoc);
-
         /* add a given record to the deleted chains for this NS */
         void addDeletedRec(DeletedRecord *d, DiskLoc dloc);
-
         void dumpDeleted(set<DiskLoc> *extents = 0);
-
         // Start from firstExtent by default.
         DiskLoc firstRecord( const DiskLoc &startExtent = DiskLoc() ) const;
-
         // Start from lastExtent by default.
         DiskLoc lastRecord( const DiskLoc &startExtent = DiskLoc() ) const;
-
         long long storageSize( int * numExtents = 0 );
         
     private:
@@ -470,6 +384,18 @@ namespace mongo {
         void maybeComplain( const char *ns, int len ) const;
         DiskLoc __stdAlloc(int len);
         void compact(); // combine adjacent deleted records
+        friend class NamespaceIndex;
+        struct ExtraOld {
+            // note we could use this field for more chaining later, so don't waste it:
+            unsigned long long reserved1;
+            IndexDetails details[NIndexesExtra];
+            unsigned reserved2;
+            unsigned reserved3;
+        };
+        BOOST_STATIC_ASSERT( NIndexesMax <= NIndexesBase + NIndexesExtra*2 );
+        BOOST_STATIC_ASSERT( NIndexesMax <= 64 ); // multiKey bits
+		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::ExtraOld) == 496 );
+		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) == 496 );
     }; // NamespaceDetails
 #pragma pack()
 
@@ -658,8 +584,8 @@ namespace mongo {
         NamespaceDetails::Extra* newExtra(const char *ns, int n, NamespaceDetails *d);
 
         boost::filesystem::path path() const;
-    private:
 
+    private:
         void maybeMkdir() const;
         
         MMF f;
@@ -675,4 +601,33 @@ namespace mongo {
     // (Arguments should include db name)
     void renameNamespace( const char *from, const char *to );
 
+	// "database.a.b.c" -> "database"
+    inline void nsToDatabase(const char *ns, char *database) {
+        const char *p = ns;
+        char *q = database;
+        while ( *p != '.' ) {
+            if ( *p == 0 )
+                break;
+            *q++ = *p++;
+        }
+        *q = 0;
+        if (q-database>=MaxDatabaseNameLen) {
+            log() << "nsToDatabase: ns too long. terminating, buf overrun condition" << endl;
+            dbexit( EXIT_POSSIBLE_CORRUPTION );
+        }
+    }
+    inline string nsToDatabase(const char *ns) {
+        char buf[MaxDatabaseNameLen];
+        nsToDatabase(ns, buf);
+        return buf;
+    }
+    inline string nsToDatabase(const string& ns) {
+        size_t i = ns.find( '.' );
+        if ( i == string::npos )
+            return ns;
+        return ns.substr( 0 , i );
+    }
+
 } // namespace mongo
+
+#include "namespace-inl.h"

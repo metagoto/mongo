@@ -616,29 +616,44 @@ namespace mongo {
                 help << "add a new shard to the system";
             }
             bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
-                HostAndPort shardAddr( cmdObj.firstElement().valuestrsafe() );
-                if ( shardAddr.isLocalHost() != grid.allowLocalHost() ){
-                    errmsg = "can't use localhost as a shard since all shards need to communicate. "
-                             "either use all shards and configdbs in localhost or all in actual IPs " ;
-                    log() << "addshard request " << cmdObj << " failed: attempt to mix localhosts and IPs" << endl;
+                errmsg.clear();
+
+                // get replica set component hosts
+                ConnectionString servers = ConnectionString::parse( cmdObj.firstElement().valuestrsafe() , errmsg );
+                if ( ! errmsg.empty() ){
+                    log() << "addshard request " << cmdObj << " failed:" << errmsg << endl;
                     return false;
                 }
 
-                if ( ! shardAddr.hasPort() ){
-                    shardAddr.setPort( CmdLine::ShardServerPort );
+                // using localhost in server names implies every other process must use locahost addresses too
+                vector<HostAndPort> serverAddrs = servers.getServers();
+                for ( size_t i = 0 ; i < serverAddrs.size() ; i++ ){ 
+                    if ( serverAddrs[i].isLocalHost() != grid.allowLocalHost() ){
+                        errmsg = "can't use localhost as a shard since all shards need to communicate. "
+                                 "either use all shards and configdbs in localhost or all in actual IPs " ;
+                        log() << "addshard request " << cmdObj << " failed: attempt to mix localhosts and IPs" << endl;
+                        return false;
+                    }
+
+                    // it's fine if mongods of a set all use default port
+                    if ( ! serverAddrs[i].hasPort() ){
+                        serverAddrs[i].setPort( CmdLine::ShardServerPort );
+                    }
                 }
 
+                // name is optional; addShard will provide one if needed
                 string name = "";
                 if ( cmdObj["name"].type() == String ) {
                     name = cmdObj["name"].valuestrsafe();
                 } 
 
+                // maxSize is the space usage cap in a shard in MBs
                 long long maxSize = 0;
                 if ( cmdObj[ ShardFields::maxSize.name() ].isNumber() ){
                     maxSize = cmdObj[ ShardFields::maxSize.name() ].numberLong();
                 }
                 
-                if ( ! grid.addShard( &name , shardAddr.toString() , maxSize , errmsg ) ){
+                if ( ! grid.addShard( &name , servers , maxSize , errmsg ) ){
                     log() << "addshard request " << cmdObj << " failed: " << errmsg << endl;
                     return false;
                 }
@@ -762,7 +777,7 @@ namespace mongo {
             virtual void help( stringstream& help ) const {
                 help << "test if this is master half of a replica pair";
             }
-            CmdIsMaster() : Command("ismaster") { }
+            CmdIsMaster() : Command("isMaster" , false , "ismaster") { }
             virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
                 result.append("ismaster", 1.0 );
                 result.append("msg", "isdbgrid");
@@ -895,6 +910,7 @@ namespace mongo {
 
                 // hit each shard
                 vector<string> errors;
+                vector<BSONObj> errorObjects;
                 for ( set<string>::iterator i = shards->begin(); i != shards->end(); i++ ){
                     string theShard = *i;
                     bbb.append( theShard );
@@ -903,8 +919,10 @@ namespace mongo {
                     bool ok = conn->runCommand( dbName , cmdObj , res );
                     addWriteBack( writebacks, res );
                     string temp = DBClientWithCommands::getLastErrorString( res );
-                    if ( ok == false || temp.size() )
+                    if ( ok == false || temp.size() ){
                         errors.push_back( temp );
+                        errorObjects.push_back( res );
+                    }
                     n += res["n"].numberLong();
                     conn.done();
                 }
@@ -933,11 +951,21 @@ namespace mongo {
                 
                 result.append( "err" , errors[0].c_str() );
                 
-                BSONObjBuilder all;
-                for ( unsigned i=0; i<errors.size(); i++ ){
-                    all.append( all.numStr( i ) , errors[i].c_str() );
+                { // errs
+                    BSONArrayBuilder all( result.subarrayStart( "errs" ) );
+                    for ( unsigned i=0; i<errors.size(); i++ ){
+                        all.append( errors[i].c_str() );
+                    }
+                    all.done();
                 }
-                result.appendArray( "errs" , all.obj() );
+
+                { // errObjects
+                    BSONArrayBuilder all( result.subarrayStart( "errObjects" ) );
+                    for ( unsigned i=0; i<errorObjects.size(); i++ ){
+                        all.append( errorObjects[i] );
+                    }
+                    all.done();
+                }
                 handleWriteBacks( writebacks );
                 return true;
             }

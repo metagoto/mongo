@@ -324,7 +324,7 @@ namespace mongo {
             assert( s[0] == '/' );
             s = s.substr(1);
             string::size_type end = s.rfind( '/' );
-            b.appendRegex( name , s.substr( 0 , end ).c_str() , s.substr( end + 1 ).c_str() );
+            b.appendRegex( name , s.substr( 0 , end ) , s.substr( end + 1 ) );
         }
 
         void append( BSONObjBuilder& b , string name , jsval val , BSONType oldType = EOO , const TraverseStack& stack=TraverseStack() ){
@@ -368,7 +368,7 @@ namespace mongo {
                     appendRegex( b , name , s );
                 }
                 else {
-                    b.appendCode( name , getFunctionCode( val ).c_str() );
+                    b.appendCode( name , getFunctionCode( val ) );
                 }
                 break;
             }
@@ -670,7 +670,8 @@ namespace mongo {
                 CHECKNEWOBJECT(o,_context,"Bindata_BinData1");
                 int len;
                 const char * data = e.binData( len );
-                assert( JS_SetPrivate( _context , o , new BinDataHolder( data ) ) );
+                assert( data );
+                assert( JS_SetPrivate( _context , o , new BinDataHolder( data , len ) ) );
 
                 setProperty( o , "len" , toval( (double)len ) );
                 setProperty( o , "type" , toval( (double)e.binDataType() ) );
@@ -958,10 +959,16 @@ namespace mongo {
             JS_ReportError( cx , "bsonsize requires one valid object" );
             return JS_FALSE;
         }
-        
-        JSObject * o = JSVAL_TO_OBJECT( argv[0] );
 
         Convertor c(cx);
+        
+        if ( argv[0] == JSVAL_VOID || argv[0] == JSVAL_NULL ){
+            *rval = c.toval( 0.0 );
+            return JS_TRUE;
+        }
+
+        JSObject * o = JSVAL_TO_OBJECT( argv[0] );
+
         double size = 0;
 
         if ( JS_InstanceOf( cx , o , &bson_ro_class , 0 ) ||
@@ -1320,6 +1327,15 @@ namespace mongo {
                 _this = _convertor->toJSObject( obj );
                 JS_AddNamedRoot( _context , &_this , "scope this" );
             }
+        }
+
+        void rename( const char * from , const char * to ){
+            smlock;
+            jsval v;
+            assert( JS_GetProperty( _context , _global , from , &v ) );
+            assert( JS_SetProperty( _context , _global , to , &v ) );
+            v = JSVAL_VOID;
+            assert( JS_SetProperty( _context , _global , from , &v ) );
         }
 
         // ---- functions -----

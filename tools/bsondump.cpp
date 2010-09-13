@@ -36,7 +36,7 @@ class BSONDump : public BSONTool {
 
 public:
     
-    BSONDump() : BSONTool( "bsondump" ){
+    BSONDump() : BSONTool( "bsondump", NONE ){
         add_options()
             ("type" , po::value<string>()->default_value("json") , "type of output: json,debug" )
             ;
@@ -63,7 +63,14 @@ public:
                 return 1;
             }
         }
-        processFile( getParam( "file" ) );
+        
+        path root = getParam( "file" );
+        if ( root == "" ) {
+            printExtraHelp(cout);
+            return 1;
+        }
+        
+        processFile( root );
         return 0;
     }
     
@@ -115,7 +122,7 @@ public:
     virtual void gotObject( const BSONObj& o ){
         switch ( _type ){
         case JSON:
-            cout << o << endl;
+            cout << o.jsonString( TenGen ) << endl;
             break;
         case DEBUG:
             debug(o);

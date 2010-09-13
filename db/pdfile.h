@@ -79,6 +79,9 @@ namespace mongo {
         void flush( bool sync );
         
     private:
+        void badOfs(int) const;
+        void badOfs2(int) const;
+
         int defaultSize( const char *filename ) const;
 
         Extent* getExtent(DiskLoc loc);
@@ -222,7 +225,7 @@ namespace mongo {
 
         void dump(iostream& s) {
             s << "    loc:" << myLoc.toString() << " xnext:" << xnext.toString() << " xprev:" << xprev.toString() << '\n';
-            s << "    nsdiag:" << nsDiagnostic.buf << '\n';
+            s << "    nsdiag:" << nsDiagnostic.toString() << '\n';
             s << "    size:" << length << " firstRecord:" << firstRecord.toString() << " lastRecord:" << lastRecord.toString() << '\n';
         }
 
@@ -307,7 +310,7 @@ namespace mongo {
                 fileLength = filelength;
                 version = VERSION;
                 versionMinor = VERSION_MINOR;
-                unused.setOfs( fileno, HeaderSize );
+                unused.set( fileno, HeaderSize );
                 assert( (data-(char*)this) == HeaderSize );
                 unusedLength = fileLength - HeaderSize - 16;
                 //memcpy(data+unusedLength, "      \nthe end\n", 16);
@@ -341,7 +344,7 @@ namespace mongo {
 
     inline Record* MongoDataFile::recordAt(DiskLoc dl) {
         int ofs = dl.getOfs();
-        assert( ofs >= DataFileHeader::HeaderSize );
+        if( ofs < DataFileHeader::HeaderSize ) badOfs(ofs); // will uassert - external call to keep out of the normal code path
         return (Record*) _p.at(ofs, -1);
     }
 
@@ -351,8 +354,8 @@ namespace mongo {
 	}
 
     inline Record* MongoDataFile::makeRecord(DiskLoc dl, int size) { 
-        int ofs = dl.getOfs();
-        assert( ofs >= DataFileHeader::HeaderSize );
+        int ofs = dl.getOfs();	   
+        if( ofs < DataFileHeader::HeaderSize ) badOfs(ofs); // will uassert - external call to keep out of the normal code path
         return (Record*) _p.at(ofs, size);
     }
 
@@ -393,7 +396,7 @@ namespace mongo {
         return BSONObj(rec());
     }
     inline DeletedRecord* DiskLoc::drec() const {
-        assert( fileNo != -1 );
+        assert( _a != -1 );
         return (DeletedRecord*) rec();
     }
     inline Extent* DiskLoc::ext() const {
@@ -408,34 +411,6 @@ namespace mongo {
 #include "database.h"
 
 namespace mongo {
-
-    // Heritable class to implement an operation that may be applied to all
-    // files in a database using _applyOpToDataFiles()
-    class FileOp {
-    public:
-        virtual ~FileOp() {}
-        // Return true if file exists and operation successful
-        virtual bool apply( const boost::filesystem::path &p ) = 0;
-        virtual const char * op() const = 0;
-    };
-
-    void _applyOpToDataFiles( const char *database, FileOp &fo, bool afterAllocator = false, const string& path = dbpath );
-
-    inline void _deleteDataFiles(const char *database) {
-        if ( directoryperdb ) {
-            BOOST_CHECK_EXCEPTION( boost::filesystem::remove_all( boost::filesystem::path( dbpath ) / database ) );
-            return;
-        }
-        class : public FileOp {
-            virtual bool apply( const boost::filesystem::path &p ) {
-                return boost::filesystem::remove( p );
-            }
-            virtual const char * op() const {
-                return "remove";
-            }
-        } deleter;
-        _applyOpToDataFiles( database, deleter, true );
-    }
 
     boost::intmax_t dbSize( const char *database );
 
@@ -460,10 +435,10 @@ namespace mongo {
         return nsindex(ns)->details(ns);
     }
 
-    inline MongoDataFile& DiskLoc::pdf() const {
+    /*inline MongoDataFile& DiskLoc::pdf() const {
         assert( fileNo != -1 );
         return *cc().database()->getFile(fileNo);
-    }
+    }*/
 
     inline Extent* DataFileMgr::getExtent(const DiskLoc& dl) {
         assert( dl.a() != -1 );
@@ -501,4 +476,9 @@ namespace mongo {
         
         return strcmp( ns, "local.oplog.$main" ) == 0;
     }
+
+    inline BSONObj::BSONObj(const Record *r) {
+        init(r->data, false);
+    }
+
 } // namespace mongo

@@ -76,6 +76,12 @@ namespace mongo {
                 Shard s( name , host , maxSize , isDraining );
                 _lookup[name] = s;
                 _lookup[host] = s;
+
+                // add rs name to lookup (if it exists)
+                size_t pos;
+                if ((pos = host.find('/', 0)) != string::npos) {
+                    _lookup[host.substr(0, pos)] = s;
+                }
             }
 
         }
@@ -90,6 +96,13 @@ namespace mongo {
             {
                 scoped_lock lk( _mutex );
                 map<string,Shard>::iterator i = _lookup.find( ident );
+
+                // if normal find didn't find anything, try to find by rs name
+                size_t pos;
+                if ( i == _lookup.end() && (pos = ident.find('/', 0)) != string::npos) {
+                    i = _lookup.find( ident.substr(0, pos) );
+                }
+
                 if ( i != _lookup.end() )
                     return i->second;
             }
@@ -206,7 +219,7 @@ namespace mongo {
         staticShardInfo.remove( name );
     }
 
-    Shard Shard::pick(){
+    Shard Shard::pick( const Shard& current ){
         vector<Shard> all;
         staticShardInfo.getAllShards( all );
         if ( all.size() == 0 ){
@@ -216,15 +229,19 @@ namespace mongo {
                 return EMPTY;
         }
         
+        // if current shard was provided, pick a different shard only if it is a better choice
         ShardStatus best = all[0].getStatus();
-        
-        for ( size_t i=1; i<all.size(); i++ ){
+        if ( current != EMPTY ){
+            best = current.getStatus();
+        }
+            
+        for ( size_t i=0; i<all.size(); i++ ){
             ShardStatus t = all[i].getStatus();
             if ( t < best )
                 best = t;
         }
 
-        log(1) << "picking shard: " << best << endl;
+        log(1) << "best shard for new allocation is " << best << endl;
         return best.shard();
     }
 

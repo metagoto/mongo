@@ -52,15 +52,15 @@ namespace mongo {
 
         _this = Persistent< v8::Object >::New( v8::Object::New() );
 
-        _global->Set(v8::String::New("print"), v8::FunctionTemplate::New(Print)->GetFunction() );
-        _global->Set(v8::String::New("version"), v8::FunctionTemplate::New(Version)->GetFunction() );
+        _global->Set(v8::String::New("print"), newV8Function< Print >()->GetFunction() );
+        _global->Set(v8::String::New("version"), newV8Function< Version >()->GetFunction() );
 
         _global->Set(v8::String::New("load"),
-                     v8::FunctionTemplate::New(loadCallback, v8::External::New(this))->GetFunction() );
+                     v8::FunctionTemplate::New( v8Callback< loadCallback >, v8::External::New(this))->GetFunction() );
         
         _wrapper = Persistent< v8::Function >::New( getObjectWrapperTemplate()->GetFunction() );
         
-        _global->Set(v8::String::New("gc"), v8::FunctionTemplate::New(GCV8)->GetFunction() );
+        _global->Set(v8::String::New("gc"), newV8Function< GCV8 >()->GetFunction() );
 
 
         installDBTypes( _global );
@@ -296,6 +296,14 @@ namespace mongo {
         argv[0] = v8::External::New( createWrapperHolder( obj , true , false ) );
         _this = Persistent< v8::Object >::New( _wrapper->NewInstance( 1, argv ) );
     }
+
+    void V8Scope::rename( const char * from , const char * to ){
+        V8_SIMPLE_HEADER;
+        v8::Local<v8::String> f = v8::String::New( from );
+        v8::Local<v8::String> t = v8::String::New( to );
+        _global->Set( t , _global->Get( f ) );
+        _global->Set( f , v8::Undefined() );
+    }
     
     int V8Scope::invoke( ScriptingFunction func , const BSONObj& argsObject, int timeoutMs , bool ignoreReturn ){
         V8_SIMPLE_HEADER
@@ -336,7 +344,7 @@ namespace mongo {
         if ( timeoutMs ){
             static bool t = 1;
             if ( t ){
-                log() << "timeoutMs not support for v8 yet" << endl;
+                log() << "timeoutMs not support for v8 yet  code: " << code << endl;
                 t = 0;
             }
         }
@@ -380,7 +388,7 @@ namespace mongo {
     void V8Scope::injectNative( const char *field, NativeFunction func ){
         V8_SIMPLE_HEADER
         
-        Handle< FunctionTemplate > f( v8::FunctionTemplate::New( nativeCallback ) );
+        Handle< FunctionTemplate > f( newV8Function< nativeCallback >() );
         f->Set( v8::String::New( "_native_function" ), External::New( (void*)func ) );
         _global->Set( v8::String::New( field ), f->GetFunction() );
     }        
@@ -394,23 +402,25 @@ namespace mongo {
     // ----- db access -----
 
     void V8Scope::localConnect( const char * dbName ){
-        V8_SIMPLE_HEADER
+        {
+            V8_SIMPLE_HEADER
 
-        if ( _connectState == EXTERNAL )
-            throw UserException( 12510, "externalSetup already called, can't call externalSetup" );
-        if ( _connectState ==  LOCAL ){
-            if ( _localDBName == dbName )
-                return;
-            throw UserException( 12511, "localConnect called with a different name previously" );
+            if ( _connectState == EXTERNAL )
+                throw UserException( 12510, "externalSetup already called, can't call externalSetup" );
+            if ( _connectState ==  LOCAL ){
+                if ( _localDBName == dbName )
+                    return;
+                throw UserException( 12511, "localConnect called with a different name previously" );
+            }
+
+            //_global->Set( v8::String::New( "Mongo" ) , _engine->_externalTemplate->GetFunction() );
+            _global->Set( v8::String::New( "Mongo" ) , getMongoFunctionTemplate( true )->GetFunction() );
+            execCoreFiles();
+            exec( "_mongo = new Mongo();" , "local connect 2" , false , true , true , 0 );
+            exec( (string)"db = _mongo.getDB(\"" + dbName + "\");" , "local connect 3" , false , true , true , 0 );
+            _connectState = LOCAL;
+            _localDBName = dbName;
         }
-
-        //_global->Set( v8::String::New( "Mongo" ) , _engine->_externalTemplate->GetFunction() );
-        _global->Set( v8::String::New( "Mongo" ) , getMongoFunctionTemplate( true )->GetFunction() );
-        execCoreFiles();
-        exec( "_mongo = new Mongo();" , "local connect 2" , false , true , true , 0 );
-        exec( (string)"db = _mongo.getDB(\"" + dbName + "\");" , "local connect 3" , false , true , true , 0 );
-        _connectState = LOCAL;
-        _localDBName = dbName;
         loadStored();
     }
     

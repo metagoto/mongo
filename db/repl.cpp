@@ -25,7 +25,7 @@
 
    local.sources         - indicates what sources we pull from as a "slave", and the last update of each
    local.oplog.$main     - our op log as "master"
-   local.dbinfo.<dbname>
+   local.dbinfo.<dbname> - no longer used???
    local.pair.startup    - can contain a special value indicating for a pair that we have the master copy.
                            used when replacing other half of the pair which has permanently failed.
    local.pair.sync       - { initialsynccomplete: 1 }
@@ -137,9 +137,6 @@ namespace mongo {
         virtual bool adminOnly() const {
             return true;
         }
-        virtual bool logTheOp() {
-            return false;
-        }
         virtual LockType locktype() const { return WRITE; }
         void help(stringstream&h) const { h << "replace a node in a replica pair"; }
         CmdReplacePeer() : Command("replacePeer", false, "replacepeer") { }
@@ -199,9 +196,6 @@ namespace mongo {
         virtual bool adminOnly() const {
             return true;
         }
-        virtual bool logTheOp() {
-            return false;   
-        }
         virtual void help(stringstream& h) const { h << "internal"; }
         virtual LockType locktype() const { return WRITE; }
         CmdForceDead() : Command("forcedead") { }
@@ -222,9 +216,7 @@ namespace mongo {
         virtual bool adminOnly() const {
             return true;
         }
-        virtual bool logTheOp() {
-            return false;
-        }
+        virtual bool logTheOp() { return false; }
         virtual LockType locktype() const { return WRITE; }
         void help(stringstream&h) const { h << "resync (from scratch) an out of date replica slave.\nhttp://www.mongodb.org/display/DOCS/Master+Slave"; }
         CmdResync() : Command("resync") { }
@@ -270,6 +262,8 @@ namespace mongo {
         return replPair || replSettings.slave || replSettings.master;
     }
 
+    bool replAuthenticate(DBClientConnection *conn);
+    
     void appendReplicationInfo( BSONObjBuilder& result , bool authed , int level ){
         
         if ( replAllDead ) {
@@ -323,12 +317,15 @@ namespace mongo {
                 if ( level > 1 ){
                     dbtemprelease unlock;
                     ScopedDbConnection conn( s["host"].valuestr() );
-                    BSONObj first = conn->findOne( (string)"local.oplog.$" + sourcename , Query().sort( BSON( "$natural" << 1 ) ) );
-                    BSONObj last = conn->findOne( (string)"local.oplog.$" + sourcename , Query().sort( BSON( "$natural" << -1 ) ) );
-                    bb.appendDate( "masterFirst" , first["ts"].timestampTime() );
-                    bb.appendDate( "masterLast" , last["ts"].timestampTime() );
-                    double lag = (double) (last["ts"].timestampTime() - s["syncedTo"].timestampTime());
-                    bb.append( "lagSeconds" , lag / 1000 );
+                    DBClientConnection *cliConn = dynamic_cast< DBClientConnection* >( &conn.conn() );
+                    if ( cliConn && replAuthenticate( cliConn ) ) {
+                        BSONObj first = conn->findOne( (string)"local.oplog.$" + sourcename , Query().sort( BSON( "$natural" << 1 ) ) );
+                        BSONObj last = conn->findOne( (string)"local.oplog.$" + sourcename , Query().sort( BSON( "$natural" << -1 ) ) );
+                        bb.appendDate( "masterFirst" , first["ts"].timestampTime() );
+                        bb.appendDate( "masterLast" , last["ts"].timestampTime() );
+                        double lag = (double) (last["ts"].timestampTime() - s["syncedTo"].timestampTime());
+                        bb.append( "lagSeconds" , lag / 1000 );
+                    }
                     conn.done();
                 }
 
@@ -383,7 +380,7 @@ namespace mongo {
         virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype() const { return WRITE; }
+        virtual LockType locktype() const { return NONE; }
         CmdIsInitialSyncComplete() : Command( "isinitialsynccomplete" ) {}
         virtual bool run(const string&, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
             result.appendBool( "initialsynccomplete", getInitialSyncCompleted() );
@@ -858,12 +855,13 @@ namespace mongo {
        see logOp() comments.
     */
     void ReplSource::sync_pullOpLog_applyOperation(BSONObj& op, OpTime *localLogTail) {
-        log( 6 ) << "processing op: " << op << endl;
-        // skip no-op
-        if ( op.getStringField( "op" )[ 0 ] == 'n' )
+        if( logLevel >= 6 ) // op.tostring is expensive so doing this check explicitly
+            log(6) << "processing op: " << op << endl;
+
+        if( op.getStringField("op")[0] == 'n' )
             return;
-        
-        char clientName[MaxDatabaseLen];
+
+        char clientName[MaxDatabaseNameLen];
         const char *ns = op.getStringField("ns");
         nsToDatabase(ns, clientName);
 
@@ -872,9 +870,13 @@ namespace mongo {
             return;
         }
         else if ( *ns == 0 ) {
-            problem() << "halting replication, bad op in oplog:\n  " << op.toString() << endl;
-            replAllDead = "bad object in oplog";
-            throw SyncException();
+            /*if( op.getStringField("op")[0] != 'n' )*/ {
+                problem() << "halting replication, bad op in oplog:\n  " << op.toString() << endl;
+                replAllDead = "bad object in oplog";
+                throw SyncException();
+            }
+            //ns = "local.system.x";
+            //nsToDatabase(ns, clientName);
         }
 
         if ( !only.empty() && only != clientName )
@@ -1255,11 +1257,16 @@ namespace mongo {
         
             nextOpTime = OpTime( ts.date() );
             log(2) << "repl: first op time received: " << nextOpTime.toString() << '\n';
-            if ( tailing || initial ) {
-                if ( initial )
-                    log(1) << "repl:   initial run\n";
-                else
-                    assert( syncedTo < nextOpTime );
+            if ( initial ) {
+                log(1) << "repl:   initial run\n";
+            }
+            if( tailing ) {
+                if( !( syncedTo < nextOpTime ) ) { 
+                    log() << "repl ASSERTION failed : syncedTo < nextOpTime" << endl;
+                    log() << "repl syncTo:     " << syncedTo.toStringLong() << endl;
+                    log() << "repl nextOpTime: " << nextOpTime.toStringLong() << endl;
+                    assert(false);
+                }
                 oplogReader.putBack( op ); // op will be processed in the loop below
                 nextOpTime = OpTime(); // will reread the op below
             }
@@ -1280,7 +1287,7 @@ namespace mongo {
                 throw SyncException();
             }
             else {
-                /* t == syncedTo, so the first op was applied previously. */
+                /* t == syncedTo, so the first op was applied previously or it is the first op of initial query and need not be applied. */
             }
         }
 
@@ -1303,12 +1310,15 @@ namespace mongo {
                    1) find most recent op in local log
                    2) more()?
                 */
-                if ( !oplogReader.more() ) {
+
+                bool moreInitialSyncsPending = !addDbNextPass.empty() && n; // we need "&& n" to assure we actually process at least one op to get a sync point recorded in the first place.
+
+                if ( moreInitialSyncsPending || !oplogReader.more() ) {
                     dblock lk;
                     OpTime nextLastSaved = nextLastSavedLocalTs();
                     {
                         dbtemprelease t;
-                        if ( oplogReader.more() ) {
+                        if ( !moreInitialSyncsPending && oplogReader.more() ) {
                             if ( getInitialSyncCompleted() ) { // if initial sync hasn't completed, break out of loop so we can set to completed or clone more dbs
                                 continue;
                             }
@@ -1324,6 +1334,8 @@ namespace mongo {
                     nApplied = n;
                     log() << "repl:  end sync_pullOpLog syncedTo: " << syncedTo.toStringLong() << endl;
                     break;
+                }
+                else {
                 }
 
                 OCCASIONALLY if( n > 0 && ( n > 100000 || time(0) - saveLast > 60 ) ) { 
@@ -1683,6 +1695,7 @@ namespace mongo {
     void replSlaveThread() {
         sleepsecs(1);
         Client::initThread("replslave");
+        cc().iAmSyncThread();
             
         {
             dblock lk;

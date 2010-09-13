@@ -1,8 +1,8 @@
-// test rollback in replica sets
-
+// a test of rollback in replica sets
+//
 // try running as :
 // 
-//   mongo --nodb rollback.js | tee out | grep -v ^m31
+//   mongo --nodb rollback2.js | tee out | grep -v ^m31
 //
 
 var debugging = 0;
@@ -27,8 +27,8 @@ function wait(f) {
     w++;
     var n = 0;
     while (!f()) {
-        if( n % 4 == 0 )
-            print("waiting " + w);
+        if (n % 4 == 0)
+            print("rollback2.js waiting " + w);
         if (++n == 4) {
             print("" + f);
         }
@@ -192,8 +192,10 @@ doTest = function (signal) {
 
     assert( dbs_match(a,b), "server data sets do not match after rollback, something is wrong");
 
-    pause("SUCCESS");
+    pause("rollback2.js SUCCESS");
     replTest.stopSet(signal);
 }
+
+print("rollback2.js");
 
 doTest( 15 );

@@ -152,6 +152,9 @@ namespace mongo {
             if (sock > maxfd)
                 maxfd = sock;
         }
+        
+        if (this->primaryListener())
+            ListeningSockets::get()->setReady();
 
         static long connNumber = 0;
         struct timeval maxSelectTime;
@@ -201,10 +204,12 @@ namespace mongo {
                     if ( x == ECONNABORTED || x == EBADF ) {
                         log() << "Listener on port " << _port << " aborted" << endl;
                         return;
-                    } if ( x == 0 && inShutdown() ){
+                    } 
+                    if ( x == 0 && inShutdown() ) {
                         return;   // socket closed
                     }
-                    log() << "Listener: accept() returns " << s << " " << errnoWithDescription(x) << endl;
+                    if( !inShutdown() )
+                        log() << "Listener: accept() returns " << s << " " << errnoWithDescription(x) << endl;
                     continue;
                 } 
                 if (from.getType() != AF_UNIX)
@@ -255,14 +260,10 @@ namespace mongo {
             _cur = _buf;
         }
 
-        int len() {
-            return _cur - _buf;
-        }
+        int len() const { return _cur - _buf; }
 
     private:
-
         MessagingPort* _port;
-
         char * _buf;
         char * _cur;
     };
@@ -272,10 +273,13 @@ namespace mongo {
         mongo::mutex m;
     public:
         Ports() : ports(), m("Ports") {}
-        void closeAll() { \
+        void closeAll(unsigned skip_mask) {
             scoped_lock bl(m);
-            for ( set<MessagingPort*>::iterator i = ports.begin(); i != ports.end(); i++ )
+            for ( set<MessagingPort*>::iterator i = ports.begin(); i != ports.end(); i++ ) {
+                if( (*i)->tag & skip_mask )
+                    continue;
                 (*i)->shutdown();
+            }
         }
         void insert(MessagingPort* p) { 
             scoped_lock bl(m);
@@ -291,18 +295,16 @@ namespace mongo {
     // are being destructed during termination.
     Ports& ports = *(new Ports());
 
-
-
-    void closeAllSockets() {
-        ports.closeAll();
+    void MessagingPort::closeAllSockets(unsigned mask) {
+        ports.closeAll(mask);
     }
 
-    MessagingPort::MessagingPort(int _sock, const SockAddr& _far) : sock(_sock), piggyBackData(0), farEnd(_far), _timeout() {
+    MessagingPort::MessagingPort(int _sock, const SockAddr& _far) : sock(_sock), piggyBackData(0), farEnd(_far), _timeout(), tag(0) {
         _logLevel = 0;
         ports.insert(this);
     }
 
-    MessagingPort::MessagingPort( int timeout, int ll ) {
+    MessagingPort::MessagingPort( double timeout, int ll ) : tag(0) {
         _logLevel = ll;
         ports.insert(this);
         sock = -1;
@@ -329,6 +331,7 @@ namespace mongo {
         int sock;
         int res;
         SockAddr farEnd;
+        ConnectBG() { nameThread = false; }
         void run() {
             res = ::connect(sock, farEnd.raw(), farEnd.addressSize);
         }
@@ -341,7 +344,7 @@ namespace mongo {
 
         sock = socket(farEnd.getType(), SOCK_STREAM, 0);
         if ( sock == INVALID_SOCKET ) {
-            log(_logLevel) << "ERROR: connect(): invalid socket? " << errnoWithDescription() << endl;
+            log(_logLevel) << "ERROR: connect invalid socket " << errnoWithDescription() << endl;
             return false;
         }
 
@@ -378,6 +381,15 @@ namespace mongo {
         setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(int));
 #endif
 
+        /*
+          // SO_LINGER is bad
+#ifdef SO_LINGER
+        struct linger ling;
+        ling.l_onoff = 1;
+        ling.l_linger = 0;
+        setsockopt(sock, SOL_SOCKET, SO_LINGER, (char *) &ling, sizeof(ling));
+#endif
+        */
         return true;
     }
 
@@ -391,9 +403,9 @@ namespace mongo {
             int lft = 4;
             recv( lenbuf, lft );
             
-            if ( len < 16 || len > 16000000 ) { // messages must be large enough for headers
+            if ( len < 16 || len > 48000000 ) { // messages must be large enough for headers
                 if ( len == -1 ) {
-                    // Endian check from the database, after connecting, to see what mode server is running in.
+                    // Endian check from the client, after connecting, to see what mode server is running in.
                     unsigned foo = 0x10203040;
                     send( (char *) &foo, 4, "endian" );
                     goto again;
@@ -409,7 +421,7 @@ namespace mongo {
                     send( s.c_str(), s.size(), "http" );
                     return false;
                 }
-                log(_logLevel) << "bad recv() len: " << len << '\n';
+                log(0) << "recv(): message len " << len << " is too large" << len << endl;
                 return false;
             }
             
@@ -702,35 +714,5 @@ namespace mongo {
     }
 
     TicketHolder connTicketHolder(20000);
-
-    namespace {
-        map<string, bool> isSelfCache; // host, isSelf
-    }
-    
-    bool HostAndPort::isSelf() const { 
-        int p = _port == -1 ? CmdLine::DefaultDBPort : _port;
-
-        if( p != cmdLine.port ){
-            return false;
-        } else if (sameHostname(getHostName(), _host) || isLocalHost()) {
-            return true;
-        } else {
-            map<string, bool>::const_iterator it = isSelfCache.find(_host);
-            if (it != isSelfCache.end()){
-                return it->second;
-            }
-
-            SockAddr addr (_host.c_str(), 0); // port 0 is dynamically assigned
-            SOCKET sock = ::socket(addr.getType(), SOCK_STREAM, 0);
-            assert(sock != INVALID_SOCKET);
-
-            bool ret = (::bind(sock, addr.raw(), addr.addressSize) == 0);
-            isSelfCache[_host] = ret;
-
-            closesocket(sock);
-
-            return ret;
-        }
-    }
 
 } // namespace mongo

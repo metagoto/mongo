@@ -185,10 +185,15 @@ namespace mongo {
 
             uassert( 10202 ,  "can't mix multi and upsert and sharding" , ! ( upsert && multi ) );
 
-            if ( upsert && !(manager->hasShardKey(toupdate) ||
-                             (toupdate.firstElement().fieldName()[0] == '$' && manager->hasShardKey(query))))
-            {
-                throw UserException( 8012 , "can't upsert something without shard key" );
+            if (upsert){
+                uassert(8012, "can't upsert something without shard key",
+                             (manager->hasShardKey(toupdate) ||
+                             (toupdate.firstElement().fieldName()[0] == '$' && manager->hasShardKey(query))));
+
+                BSONObj key = manager->getShardKey().extractKey(query);
+                BSONForEach(e, key){
+                    uassert(13465, "shard key in upsert query must be an exact match", getGtLtOp(e) == BSONObj::Equality);
+                }
             }
 
             bool save = false;
@@ -196,7 +201,7 @@ namespace mongo {
                 if ( multi ){
                 }
                 else if ( strcmp( query.firstElement().fieldName() , "_id" ) || query.nFields() != 1 ){
-                    throw UserException( 8013 , "can't do update with query that doesn't have the shard key" );
+                    throw UserException( 8013 , "can't do non-multi update with query that doesn't have the shard key" );
                 }
                 else {
                     save = true;
@@ -282,7 +287,7 @@ namespace mongo {
                     if ( left <= 0 )
                         throw e;
                     left--;
-                    log() << "update failed b/c of StaleConfigException, retrying " 
+                    log() << "delete failed b/c of StaleConfigException, retrying " 
                           << " left:" << left << " ns: " << r.getns() << " patt: " << pattern << endl;
                     r.reset( false );
                     shards.clear();

@@ -31,6 +31,8 @@
 
 namespace mongo {
 
+    BOOST_STATIC_ASSERT( sizeof(Namespace) == 128 );
+
     BSONObj idKeyPattern = fromjson("{\"_id\":1}");
 
     /* deleted lists -- linked lists of deleted records -- are placed in 'buckets' of various sizes
@@ -65,6 +67,9 @@ namespace mongo {
         reservedA = 0;
         extraOffset = 0;
         backgroundIndexBuildInProgress = 0;
+        reservedB = 0;
+        capped2.cc2_ptr = 0;
+        capped2.fileNumber = 0;
         memset(reserved, 0, sizeof(reserved));
     }
 
@@ -89,7 +94,7 @@ namespace mongo {
             BOOST_CHECK_EXCEPTION( boost::filesystem::create_directory( dir ) );
     }
     
-	int lenForNewNsFiles = 16 * 1024 * 1024;
+	unsigned lenForNewNsFiles = 16 * 1024 * 1024;
     
     void NamespaceDetails::onLoad(const Namespace& k) { 
         if( k.isExtra() ) { 
@@ -102,6 +107,7 @@ namespace mongo {
             log() << "backgroundIndexBuildInProgress was " << backgroundIndexBuildInProgress << " for " << k << ", indicating an abnormal db shutdown" << endl;
             backgroundIndexBuildInProgress = 0;
         }
+        capped2.cc2_ptr = 0;
     }
 
     static void namespaceOnLoadCallback(const Namespace& k, NamespaceDetails& v) { 
@@ -123,12 +129,12 @@ namespace mongo {
             i.dbDropped();
         }
 		*/
-		int len = -1;
+		unsigned long long len = 0;
         boost::filesystem::path nsPath = path();
         string pathString = nsPath.string();
         MMF::Pointer p;
-        if( MMF::exists(nsPath) ) { 
-			p = f.map(pathString.c_str());
+        if( MMF::exists(nsPath) ) {
+			p = f.mapWithOptions(pathString.c_str(), durable?MMF::READONLY:0);
             if( !p.isNull() ) {
                 len = f.length();
                 if ( len % (1024*1024) != 0 ){
@@ -141,10 +147,10 @@ namespace mongo {
 			// use lenForNewNsFiles, we are making a new database
 			massert( 10343 ,  "bad lenForNewNsFiles", lenForNewNsFiles >= 1024*1024 );
             maybeMkdir();
-			long l = lenForNewNsFiles;
-			p = f.map(pathString.c_str(), l);
+			unsigned long long l = lenForNewNsFiles;
+			p = f.map(pathString.c_str(), l, durable?MMF::READONLY:0);
             if( !p.isNull() ) {
-                len = (int) l;
+                len = l;
                 assert( len == lenForNewNsFiles );
             }
 		}
@@ -154,7 +160,8 @@ namespace mongo {
             dbexit( EXIT_FS );
         }
 
-        ht = new HashTable<Namespace,NamespaceDetails,MMF::Pointer>(p, len, "namespace index");
+        assert( len <= 0x7fffffff );
+        ht = new HashTable<Namespace,NamespaceDetails,MMF::Pointer>(p, (int) len, "namespace index");
         if( checkNsFilesOnLoad )
             ht->iterAll(namespaceOnLoadCallback);
     }
@@ -371,7 +378,7 @@ namespace mongo {
                 if ( e == capExtent )
                     out() << " (capExtent)";
                 out() << '\n';
-                out() << "    magic: " << hex << e.ext()->magic << dec << " extent->ns: " << e.ext()->nsDiagnostic.buf << '\n';
+                out() << "    magic: " << hex << e.ext()->magic << dec << " extent->ns: " << e.ext()->nsDiagnostic.toString() << '\n';
                 out() << "    fr: " << e.ext()->firstRecord.toString() <<
                      " lr: " << e.ext()->lastRecord.toString() << " extent->len: " << e.ext()->length << '\n';
             }
@@ -589,7 +596,7 @@ namespace mongo {
 		details = todetails;
 		
 		BSONObj oldSpec;
-		char database[MaxDatabaseLen];
+		char database[MaxDatabaseNameLen];
 		nsToDatabase(from, database);
 		string s = database;
 		s += ".system.namespaces";

@@ -422,8 +422,9 @@ if GetOption( "full" ):
 commonFiles = Split( "pch.cpp buildinfo.cpp db/common.cpp db/jsobj.cpp db/json.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp shell/mongo.cpp" )
 commonFiles += [ "util/background.cpp" , "util/mmap.cpp" , "util/ramstore.cpp", "util/sock.cpp" ,  "util/util.cpp" , "util/message.cpp" , 
                  "util/assert_util.cpp" , "util/log.cpp" , "util/httpclient.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/concurrency/vars.cpp", "util/concurrency/task.cpp", "util/debug_util.cpp",
-                 "util/concurrency/thread_pool.cpp", "util/password.cpp", "util/version.cpp", 
-                 "util/histogram.cpp", "util/concurrency/spin_lock.cpp", "util/text.cpp" , "util/stringutils.cpp" , "util/processinfo.cpp" ]
+                 "util/concurrency/thread_pool.cpp", "util/password.cpp", "util/version.cpp", "util/signal_handlers.cpp",  
+                 "util/histogram.cpp", "util/concurrency/spin_lock.cpp", "util/text.cpp" , "util/stringutils.cpp" , "util/processinfo.cpp" ,
+                 "util/concurrency/synchronization.cpp" ]
 commonFiles += Glob( "util/*.c" )
 commonFiles += Split( "client/connpool.cpp client/dbclient.cpp client/dbclientcursor.cpp client/model.cpp client/syncclusterconnection.cpp client/distlock.cpp s/shardconnection.cpp" )
 
@@ -638,8 +639,6 @@ elif "win32" == os.sys.platform:
     else:
         print( "boost found at '" + boostDir + "'" )
 
-    serverOnlyFiles += [ "util/ntservice.cpp" ]
-
     boostLibs = []
 
     env.Append(CPPPATH=[ "js/src/" ])
@@ -682,14 +681,20 @@ elif "win32" == os.sys.platform:
         env.Append( CPPFLAGS= " /GL " ) 
         env.Append( LINKFLAGS=" /LTCG " )
     else:
-        env.Append( CPPDEFINES=[ "_DEBUG" ] )
+
         # /Od disable optimization
         # /ZI debug info w/edit & continue 
         # /TP it's a c++ file
         # RTC1 /GZ (Enable Stack Frame Run-Time Error Checking)
-        env.Append( CPPFLAGS=" /Od /RTC1 /MDd /Z7 /TP /errorReport:none " )
+        env.Append( CPPFLAGS=" /RTC1 /MDd /Z7 /TP /errorReport:none " )
         env.Append( CPPFLAGS=' /Fd"mongod.pdb" ' )
-        env.Append( LINKFLAGS=" /debug " )
+
+        if debugBuild:
+            env.Append( LINKFLAGS=" /debug " )
+            env.Append( CPPFLAGS=" /Od " )
+            
+        if debugLogging:
+            env.Append( CPPDEFINES=[ "_DEBUG" ] )
 
     if os.path.exists("../readline/lib") :
         env.Append( LIBPATH=["../readline/lib"] )
@@ -765,6 +770,10 @@ if nix:
     env.Append( CXXFLAGS=" -Wnon-virtual-dtor " )
     env.Append( LINKFLAGS=" -fPIC -pthread -rdynamic" )
     env.Append( LIBS=[] )
+
+    #make scons colorgcc friendly
+    env['ENV']['HOME'] = os.environ['HOME']
+    env['ENV']['TERM'] = os.environ['TERM']
 
     if linux and GetOption( "sharedclient" ):
         env.Append( LINKFLAGS=" -Wl,--as-needed -Wl,-zdefs " )
@@ -1150,7 +1159,7 @@ clientEnv = env.Clone();
 clientEnv.Append( CPPPATH=["../"] )
 clientEnv.Prepend( LIBS=[ "mongoclient"] )
 clientEnv.Prepend( LIBPATH=["."] )
-#clientEnv["CPPDEFINES"].remove( "MONGO_EXPOSE_MACROS" )
+clientEnv["CPPDEFINES"].remove( "MONGO_EXPOSE_MACROS" )
 l = clientEnv[ "LIBS" ]
 removeIfInList( l , "pcre" )
 removeIfInList( l , "pcrecpp" )
@@ -1171,7 +1180,10 @@ def checkErrorCodes():
 checkErrorCodes()
 
 # main db target
-mongod = env.Program( "mongod" , commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + [ "db/db.cpp" ] )
+mongodOnlyFiles = [ "db/db.cpp" ]
+if windows:
+    mongodOnlyFiles.append( "util/ntservice.cpp" ) 
+mongod = env.Program( "mongod" , commonFiles + coreDbFiles + coreServerFiles + serverOnlyFiles + mongodOnlyFiles )
 Default( mongod )
 
 # tools
@@ -1203,7 +1215,7 @@ clientTests += [ clientEnv.Program( "secondExample" , [ "client/examples/second.
 clientTests += [ clientEnv.Program( "whereExample" , [ "client/examples/whereExample.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "authTest" , [ "client/examples/authTest.cpp" ] ) ]
 clientTests += [ clientEnv.Program( "httpClientTest" , [ "client/examples/httpClientTest.cpp" ] ) ]
-# clientTests += [ clientEnv.Program( "bsondemo" , [ "bson/bsondemo/bsondemo.cpp" ] ) ] #TODO
+clientTests += [ clientEnv.Program( "bsondemo" , [ "bson/bsondemo/bsondemo.cpp" ] ) ]
 
 # testing
 test = testEnv.Program( "test" , Glob( "dbtests/*.cpp" ) )
@@ -1217,6 +1229,7 @@ mongosniff_built = False
 if darwin or clientEnv["_HAVEPCAP"]:
     mongosniff_built = True
     sniffEnv = clientEnv.Clone()
+    sniffEnv.Append( CPPDEFINES="MONGO_EXPOSE_MACROS" )
     if not windows:
         sniffEnv.Append( LIBS=[ "pcap" ] )
     else:
@@ -1248,7 +1261,7 @@ elif not onlyServer:
         shellEnv["CPPPATH"].remove( "/usr/64/include" )
         shellEnv["LIBPATH"].remove( "/usr/64/lib" )
         shellEnv.Append( CPPPATH=filterExists(["/sw/include" , "/opt/local/include"]) )
-        shellEnv.Append( LIBPATH=filterExists(["/sw/lib/", "/opt/local/lib" , "/usr/lib"]) )
+        shellEnv.Append( LIBPATH=filterExists(["/sw/lib/", "/opt/local/lib" , "/usr/lib", "/usr/local/lib" ]) )
 
     l = shellEnv["LIBS"]
 
@@ -1307,7 +1320,15 @@ def addTest(name, deps, actions):
     smokeEnv.SideEffect( "dummySmokeSideEffect", name )
 
 def addSmoketest( name, deps ):
-    addTest(name, deps, [ "python buildscripts/smoke.py " + " ".join(smokeFlags) + ' ' + name ])
+    # Convert from smoke to test, smokeJs to js, and foo to foo
+    target = name
+    if name.startswith("smoke"):
+        if name == "smoke":
+            target = "test"
+        else:
+            target = name[5].lower() + name[6:]
+
+    addTest(name, deps, [ "python buildscripts/smoke.py " + " ".join(smokeFlags) + ' ' + target ])
 
 addSmoketest( "smoke", [ add_exe( "test" ) ] )
 addSmoketest( "smokePerf", [ "perftest" ]  )
@@ -1681,7 +1702,7 @@ def build_and_test_client(env, target, source):
     call(scons_command + ["libmongoclient.a", "clientTests"], cwd=installDir)
 
     return bool(call(["python", "buildscripts/smoke.py",
-                      "--test-path", installDir, "smokeClient"]))
+                      "--test-path", installDir, "client"]))
 env.Alias("clientBuild", [mongod, installDir], [build_and_test_client])
 env.AlwaysBuild("clientBuild")
 

@@ -55,19 +55,12 @@ namespace mongo {
 
     extern char *appsrvPath;
     extern int diagLogging;
-    extern int lenForNewNsFiles;
+    extern unsigned lenForNewNsFiles;
     extern int lockFile;
     extern bool checkNsFilesOnLoad;    
     extern string repairpath;
 
-#if defined(_WIN32)
-    std::wstring windowsServiceName = L"MongoDB";
-    std::wstring windowsServiceUser = L"";
-    std::wstring windowsServicePassword = L"";
-#endif
-
     void setupSignals();
-    void closeAllSockets();
     void startReplSets(ReplSetCmdline*);
     void startReplication();
     void pairWith(const char *remoteEnd, const char *arb);
@@ -104,7 +97,7 @@ namespace mongo {
         virtual void accepted(MessagingPort *mp) {
 
             if ( ! connTicketHolder.tryAcquire() ){
-                log() << "connection refused because too many open connections: " << connTicketHolder.used() << endl;
+                log() << "connection refused because too many open connections: " << connTicketHolder.used() << " of " << connTicketHolder.outof() << endl;
                 // TODO: would be nice if we notified them...
                 mp->shutdown();
                 delete mp;
@@ -207,16 +200,14 @@ namespace mongo {
     void connThread( MessagingPort * inPort )
     {
         TicketHolderReleaser connTicketReleaser( &connTicketHolder );
-        Client::initThread("conn");
 
         /* todo: move to Client object */
         LastError *le = new LastError();
         lastError.reset(le);
 
+        inPort->_logLevel = 1;
         auto_ptr<MessagingPort> dbMsgPort( inPort );
-
-        dbMsgPort->_logLevel = 1;
-        Client& c = cc();
+        Client& c = Client::initThread("conn", inPort);
 
         try {
 
@@ -224,7 +215,6 @@ namespace mongo {
 
             Message m;
             while ( 1 ) {
-                m.reset();
 
                 if ( !dbMsgPort->recv(m) ) {
                     if( !cmdLine.quiet )
@@ -282,6 +272,8 @@ sendmore:
                         }
                     }
                 }
+
+                m.reset();
             }
 
         }
@@ -306,10 +298,11 @@ sendmore:
             dbexit( EXIT_UNCAUGHT );
         }
 
-        // any thread cleanup can happen here
-
-        if ( currentClient.get() )
-            currentClient->shutdown();
+        // thread ending...
+        {
+            Client * c = currentClient.get();
+            if( c ) c->shutdown();
+        }
         globalScriptEngine->threadDone();
     }
 
@@ -323,7 +316,7 @@ sendmore:
 
         MessagingPort p;
         if ( !p.connect(db) ){
-            out() << "msg couldn't connect" << endl;
+            log() << "msg couldn't connect" << endl;
             return;
         }
 
@@ -423,7 +416,7 @@ sendmore:
                     return;
                 }
             } else {
-                closeDatabase( dbName.c_str() );
+                Database::closeDatabase( dbName.c_str(), dbpath );
             }
         }
 
@@ -522,7 +515,7 @@ sendmore:
             l << ( is32bit ? " 32" : " 64" ) << "-bit " << endl;
         }
         DEV log() << "_DEBUG build (which is slower)" << endl;
-        show_32_warning();
+        show_warnings();
         log() << mongodVersion() << endl;
         printGitVersion();
         printSysInfo();
@@ -629,7 +622,7 @@ using namespace mongo;
 namespace po = boost::program_options;
 
 void show_help_text(po::options_description options) {
-    show_32_warning();
+    show_warnings();
     cout << options << endl;
 };
 
@@ -683,6 +676,7 @@ int main(int argc, char* argv[], char *envp[] )
         ("nohints", "ignore query hints")
         ("nohttpinterface", "disable http interface")
         ("rest","turn on simple rest api")
+        ("jsonp","allow JSONP access via http (has security implications)")
         ("noscripting", "disable scripting engine")
         ("noprealloc", "disable data file preallocation")
         ("smallfiles", "use a smaller default file size")
@@ -701,17 +695,10 @@ int main(int argc, char* argv[], char *envp[] )
 		#endif
         ("ipv6", "enable IPv6 support (disabled by default)")
         ;
-	#if defined(_WIN32)
-    windows_scm_options.add_options()
-        ("install", "install mongodb service")
-        ("remove", "remove mongodb service")
-        ("reinstall", "reinstall mongodb service (equivilant of mongod --remove followed by mongod --install)")
-        ("service", "start mongodb service")
-        ("serviceName", po::value<string>(), "windows service name")
-        ("serviceUser", po::value<string>(), "user name service executes as")
-        ("servicePassword", po::value<string>(), "password used to authenticate serviceUser")
-		;
-	#endif
+
+#if defined(_WIN32)
+    CmdLine::addWindowsOptions( windows_scm_options, hidden_options );
+#endif
 
 	replication_options.add_options()
         ("master", "master mode")
@@ -773,10 +760,6 @@ int main(int argc, char* argv[], char *envp[] )
         cout << dbExecCommand << " --help for help and startup options" << endl;
 
     {
-        bool installService = false;
-        bool removeService = false;
-        bool reinstallService = false;
-        bool startService = false;
         po::variables_map params;
         
         string error_message = arg_error_check(argc, argv);
@@ -847,6 +830,9 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("rest")) {
             cmdLine.rest = true;
         }
+        if (params.count("jsonp")) {
+            cmdLine.jsonp = true;
+        }
         if (params.count("noscripting")) {
             useJNI = false;
         }
@@ -877,28 +863,6 @@ int main(int argc, char* argv[], char *envp[] )
         }
         if (params.count("notablescan")) {
             cmdLine.notablescan = true;
-        }
-        if (params.count("install")) {
-            if ( ! params.count( "logpath" ) ){
-                cout << "--install has to be used with --logpath" << endl;
-                ::exit(-1);
-            }
-
-            installService = true;
-        }
-        if (params.count("remove")) {
-            removeService = true;
-        }
-        if (params.count("reinstall")) {
-            if ( ! params.count( "logpath" ) ){
-                cout << "--reinstall has to be used with --logpath" << endl;
-                ::exit(-1);
-            }
-
-            reinstallService = true;
-        }
-        if (params.count("service")) {
-            startService = true;
         }
         if (params.count("master")) {
             replSettings.master = true;
@@ -1013,30 +977,6 @@ int main(int argc, char* argv[], char *envp[] )
         if (params.count("noMoveParanoia")){
             cmdLine.moveParanoia = false;
         }
-#if defined(_WIN32)
-        if (params.count("serviceName")){
-            string x = params["serviceName"].as<string>();
-            windowsServiceName = wstring(x.size(),L' ');
-            for ( size_t i=0; i<x.size(); i++) {
-                windowsServiceName[i] = x[i];
-	    }
-        }
-        if (params.count("serviceUser")){
-            string x = params["serviceUser"].as<string>();
-            windowsServiceUser = wstring(x.size(),L' ');
-            for ( size_t i=0; i<x.size(); i++) {
-                windowsServiceUser[i] = x[i];
-	    }
-        }
-        if (params.count("servicePassword")){
-            string x = params["servicePassword"].as<string>();
-            windowsServicePassword = wstring(x.size(),L' ');
-            for ( size_t i=0; i<x.size(); i++) {
-                windowsServicePassword[i] = x[i];
-	    }
-        }
-        #endif
-
 
         Module::configAll( params );
         dataFileSync.go();
@@ -1080,24 +1020,7 @@ int main(int argc, char* argv[], char *envp[] )
         }
 
 #if defined(_WIN32)
-        if ( reinstallService ) {
-            ServiceController::removeService( windowsServiceName );
-	}
-	if ( installService || reinstallService ) {
-            if ( !ServiceController::installService( windowsServiceName , L"Mongo DB", L"Mongo DB Server", windowsServiceUser, windowsServicePassword, dbpath, argc, argv ) )
-                dbexit( EXIT_NTSERVICE_ERROR );
-            dbexit( EXIT_CLEAN );
-        }
-        else if ( removeService ) {
-            if ( !ServiceController::removeService( windowsServiceName ) )
-                dbexit( EXIT_NTSERVICE_ERROR );
-            dbexit( EXIT_CLEAN );
-        }
-        else if ( startService ) {
-            if ( !ServiceController::startService( windowsServiceName , mongo::initService ) )
-                dbexit( EXIT_NTSERVICE_ERROR );
-            dbexit( EXIT_CLEAN );
-        }
+        serviceParamsCheck( params, dbpath, argc, argv );
 #endif
     }
 
@@ -1157,7 +1080,7 @@ namespace mongo {
         oss << "Backtrace:" << endl;
         printStackTrace( oss );
         rawOut( oss.str() );
-        dbexit( EXIT_ABRUBT );
+        dbexit( EXIT_ABRUPT );
     }
 
     sigset_t asyncSignals;
@@ -1174,7 +1097,7 @@ namespace mongo {
     // this will be called in certain c++ error cases, for example if there are two active
     // exceptions
     void myterminate() {
-        rawOut( "terminate() called, printing stack:\n" );
+        rawOut( "terminate() called, printing stack:" );
         printStackTrace();
         abort();
     }
@@ -1210,22 +1133,22 @@ BOOL CtrlHandler( DWORD fdwCtrlType )
     switch( fdwCtrlType )
     {
     case CTRL_C_EVENT:
-        rawOut("Ctrl-C signal\n");
+        rawOut("Ctrl-C signal");
         ctrlCTerminate();
         return( TRUE );
     case CTRL_CLOSE_EVENT:
-        rawOut("CTRL_CLOSE_EVENT signal\n");
+        rawOut("CTRL_CLOSE_EVENT signal");
         ctrlCTerminate();
         return( TRUE );
     case CTRL_BREAK_EVENT:
-        rawOut("CTRL_BREAK_EVENT signal\n");
+        rawOut("CTRL_BREAK_EVENT signal");
         ctrlCTerminate();
         return TRUE;
     case CTRL_LOGOFF_EVENT:
-        rawOut("CTRL_LOGOFF_EVENT signal (ignored)\n");
+        rawOut("CTRL_LOGOFF_EVENT signal (ignored)");
         return FALSE;
     case CTRL_SHUTDOWN_EVENT:
-         rawOut("CTRL_SHUTDOWN_EVENT signal (ignored)\n");
+         rawOut("CTRL_SHUTDOWN_EVENT signal (ignored)");
          return FALSE;
     default:
         return FALSE;
@@ -1233,7 +1156,7 @@ BOOL CtrlHandler( DWORD fdwCtrlType )
 }
 
     void myPurecallHandler() {
-        rawOut( "pure virtual method called, printing stack:\n" );
+        rawOut( "pure virtual method called, printing stack:" );
         printStackTrace();
         abort();        
     }

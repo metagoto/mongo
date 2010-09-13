@@ -165,7 +165,7 @@ namespace mongo {
             for ( map<string,list<BSONObj> >::iterator i=out.begin(); i!=out.end(); ++i ){
                 string shard = i->first;
                 list<BSONObj> l = i->second;
-                BSONArrayBuilder y( x.subarrayStart( shard.c_str() ) );
+                BSONArrayBuilder y( x.subarrayStart( shard ) );
                 for ( list<BSONObj>::iterator j=l.begin(); j!=l.end(); ++j ){
                     BSONObj temp = *j;
                     y.append( temp );
@@ -461,37 +461,30 @@ namespace mongo {
     }
 
     bool Future::CommandResult::join(){
-        while ( ! _done )
-            sleepmicros( 50 );
+        if (_done)
+            return _ok;
+
+        _barrier.take();
+        _barrier.put(true); // so others can take again
+
+        assert(_done);
+
         return _ok;
     }
 
-    void Future::commandThread(){
-        assert( _grab );
-        shared_ptr<CommandResult> res = *_grab;
-        _grab = 0;
-        
+    void Future::commandThread(shared_ptr<CommandResult> res){
         ScopedDbConnection conn( res->_server );
         res->_ok = conn->runCommand( res->_db , res->_cmd , res->_res );
         res->_done = true;
+        res->_barrier.put(true);
         conn.done();
     }
 
     shared_ptr<Future::CommandResult> Future::spawnCommand( const string& server , const string& db , const BSONObj& cmd ){
-        shared_ptr<Future::CommandResult> res;
-        res.reset( new Future::CommandResult( server , db , cmd ) );
-        
-        _grab = &res;
-        
-        boost::thread thr( Future::commandThread );
-
-        while ( _grab )
-            sleepmicros(2);
+        shared_ptr<Future::CommandResult> res (new Future::CommandResult( server , db , cmd ));
+        boost::thread thr( boost::bind(Future::commandThread, res) );
 
         return res;
     }
-
-    shared_ptr<Future::CommandResult> * Future::_grab;
-    
     
 }

@@ -25,17 +25,50 @@ namespace mongo {
 
     class Shard;
     
-    struct PoolForHost {
+    /**
+     * not thread safe
+     * thread safety is handled by DBConnectionPool
+     */
+    class PoolForHost {
+    public:
         PoolForHost()
-            : created(0){}
+            : _created(0){}
+        
         PoolForHost( const PoolForHost& other ){
-            assert(other.pool.size() == 0);
-            created = other.created;
-            assert( created == 0 );
+            assert(other._pool.size() == 0);
+            _created = other._created;
+            assert( _created == 0 );
         }
-            
-        std::stack<DBClientBase*> pool;
-        long long created;
+
+        ~PoolForHost();
+
+        int numAvailable() const { return (int)_pool.size(); }
+
+        void createdOne(){ _created++; }
+        long long numCreated() const { return _created; }
+
+        
+        /** 
+         * gets a connection or return NULL
+         */
+        DBClientBase * get();
+
+        void done( DBClientBase * c );
+
+        void flush();
+    private:
+        
+        struct StoredConnection {
+            StoredConnection( DBClientBase * c );
+
+            bool ok( time_t now );
+
+            DBClientBase* conn;
+            time_t when;
+        };
+
+        std::stack<StoredConnection> _pool;
+        long long _created;
     };
     
     class DBConnectionHook {
@@ -64,15 +97,18 @@ namespace mongo {
         mongo::mutex _mutex;
         map<string,PoolForHost> _pools; // servername -> pool
         list<DBConnectionHook*> _hooks;
-
+        string _name;
+        
         DBClientBase* _get( const string& ident );
         
         DBClientBase* _finishCreate( const string& ident , DBClientBase* conn );
 
     public:        
-        DBConnectionPool() : _mutex("DBConnectionPool") { }
+        DBConnectionPool() : _mutex("DBConnectionPool") , _name( "dbconnectionpool" ) { }
         ~DBConnectionPool();
-
+        
+        /** right now just controls some asserts.  defaults to "dbconnectionpool" */
+        void setName( const string& name ) { _name = name; }
 
         void onCreate( DBClientBase * conn );
         void onHandedOut( DBClientBase * conn );
@@ -88,7 +124,7 @@ namespace mongo {
                 return;
             }
             scoped_lock L(_mutex);
-            _pools[host].pool.push(c);
+            _pools[host].done(c);
         }
         void addHook( DBConnectionHook * hook );
         void appendInfo( BSONObjBuilder& b );

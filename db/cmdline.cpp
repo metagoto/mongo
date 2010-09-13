@@ -43,9 +43,9 @@ namespace mongo {
             ("quiet", "quieter output")
             ("port", po::value<int>(&cmdLine.port), "specify port number")
             ("bind_ip", po::value<string>(&cmdLine.bind_ip), "comma separated list of ip addresses to listen on - all local ips by default")
-            ("logpath", po::value<string>() , "file to send all output to instead of stdout" )
+            ("logpath", po::value<string>() , "log file to send write to instead of stdout - has to be a file, not directory" )
             ("logappend" , "append to logpath instead of over-writing" )
-            ("pidfilepath", po::value<string>(), "directory for pidfile (if not set, no pidfile is created)")
+            ("pidfilepath", po::value<string>(), "full path to pidfile (if not set, no pidfile is created)")
 #ifndef _WIN32
             ("fork" , "fork server process" )
 #endif
@@ -54,12 +54,35 @@ namespace mongo {
     }
 
 
+#if defined(_WIN32)
+    void CmdLine::addWindowsOptions( boost::program_options::options_description& windows , 
+                                    boost::program_options::options_description& hidden ){
+        windows.add_options()
+            ("install", "install mongodb service")
+            ("remove", "remove mongodb service")
+            ("reinstall", "reinstall mongodb service (equivilant of mongod --remove followed by mongod --install)")
+            ("serviceName", po::value<string>(), "windows service name")
+            ("serviceUser", po::value<string>(), "user name service executes as")
+            ("servicePassword", po::value<string>(), "password used to authenticate serviceUser")
+            ;
+        hidden.add_options()("service", "start mongodb service");
+    }
+#endif
+
+
     bool CmdLine::store( int argc , char ** argv , 
                          boost::program_options::options_description& visible,
                          boost::program_options::options_description& hidden,
                          boost::program_options::positional_options_description& positional,
                          boost::program_options::variables_map &params ){
         
+        
+        { // setup binary name
+            cmdLine.binaryName = argv[0];
+            size_t i = cmdLine.binaryName.rfind( '/' );
+            if ( i != string::npos )
+                cmdLine.binaryName = cmdLine.binaryName.substr( i + 1 );
+        }
         
         /* don't allow guessing - creates ambiguities when some options are
          * prefixes of others. allow long disguises and don't allow guessing

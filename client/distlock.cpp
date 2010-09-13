@@ -16,6 +16,9 @@
  */
 
 #include "pch.h"
+
+#include "boost/thread/once.hpp"
+
 #include "dbclient.h"
 #include "distlock.h"
 
@@ -24,15 +27,27 @@ namespace mongo {
     string lockPingNS = "config.lockpings";
 
     ThreadLocalValue<string> distLockIds("");
-    
+
+    /* ==================
+     * Module initialization
+     */
+
+    boost::once_flag _init = BOOST_ONCE_INIT;
+    static string* _cachedProcessString = NULL;
+
+    static void initModule() {
+        // cache process string
+        stringstream ss;
+        ss << getHostName() << ":" << time(0) << ":" << rand();
+        _cachedProcessString = new string( ss.str() );
+    }
+
+    /* =================== */
+
     string getDistLockProcess(){
-        static string s;
-        if ( s.empty() ){
-            stringstream ss;
-            ss << getHostNameCached() << ":" << time(0) << ":" << rand();
-            s = ss.str();
-        }
-        return s;
+        boost::call_once( initModule, _init );
+        assert( _cachedProcessString );
+        return *_cachedProcessString;
     }
 
     string getDistLockId(){
@@ -219,7 +234,7 @@ namespace mongo {
             
         conn.done();
             
-        log(1) << "dist_lock lock gotLock: " << gotLock << " now: " << now << endl;
+        log(2) << "dist_lock lock gotLock: " << gotLock << " now: " << now << endl;
 
         return gotLock;
     }
@@ -232,7 +247,7 @@ namespace mongo {
             try {
                 ScopedDbConnection conn( _conn );
                 conn->update( _ns , _id, BSON( "$set" << BSON( "state" << 0 ) ) );
-                log(1) << "dist_lock unlock: " << conn->findOne( _ns , _id ) << endl;
+                log(2) << "dist_lock unlock: " << conn->findOne( _ns , _id ) << endl;
                 conn.done();
 
                 return;

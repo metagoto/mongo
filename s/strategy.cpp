@@ -90,7 +90,7 @@ namespace mongo {
             OID lastID;
             lastID.clear();
             int secsToSleep = 0;
-            while ( Shard::isMember( _addr ) ){
+            while ( ! inShutdown() && Shard::isMember( _addr ) ){
                 
                 if ( lastID.isSet() ){
                     scoped_lock lk( _seenWritebacksLock );
@@ -150,6 +150,9 @@ namespace mongo {
                         r.init();
                         r.process();
                     }
+                    else if ( result["noop"].trueValue() ){
+                        // no-op
+                    }
                     else {
                         log() << "unknown writeBack result: " << result << endl;
                     }
@@ -159,8 +162,14 @@ namespace mongo {
                     continue;
                 }
                 catch ( std::exception e ){
-                    log() << "WriteBackListener exception : " << e.what() << endl;
 
+                    if ( inShutdown() ){
+                        // we're shutting down, so just clean up
+                        return;
+                    }
+
+                    log() << "WriteBackListener exception : " << e.what() << endl;
+                    
                     // It's possible this shard was removed
                     Shard::reloadShardInfo();                    
                 }

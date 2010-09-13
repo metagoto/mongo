@@ -49,9 +49,7 @@ namespace mongo {
     class CmdGetNonce : public Command {
     public:
         virtual bool requiresAuth() { return false; }
-        virtual bool logTheOp() {
-            return false;
-        }
+        virtual bool logTheOp() { return false; }
         virtual bool slaveOk() const {
             return true;
         }
@@ -95,7 +93,7 @@ namespace mongo {
         virtual bool slaveOk() const {
             return true;
         }
-        virtual LockType locktype() const { return WRITE; } // TODO: make this READ
+        virtual LockType locktype() const { return WRITE; }
         virtual void help(stringstream& ss) const { ss << "internal"; }
         CmdAuthenticate() : Command("authenticate") {}
         bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {

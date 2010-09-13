@@ -16,11 +16,20 @@ friendlyEqual = function( a , b ){
     return false;
 }
 
+printStackTrace = function(){
+    try{
+        throw new Error("Printing Stack Trace (lines are 0-based in spidermonkey)");
+    } catch (e) {
+        print(e.stack);
+    }
+}
+
 doassert = function (msg) {
     if (msg.indexOf("assert") == 0)
         print(msg);
     else
         print("assert: " + msg);
+    printStackTrace();
     throw msg;
 }
 
@@ -202,7 +211,11 @@ Object.extend = function( dst , src , deep ){
     for ( var k in src ){
         var v = src[k];
         if ( deep && typeof(v) == "object" ){
-            v = Object.extend( typeof ( v.length ) == "number" ? [] : {} , v , true );
+            if ( "floatApprox" in v ) { // convert NumberLong properly
+                eval( "v = " + tojson( v ) );
+            } else {
+                v = Object.extend( typeof ( v.length ) == "number" ? [] : {} , v , true );
+            }
         }
         dst[k] = v;
     }
@@ -238,6 +251,13 @@ String.prototype.rtrim = function() {
     return this.replace(/\s+$/,"");
 }
 
+Number.prototype.zeroPad = function(width) {
+    var str = this + '';
+    while (str.length < width)
+        str = '0' + str;
+    return str;
+}
+
 Date.timeFunc = function( theFunc , numTimes ){
 
     var start = new Date();
@@ -251,7 +271,67 @@ Date.timeFunc = function( theFunc , numTimes ){
 }
 
 Date.prototype.tojson = function(){
-    return "\"" + this.toString() + "\"";
+
+    var UTC = Date.printAsUTC ? 'UTC' : '';
+
+    var year = this['get'+UTC+'FullYear']().zeroPad(4);
+    var month = (this['get'+UTC+'Month']() + 1).zeroPad(2);
+    var date = this['get'+UTC+'Date']().zeroPad(2);
+    var hour = this['get'+UTC+'Hours']().zeroPad(2);
+    var minute = this['get'+UTC+'Minutes']().zeroPad(2);
+    var sec = this['get'+UTC+'Seconds']().zeroPad(2)
+
+    if (this['get'+UTC+'Milliseconds']())
+        sec += '.' + this['get'+UTC+'Milliseconds']().zeroPad(3)
+
+    var ofs = 'Z';
+    if (!Date.printAsUTC){
+        var ofsmin = this.getTimezoneOffset();
+        if (ofsmin != 0){
+            ofs = ofsmin > 0 ? '-' : '+'; // This is correct
+            ofs += (ofsmin/60).zeroPad(2)
+            ofs += (ofsmin%60).zeroPad(2)
+        }
+    }
+
+    return 'ISODate("'+year+'-'+month+'-'+date+'T'+hour+':'+minute+':'+sec+ofs+'")';
+}
+
+Date.printAsUTC = true;
+
+
+ISODate = function(isoDateStr){
+    if (!isoDateStr)
+        return new Date();
+
+    var isoDateRegex = /(\d{4})-?(\d{2})-?(\d{2})([T ](\d{2})(:?(\d{2})(:?(\d{2}(\.\d+)?))?)?(Z|([+-])(\d{2}):?(\d{2})?)?)?/;
+    var res = isoDateRegex.exec(isoDateStr);
+
+    if (!res)
+        throw "invalid ISO date";
+
+    var year = parseInt(res[1],10) || 1970; // this should always be present
+    var month = (parseInt(res[2],10) || 1) - 1;
+    var date = parseInt(res[3],10) || 0;
+    var hour = parseInt(res[5],10) || 0;
+    var min = parseInt(res[7],10) || 0;
+    var sec = parseFloat(res[9]) || 0;
+    var ms = Math.round((sec%1) * 1000)
+    sec -= ms/1000
+
+    var time = Date.UTC(year, month, date, hour, min, sec, ms);
+
+    if (res[11] && res[11] != 'Z'){
+        var ofs = 0;
+        ofs += (parseInt(res[13],10) || 0) * 60*60*1000; // hours
+        ofs += (parseInt(res[14],10) || 0) *    60*1000; // mins
+        if (res[12] == '+') // if ahead subtract
+            ofs *= -1;
+
+        time += ofs
+    }
+
+    return new Date(time);
 }
 
 RegExp.prototype.tojson = RegExp.prototype.toString;
@@ -843,17 +923,24 @@ shellPrintHelper = function (x) {
 
 shellAutocomplete = function (/*prefix*/){ // outer scope function called on init. Actual function at end
 
-    // from w3schools reference
-    var builtinMethods = {}; // uses constructor objects as keys
-    builtinMethods[Array] = "constructor length prototype concat join pop push reverse shift slice sort splice toString unshift valueOf".split(' ');
-    builtinMethods[Boolean] = "constructor prototype toString valueOf".split(' ');
-    builtinMethods[Date] = "constructor prototype getDate getDay getFullYear getHours getMilliseconds getMinutes getMonth getSeconds getTime getTimezoneOffset getUTCDate getUTCDay getUTCFullYear getUTCHours getUTCMilliseconds getUTCMinutes getUTCMonth getUTCSeconds getYear parse setDate setFullYear setHours setMilliseconds setMinutes setMonth setSeconds setTime setUTCDate setUTCFullYear setUTCHours setUTCMilliseconds setUTCMinutes setUTCMonth setUTCSeconds setYear toDateString toGMTString toLocaleDateString toLocaleTimeString toLocaleString toString toTimeString toUTCString UTC valueOf".split(' ');
-    builtinMethods[Math] = "E LN2 LN10 LOG2E LOG10E PI SQRT1_2 SQRT2 abs acos asin atan atan2 ceil cos exp floor log max min pow random round sin sqrt tan".split(' ');
-    builtinMethods[Number] = "constructor prototype MAX_VALUE MIN_VALUE NEGATIVE_INFINITY POSITIVE_INFINITY toExponential toFixed toPrecision toString valueOf".split(' ');
-    builtinMethods[RegExp] = "constructor prototype global ignoreCase lastIndex multiline source compile exec test toString valueOf".split(' ');
-    builtinMethods[String] = "constructor prototype length charAt charCodeAt concat fromCharCode indexOf lastIndexOf match replace search slice split substr substring toLowerCase toString toUpperCase valueOf".split(' ');
+    var universalMethods = "constructor prototype toString valueOf toLocaleString hasOwnProperty propertyIsEnumerable".split(' ');
 
-    var extraGlobals = "Infinity NaN undefined null true false decodeURI decodeURIComponent encodeURI encodeURIComponent escape eval isFinite isNaN parseFloat parseInt unescape Array Boolean Date Math Number RegExp String".split(' ');
+    var builtinMethods = {}; // uses constructor objects as keys
+    builtinMethods[Array] = "length concat join pop push reverse shift slice sort splice unshift indexOf lastIndexOf every filter forEach map some".split(' ');
+    builtinMethods[Boolean] = "".split(' '); // nothing more than universal methods
+    builtinMethods[Date] = "getDate getDay getFullYear getHours getMilliseconds getMinutes getMonth getSeconds getTime getTimezoneOffset getUTCDate getUTCDay getUTCFullYear getUTCHours getUTCMilliseconds getUTCMinutes getUTCMonth getUTCSeconds getYear parse setDate setFullYear setHours setMilliseconds setMinutes setMonth setSeconds setTime setUTCDate setUTCFullYear setUTCHours setUTCMilliseconds setUTCMinutes setUTCMonth setUTCSeconds setYear toDateString toGMTString toLocaleDateString toLocaleTimeString toTimeString toUTCString UTC".split(' ');
+    builtinMethods[Math] = "E LN2 LN10 LOG2E LOG10E PI SQRT1_2 SQRT2 abs acos asin atan atan2 ceil cos exp floor log max min pow random round sin sqrt tan".split(' ');
+    builtinMethods[Number] = "MAX_VALUE MIN_VALUE NEGATIVE_INFINITY POSITIVE_INFINITY toExponential toFixed toPrecision".split(' ');
+    builtinMethods[RegExp] = "global ignoreCase lastIndex multiline source compile exec test".split(' ');
+    builtinMethods[String] = "length charAt charCodeAt concat fromCharCode indexOf lastIndexOf match replace search slice split substr substring toLowerCase toUpperCase".split(' ');
+    builtinMethods[Function] = "call apply".split(' ');
+    builtinMethods[Object] = "bsonsize".split(' ');
+
+    builtinMethods[Mongo] = "find update insert remove".split(' ');
+    builtinMethods[BinData] = "hex base64 length subtype".split(' ');
+    builtinMethods[NumberLong] = "toNumber".split(' ');
+
+    var extraGlobals = "Infinity NaN undefined null true false decodeURI decodeURIComponent encodeURI encodeURIComponent escape eval isFinite isNaN parseFloat parseInt unescape Array Boolean Date Math Number RegExp String print load gc MinKey MaxKey Mongo NumberLong ObjectId DBPointer UUID BinData Map".split(' ');
 
     var isPrivate = function(name){
         if (shellAutocomplete.showPrivate) return false;
@@ -865,7 +952,7 @@ shellAutocomplete = function (/*prefix*/){ // outer scope function called on ini
 
     var customComplete = function(obj){
         try {
-            if(obj.constructor.autocomplete){
+            if(obj.__proto__.constructor.autocomplete){
                 var ret = obj.constructor.autocomplete(obj);
                 if (ret.constructor != Array){
                     print("\nautocompleters must return real Arrays");
@@ -888,7 +975,7 @@ shellAutocomplete = function (/*prefix*/){ // outer scope function called on ini
         var parts = prefix.split('.');
         for (var p=0; p < parts.length - 1; p++){ // doesn't include last part
             curObj = curObj[parts[p]];
-            if (curObj === undefined)
+            if (curObj == null)
                 return [];
         }
 
@@ -898,10 +985,11 @@ shellAutocomplete = function (/*prefix*/){ // outer scope function called on ini
             begining += '.';
 
         var possibilities = new Array().concat(
+            universalMethods,
             Object.keySet(curObj),
-            Object.keySet(curObj.constructor.prototype),
+            Object.keySet(curObj.__proto__),
             builtinMethods[curObj] || [], // curObj is a builtin constructor
-            builtinMethods[curObj.constructor] || [], // curObj is made from a builtin constructor
+            builtinMethods[curObj.__proto__.constructor] || [], // curObj is made from a builtin constructor
             curObj == global ? extraGlobals : [],
             customComplete(curObj)
         );
@@ -909,7 +997,7 @@ shellAutocomplete = function (/*prefix*/){ // outer scope function called on ini
         var ret = [];
         for (var i=0; i < possibilities.length; i++){
             var p = possibilities[i];
-            if (curObj[p] === undefined && curObj != global) continue; // extraGlobals aren't in the global object
+            if (typeof(curObj[p]) == "undefined" && curObj != global) continue; // extraGlobals aren't in the global object
             if (p.length == 0 || p.length < lastPrefix.length) continue;
             if (isPrivate(p)) continue;
             if (p.match(/^[0-9]+$/)) continue; // don't array number indexes
@@ -1101,17 +1189,6 @@ Random.genExp = function( mean ) {
     return -Math.log( Random.rand() ) * mean;
 }
 
-killWithUris = function( uris ) {
-    var inprog = db.currentOp().inprog;
-    for( var u in uris ) {
-        for ( var i in inprog ) {
-            if ( uris[ u ] == inprog[ i ].client ) {
-                db.killOp( inprog[ i ].opid );
-            }
-        }
-    }
-}
-
 Geo = {};
 Geo.distance = function( a , b ){
     var ax = null;
@@ -1137,17 +1214,59 @@ Geo.distance = function( a , b ){
                       Math.pow( bx - ax , 2 ) );
 }
 
+Geo.sphereDistance = function( a , b ){
+    var ax = null;
+    var ay = null;
+    var bx = null;
+    var by = null;
+    
+    // TODO swap order of x and y when done on server
+    for ( var key in a ){
+        if ( ax == null )
+            ax = a[key] * (Math.PI/180);
+        else if ( ay == null )
+            ay = a[key] * (Math.PI/180);
+    }
+    
+    for ( var key in b ){
+        if ( bx == null )
+            bx = b[key] * (Math.PI/180);
+        else if ( by == null )
+            by = b[key] * (Math.PI/180);
+    }
+
+    var sin_x1=Math.sin(ax), cos_x1=Math.cos(ax);
+    var sin_y1=Math.sin(ay), cos_y1=Math.cos(ay);
+    var sin_x2=Math.sin(bx), cos_x2=Math.cos(bx);
+    var sin_y2=Math.sin(by), cos_y2=Math.cos(by);
+
+    var cross_prod = 
+        (cos_y1*cos_x1 * cos_y2*cos_x2) +
+        (cos_y1*sin_x1 * cos_y2*sin_x2) +
+        (sin_y1        * sin_y2);
+
+    if (cross_prod >= 1 || cross_prod <= -1){
+        // fun with floats
+        assert( Math.abs(cross_prod)-1 < 1e-6 );
+        return cross_prod > 0 ? 0 : Math.PI;
+    }
+
+    return Math.acos(cross_prod);
+}
+
 rs = function () { return "try rs.help()"; }
 
 rs.help = function () {
     print("\trs.status()                     { replSetGetStatus : 1 } checks repl set status");
     print("\trs.initiate()                   { replSetInitiate : null } initiates set with default settings");
     print("\trs.initiate(cfg)                { replSetInitiate : cfg } initiates set with configuration cfg");
+    print("\trs.conf()                       get the current configuration object from local.system.replset");
+    print("\trs.reconfig(cfg)                updates the configuration of a running replica set with cfg");
     print("\trs.add(hostportstr)             add a new member to the set with default attributes");
     print("\trs.add(membercfgobj)            add a new member to the set with extra attributes");
     print("\trs.addArb(hostportstr)          add a new member which is arbiterOnly:true");
     print("\trs.stepDown()                   step down as primary (momentarily)");
-    print("\trs.conf()                       return configuration from local.system.replset");
+    print("\trs.remove(hostportstr)          remove a host from the replica set");
     print("\trs.slaveOk()                    shorthand for db.getMongo().setSlaveOk()");
     print();
     print("\tdb.isMaster()                   check who is primary");
@@ -1158,6 +1277,11 @@ rs.slaveOk = function () { return db.getMongo().setSlaveOk(); }
 rs.status = function () { return db._adminCommand("replSetGetStatus"); }
 rs.isMaster = function () { return db.isMaster(); }
 rs.initiate = function (c) { return db._adminCommand({ replSetInitiate: c }); }
+rs.reconfig = function(cfg) {
+  cfg.version = rs.conf().version + 1;
+
+  return db._adminCommand({ replSetReconfig: cfg });
+}
 rs.add = function (hostport, arb) {
     var cfg = hostport;
 
@@ -1165,7 +1289,9 @@ rs.add = function (hostport, arb) {
     assert(local.system.replset.count() <= 1, "error: local.system.replset has unexpected contents");
     var c = local.system.replset.findOne();
     assert(c, "no config object retrievable from local.system.replset");
+
     c.version++;
+
     var max = 0;
     for (var i in c.members)
         if (c.members[i]._id > max) max = c.members[i]._id;
@@ -1180,6 +1306,23 @@ rs.add = function (hostport, arb) {
 rs.stepDown = function () { return db._adminCommand({ replSetStepDown:true}); }
 rs.addArb = function (hn) { return this.add(hn, true); }
 rs.conf = function () { return db.getSisterDB("local").system.replset.findOne(); }
+
+rs.remove = function (hn) {
+    var local = db.getSisterDB("local");
+    assert(local.system.replset.count() <= 1, "error: local.system.replset has unexpected contents");
+    var c = local.system.replset.findOne();
+    assert(c, "no config object retrievable from local.system.replset");
+    c.version++;
+
+    for (var i in c.members) {
+        if (c.members[i].host == hn) {
+            c.members.splice(i, 1);
+            return db._adminCommand({ replSetReconfig : c});
+        }
+    }
+
+    return "error: couldn't find "+hn+" in "+tojson(c.members);
+};
 
 help = shellHelper.help = function (x) {
     if (x == "connect") {
@@ -1239,5 +1382,6 @@ help = shellHelper.help = function (x) {
     print("\t" + "db.foo.find()                list objects in collection foo");
     print("\t" + "db.foo.find( { a : 1 } )     list objects in foo where a == 1");
     print("\t" + "it                           result of the last line evaluated; use to further iterate");
+    print("\t" + "DBQuery.shellBatchSize = x   set default number of items to display on shell" );
     print("\t" + "exit                         quit the mongo shell");
 }

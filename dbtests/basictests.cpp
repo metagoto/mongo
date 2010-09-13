@@ -23,6 +23,7 @@
 #include "../util/base64.h"
 #include "../util/array.h"
 #include "../util/text.h"
+#include "../util/queue.h"
 
 namespace BasicTests {
 
@@ -319,6 +320,9 @@ namespace BasicTests {
     class LexNumCmp {
     public:
         void run() {
+            
+            ASSERT( ! isNumber( (char)255 ) );
+
             ASSERT_EQUALS( 0, lexNumCmp( "a", "a" ) );
             ASSERT_EQUALS( -1, lexNumCmp( "a", "aa" ) );
             ASSERT_EQUALS( 1, lexNumCmp( "aa", "a" ) );
@@ -346,7 +350,7 @@ namespace BasicTests {
             ASSERT_EQUALS( -1, lexNumCmp( "f12f", "f12g" ) );
             ASSERT_EQUALS( 1, lexNumCmp( "f12g", "f12f" ) );
             ASSERT_EQUALS( 1, lexNumCmp( "aa{", "aab" ) );
-            ASSERT_EQUALS( 1, lexNumCmp( "aa{", "aa1" ) );
+            ASSERT_EQUALS( -1, lexNumCmp( "aa{", "aa1" ) );
             ASSERT_EQUALS( -1, lexNumCmp( "a1{", "a11" ) );
             ASSERT_EQUALS( 1, lexNumCmp( "a1{a", "a1{" ) );
             ASSERT_EQUALS( -1, lexNumCmp( "a1{", "a1{a" ) );
@@ -355,6 +359,38 @@ namespace BasicTests {
             
             ASSERT_EQUALS( -1 , lexNumCmp( "a.0" , "a.1" ) );
             ASSERT_EQUALS( -1 , lexNumCmp( "a.0.b" , "a.1" ) );
+
+            ASSERT_EQUALS( -1 , lexNumCmp( "b." , "b.|" ) );
+            ASSERT_EQUALS( -1 , lexNumCmp( "b.0e" , (string("b.") + (char)255).c_str() ) );
+            ASSERT_EQUALS( -1 , lexNumCmp( "b." , "b.0e" ) );
+
+            ASSERT_EQUALS( 0, lexNumCmp( "238947219478347782934718234", "238947219478347782934718234")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "000238947219478347782934718234", "238947219478347782934718234")); 
+            ASSERT_EQUALS( 1, lexNumCmp( "000238947219478347782934718235", "238947219478347782934718234")); 
+            ASSERT_EQUALS( -1, lexNumCmp( "238947219478347782934718234", "238947219478347782934718234.1")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "238", "000238")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "002384", "0002384")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "00002384", "0002384")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "0", "0")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "0000", "0")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "0", "000"));
+            ASSERT_EQUALS( -1, lexNumCmp( "0000", "0.0"));
+            ASSERT_EQUALS( 1, lexNumCmp( "2380", "238")); 
+            ASSERT_EQUALS( 1, lexNumCmp( "2385", "2384")); 
+            ASSERT_EQUALS( 1, lexNumCmp( "2385", "02384")); 
+            ASSERT_EQUALS( 1, lexNumCmp( "2385", "002384")); 
+            ASSERT_EQUALS( -1, lexNumCmp( "123.234.4567", "00238")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "123.234", "00123.234")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "a.123.b", "a.00123.b")); 
+            ASSERT_EQUALS( 1, lexNumCmp( "a.123.b", "a.b.00123.b")); 
+            ASSERT_EQUALS( -1, lexNumCmp( "a.00.0", "a.0.1")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "01.003.02", "1.3.2")); 
+            ASSERT_EQUALS( -1, lexNumCmp( "1.3.2", "10.300.20")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "10.300.20", "000000000000010.0000300.000000020")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "0000a", "0a")); 
+            ASSERT_EQUALS( -1, lexNumCmp( "a", "0a")); 
+            ASSERT_EQUALS( -1, lexNumCmp( "000a", "001a")); 
+            ASSERT_EQUALS( 0, lexNumCmp( "010a", "0010a")); 
         }
     };
 
@@ -461,6 +497,17 @@ namespace BasicTests {
     };
 
 
+    class QueueTest {
+    public:
+        void run(){
+            BlockingQueue<int> q;
+            Timer t;
+            int x;
+            ASSERT( ! q.blockingPop( x , 5 ) );
+            ASSERT( t.seconds() > 3 && t.seconds() < 9 );
+
+        }
+    };
 
     class All : public Suite {
     public:
@@ -488,6 +535,8 @@ namespace BasicTests {
 
             add< StringSplitterTest >();
             add< IsValidUTF8Test >();
+
+            add< QueueTest >();
         }
     } myall;
     
