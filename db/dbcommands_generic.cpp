@@ -60,39 +60,62 @@ namespace mongo {
         bool run(const string& dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
             result << "version" << versionString << "gitVersion" << gitVersion() << "sysInfo" << sysInfo();
             result << "bits" << ( sizeof( int* ) == 4 ? 32 : 64 );
-            result.appendBool( "debug" , 
-#ifdef _DEBUG
-                               true
-#else
-                               false
-#endif
-                               );
+            result.appendBool( "debug" , debug );
+            result.appendNumber("maxBsonObjectSize", BSONObjMaxUserSize);
             return true;
         }
     } cmdBuildInfo;
 
-
-    /* just to check if the db has asserted */
-    class CmdAssertInfo : public Command {
+    class CmdGet : public Command {
     public:
-        virtual bool slaveOk() const {
+        CmdGet() : Command( "get" ) { }
+        virtual bool slaveOk() const { return true; }
+        virtual bool adminOnly() const { return true; }
+        virtual LockType locktype() const { return NONE; } 
+        virtual void help( stringstream &help ) const {
+            help << "get administrative option(s)\nexample:\n";
+            help << "{ get:1, notablescan:1 }\n";
+            help << "supported so far:\n";
+            help << "  notablescan\n";
+            help << "{ get:'*' } to get everything\n";
+        }
+        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
+            bool all = cmdObj.firstElement().valuestrsafe();
+            if( all || cmdObj.hasElement("notablescan") ) {
+                result.append("notablescan", cmdLine.noTableScan);
+            }
+            else {
+                errmsg = "no option found to get";
+                return false;
+            }
             return true;
         }
-        virtual void help( stringstream& help ) const {
-            help << "check if any asserts have occurred on the server";
+    } cmdGet;
+
+    class CmdSet : public Command {
+    public:
+        CmdSet() : Command( "set" ) { }
+        virtual bool slaveOk() const { return true; }
+        virtual bool adminOnly() const { return true; }
+        virtual LockType locktype() const { return NONE; } 
+        virtual void help( stringstream &help ) const {
+            help << "set administrative option(s)\nexample:\n";
+            help << "{ set:1, notablescan:true }\n";
+            help << "supported so far:\n";
+            help << "  notablescan\n";
         }
-        virtual LockType locktype() const { return WRITE; } 
-        CmdAssertInfo() : Command("assertInfo",true,"assertinfo") {}
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            result.appendBool("dbasserted", lastAssert[0].isSet() || lastAssert[1].isSet() || lastAssert[2].isSet());
-            result.appendBool("asserted", lastAssert[0].isSet() || lastAssert[1].isSet() || lastAssert[2].isSet() || lastAssert[3].isSet());
-            result.append("assert", lastAssert[AssertRegular].toString());
-            result.append("assertw", lastAssert[AssertW].toString());
-            result.append("assertmsg", lastAssert[AssertMsg].toString());
-            result.append("assertuser", lastAssert[AssertUser].toString());
+        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+            if( cmdObj.hasElement("notablescan") ) {
+                result.append("was", cmdLine.noTableScan);
+                cmdLine.noTableScan = cmdObj["notablescan"].Bool();
+            }
+            else {
+                errmsg = "no option found to set";
+                return false;
+            }
             return true;
         }
-    } cmdAsserts;
+    } cmdSet;
 
     class PingCommand : public Command {
     public:
@@ -110,7 +133,7 @@ namespace mongo {
     class FeaturesCmd : public Command {
     public:
         FeaturesCmd() : Command( "features", true ){}
-        void help(stringstream& h) const { h << "return on build level feature settings"; }
+        void help(stringstream& h) const { h << "return build level feature settings"; }
         virtual bool slaveOk() const { return true; }
         virtual bool readOnly(){ return true; }
         virtual LockType locktype() const { return READ; } 
@@ -227,22 +250,5 @@ namespace mongo {
             return true;
         }
     } cmdForceError;
-
-    
-    class ServerIDCommand : public Command { 
-    public:
-        ServerIDCommand() : Command( "_serverID" ) { }
-        virtual bool requiresAuth() { return false; }
-        virtual bool slaveOk() const { return true; }
-        virtual LockType locktype() const { return NONE; } 
-        virtual void help(stringstream& h) const { h << "internal"; }
-        virtual bool adminOnly() const { return true; }
-
-        virtual bool run(const string& db, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            result.append("serverID", getServerID());
-            return 1;
-        }
-    } serverIDCommand;
-
 
 }

@@ -32,18 +32,18 @@
 
 namespace mongo {
 
-    typedef multimap<DiskLoc, ClientCursor*> CCByLoc;
-
     CCById ClientCursor::clientCursorsById;
     boost::recursive_mutex ClientCursor::ccmutex;
     long long ClientCursor::numberTimedOut = 0;
+
+    void aboutToDeleteForSharding( const Database* db , const DiskLoc& dl ); // from s/d_logic.h
 
     /*static*/ void ClientCursor::assertNoCursors() { 
         recursive_scoped_lock lock(ccmutex);
         if( clientCursorsById.size() ) { 
             log() << "ERROR clientcursors exist but should not at this point" << endl;
             ClientCursor *cc = clientCursorsById.begin()->second;
-            log() << "first one: " << cc->cursorid << ' ' << cc->ns << endl;
+            log() << "first one: " << cc->_cursorid << ' ' << cc->_ns << endl;
             clientCursorsById.clear();
             assert(false);
         }
@@ -51,20 +51,19 @@ namespace mongo {
 
 
     void ClientCursor::setLastLoc_inlock(DiskLoc L) {
-        assert( pos != -2 ); // defensive - see ~ClientCursor
+        assert( _pos != -2 ); // defensive - see ~ClientCursor
 
         if ( L == _lastLoc )
             return;
 
         CCByLoc& bl = byLoc();
+
         if ( !_lastLoc.isNull() ) {
-            CCByLoc::iterator i = kv_find(bl, _lastLoc, this);
-            if ( i != bl.end() )
-                bl.erase(i);
+            bl.erase( ByLocKey( _lastLoc, _cursorid ) );
         }
 
         if ( !L.isNull() )
-            bl.insert( make_pair(L, this) );
+            bl[ByLocKey(L,_cursorid)] = this;
         _lastLoc = L;
     }
 
@@ -97,7 +96,7 @@ namespace mongo {
                 ClientCursor *cc = i->second;
                 if( cc->_db != db ) 
                     continue;
-                if ( strncmp(nsPrefix, cc->ns.c_str(), len) == 0 ) {
+                if ( strncmp(nsPrefix, cc->_ns.c_str(), len) == 0 ) {
                     toDelete.push_back(i->second);
                 }
             }
@@ -141,7 +140,7 @@ namespace mongo {
             i++;
             if( j->second->shouldTimeout( millis ) ){
                 numberTimedOut++;
-                log(1) << "killing old cursor " << j->second->cursorid << ' ' << j->second->ns 
+                log(1) << "killing old cursor " << j->second->_cursorid << ' ' << j->second->_ns 
                        << " idle:" << j->second->idleTime() << "ms\n";
                 delete j->second;
             }
@@ -159,7 +158,7 @@ namespace mongo {
             log() << "perf warning: byLoc.size=" << bl.size() << " in aboutToDeleteBucket\n";
         }
         for ( CCByLoc::iterator i = bl.begin(); i != bl.end(); i++ )
-            i->second->c->aboutToDeleteBucket(b);
+            i->second->_c->aboutToDeleteBucket(b);
     }
     void aboutToDeleteBucket(const DiskLoc& b) {
         ClientCursor::informAboutToDeleteBucket(b); 
@@ -171,9 +170,12 @@ namespace mongo {
 
         Database *db = cc().database();
         assert(db);
+
+        aboutToDeleteForSharding( db , dl );
+
         CCByLoc& bl = db->ccByLoc;
-        CCByLoc::iterator j = bl.lower_bound(dl);
-        CCByLoc::iterator stop = bl.upper_bound(dl);
+        CCByLoc::iterator j = bl.lower_bound(ByLocKey::min(dl));
+        CCByLoc::iterator stop = bl.upper_bound(ByLocKey::max(dl));
         if ( j == stop )
             return;
 
@@ -181,13 +183,28 @@ namespace mongo {
 
         while ( 1 ) {
             toAdvance.push_back(j->second);
-            DEV assert( j->first == dl );
+            DEV assert( j->first.loc == dl );
             ++j;
             if ( j == stop )
                 break;
         }
 
-        wassert( toAdvance.size() < 5000 );
+        if( toAdvance.size() >= 3000 ) { 
+            log() << "perf warning MPW101: " << toAdvance.size() << " cursors for one diskloc " 
+                << dl.toString()
+                << ' ' << toAdvance[1000]->_ns
+                << ' ' << toAdvance[2000]->_ns
+                << ' ' << toAdvance[1000]->_pinValue 
+                << ' ' << toAdvance[2000]->_pinValue
+                << ' ' << toAdvance[1000]->_pos
+                << ' ' << toAdvance[2000]->_pos
+                << ' ' << toAdvance[1000]->_idleAgeMillis
+                << ' ' << toAdvance[2000]->_idleAgeMillis
+                << ' ' << toAdvance[1000]->_doingDeletes 
+                << ' ' << toAdvance[2000]->_doingDeletes 
+                << endl;
+            //wassert( toAdvance.size() < 5000 );
+        }
         
         for ( vector<ClientCursor*>::iterator i = toAdvance.begin(); i != toAdvance.end(); ++i ){
             ClientCursor* cc = *i;
@@ -195,8 +212,12 @@ namespace mongo {
             
             if ( cc->_doingDeletes ) continue;
 
-            Cursor *c = cc->c.get();
+            Cursor *c = cc->_c.get();
             if ( c->capped() ){
+                /* note we cannot advance here. if this condition occurs, writes to the oplog 
+                   have "caught" the reader.  skipping ahead, the reader would miss postentially 
+                   important data.
+                   */
                 delete cc;
                 continue;
             }
@@ -222,17 +243,52 @@ namespace mongo {
     }
     void aboutToDelete(const DiskLoc& dl) { ClientCursor::aboutToDelete(dl); }
 
+    ClientCursor::ClientCursor(int queryOptions, const shared_ptr<Cursor>& c, const string& ns, BSONObj query ) :
+        _ns(ns), _db( cc().database() ),
+        _c(c), _pos(0), 
+        _query(query),  _queryOptions(queryOptions), 
+        _idleAgeMillis(0), _pinValue(0), 
+        _doingDeletes(false), _yieldSometimesTracker(128,10)
+    {
+        assert( _db );
+        assert( str::startsWith(_ns, _db->name) );
+        if( queryOptions & QueryOption_NoCursorTimeout )
+            noTimeout();
+        recursive_scoped_lock lock(ccmutex);
+        _cursorid = allocCursorId_inlock();
+        clientCursorsById.insert( make_pair(_cursorid, this) );
+        
+#if 0  
+        { 
+            // store index information so we can decide if we can 
+            // get something out of the index key rather than full object
+            
+            int x = 0;
+            BSONObjIterator i( _c->indexKeyPattern() );
+            while ( i.more() ){
+                BSONElement e = i.next();
+                if ( e.isNumber() ){
+                    // only want basic index fields, not "2d" etc
+                    _indexedFields[e.fieldName()] = x;
+                }
+                x++;
+            }
+        }
+#endif
+    }
+    
+
     ClientCursor::~ClientCursor() {
-        assert( pos != -2 );
+        assert( _pos != -2 );
 
         {
             recursive_scoped_lock lock(ccmutex);
             setLastLoc_inlock( DiskLoc() ); // removes us from bylocation multimap
-            clientCursorsById.erase(cursorid);
+            clientCursorsById.erase(_cursorid);
 
             // defensive:
-            (CursorId&) cursorid = -1;
-            pos = -2;
+            (CursorId&)_cursorid = -1;
+            _pos = -2;
         }
     }
 
@@ -241,9 +297,9 @@ namespace mongo {
        need to call when you are ready to "unlock".
     */
     void ClientCursor::updateLocation() {
-        assert( cursorid );
+        assert( _cursorid );
         _idleAgeMillis = 0;
-        DiskLoc cl = c->refLoc();
+        DiskLoc cl = _c->refLoc();
         if ( lastLoc() == cl ) {
             //log() << "info: lastloc==curloc " << ns << '\n';
         } else {
@@ -251,7 +307,7 @@ namespace mongo {
             setLastLoc_inlock(cl);
         }
         // may be necessary for MultiCursor even when cl hasn't changed
-        c->noteLocation();
+        _c->noteLocation();
     }
     
     int ClientCursor::yieldSuggest() {
@@ -277,6 +333,7 @@ namespace mongo {
     }
 
     void ClientCursor::staticYield( int micros ) {
+        killCurrentOp.checkForInterrupt( false );
         {
             dbtempreleasecond unlock;
             if ( unlock.unlocked() ){
@@ -292,10 +349,10 @@ namespace mongo {
     }
     
     bool ClientCursor::prepareToYield( YieldData &data ) {
-        if ( ! c->supportYields() )
+        if ( ! _c->supportYields() )
             return false;
         // need to store in case 'this' gets deleted
-        data._id = cursorid;
+        data._id = _cursorid;
         
         data._doingDeletes = _doingDeletes;
         _doingDeletes = false;
@@ -313,13 +370,13 @@ namespace mongo {
                 inEmpty = true;
                 log() << "TEST: manipulate collection during cc:yield" << endl;
                 if( test == 1 ) 
-                    Helpers::emptyCollection(ns.c_str());
+                    Helpers::emptyCollection(_ns.c_str());
                 else if( test == 2 ) {
                     BSONObjBuilder b; string m;
-                    dropCollection(ns.c_str(), m, b);
+                    dropCollection(_ns.c_str(), m, b);
                 }
                 else { 
-                    dropDatabase(ns.c_str());
+                    dropDatabase(_ns.c_str());
                 }
             }
         }        
@@ -334,12 +391,12 @@ namespace mongo {
         }
         
         cc->_doingDeletes = data._doingDeletes;
-        cc->c->checkLocation();
+        cc->_c->checkLocation();
         return true;        
     }
     
     bool ClientCursor::yield( int micros ) {
-        if ( ! c->supportYields() )
+        if ( ! _c->supportYields() )
             return true;
         YieldData data; 
         prepareToYield( data );
@@ -386,7 +443,7 @@ namespace mongo {
     void ClientCursor::updateSlaveLocation( CurOp& curop ){
         if ( _slaveReadTill.isNull() )
             return;
-        mongo::updateSlaveLocation( curop , ns.c_str() , _slaveReadTill );
+        mongo::updateSlaveLocation( curop , _ns.c_str() , _slaveReadTill );
     }
 
 
@@ -433,9 +490,22 @@ namespace mongo {
         recursive_scoped_lock lock(ccmutex);
         
         for ( CCById::iterator i=clientCursorsById.begin(); i!=clientCursorsById.end(); ++i ){
-            if ( i->second->ns == ns )
+            if ( i->second->_ns == ns )
                 all.insert( i->first );
         }
+    }
+
+    int ClientCursor::erase(int n, long long *ids) {
+        int found = 0;
+        for ( int i = 0; i < n; i++ ) {
+            if ( erase(ids[i]) )
+                found++;
+
+            if ( inShutdown() )
+                break;
+        }
+        return found;
+
     }
 
 

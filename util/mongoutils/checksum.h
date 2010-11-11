@@ -1,4 +1,4 @@
-/** @checksum.h */
+/** @file checksum.h */
 
 /*    Copyright 2009 10gen Inc.
  *

@@ -19,6 +19,7 @@
 #include "health.h"
 #include "../../util/background.h"
 #include "../../client/dbclient.h"
+#include "../../client/connpool.h"
 #include "../commands.h"
 #include "../../util/concurrency/value.h"
 #include "../../util/concurrency/task.h"
@@ -31,6 +32,7 @@
 #include "../dbhelpers.h"
 
 namespace mongo {
+
     /* decls for connections.h */
     ScopedConn::M& ScopedConn::_map = *(new ScopedConn::M());    
     mutex ScopedConn::mapMutex("ScopedConn::mapMutex");
@@ -43,6 +45,7 @@ namespace mongo {
 
     static RamLog _rsLog;
     Tee *rsLog = &_rsLog;
+    extern bool replSetBlind;
 
     string ago(time_t t) { 
         if( t == 0 ) return "";
@@ -88,6 +91,7 @@ namespace mongo {
             s << td(h);
         }
         s << td(config().votes);
+        s << td(config().priority);
         { 
             string stateText = state().toString();
             if( _config.hidden )
@@ -168,10 +172,7 @@ namespace mongo {
             if( skip.count(e.fieldName()) ) continue;
             ss << e.toString() << ' ';
         }
-        ss << "</td>";
-
-        ss << "</tr>";
-        ss << '\n';
+        ss << "</td></tr>\n";
     }
 
     void ReplSetImpl::_getOplogDiagsAsHtml(unsigned server_id, stringstream& ss) const { 
@@ -186,9 +187,17 @@ namespace mongo {
         //const bo fields = BSON( "o" << false << "o2" << false );
         const bo fields;
 
-        ScopedConn conn(m->fullName());        
+        /** todo fix we might want an so timeout here */
+        DBClientConnection conn(false, 0, /*timeout*/ 20);
+        {
+            string errmsg;
+            if( !conn.connect(m->fullName(), errmsg) ) { 
+                ss << "couldn't connect to " << m->fullName() << ' ' << errmsg;
+                return;
+            }
+        }
 
-        auto_ptr<DBClientCursor> c = conn->query(rsoplog, Query().sort("$natural",1), 20, 0, &fields);
+        auto_ptr<DBClientCursor> c = conn.query(rsoplog, Query().sort("$natural",1), 20, 0, &fields);
         if( c.get() == 0 ) { 
             ss << "couldn't query " << rsoplog;
             return;
@@ -219,7 +228,7 @@ namespace mongo {
             ss << rsoplog << " is empty\n";
         }
         else { 
-            auto_ptr<DBClientCursor> c = conn->query(rsoplog, Query().sort("$natural",-1), 20, 0, &fields);
+            auto_ptr<DBClientCursor> c = conn.query(rsoplog, Query().sort("$natural",-1), 20, 0, &fields);
             if( c.get() == 0 ) { 
                 ss << "couldn't query [2] " << rsoplog;
                 return;
@@ -245,8 +254,6 @@ namespace mongo {
         ss << _table();
         ss << p(time_t_to_String_short(time(0)) + " current time");
 
-        //ss << "</pre>\n";
-
         if( !otEnd.isNull() ) {
             ss << "<p>Log length in time: ";
             unsigned d = otEnd.getSecs() - otFirst.getSecs();
@@ -258,7 +265,6 @@ namespace mongo {
                 ss << h / 24.0 << " days";
             ss << "</p>\n";
         }
-
     }
 
     void ReplSetImpl::_summarizeAsHtml(stringstream& s) const { 
@@ -272,7 +278,7 @@ namespace mongo {
             "Up", 
             "<a title=\"length of time we have been continuously connected to the other member with no reconnects (for self, shows uptime)\">cctime</a>", 
             "<a title=\"when this server last received a heartbeat response - includes error code responses\">Last heartbeat</a>", 
-            "Votes", "State", "Status", 
+            "Votes", "Priority", "State", "Messages", 
             "<a title=\"how up to date this server is.  this value polled every few seconds so actually lag is typically much lower than value shown here.\">optime</a>", 
             "<a title=\"Clock skew in seconds relative to this server. Informational; server clock variances will make the diagnostics hard to read, but otherwise are benign..\">skew</a>", 
             0};
@@ -306,6 +312,7 @@ namespace mongo {
                 td(ago(started)) << 
 	        td("") << // last heartbeat
                 td(ToString(_self->config().votes)) << 
+                td(ToString(_self->config().priority)) <<
                 td( stateAsHtml(box.getState()) + (_self->config().hidden?" (hidden)":"") );
             s << td( _hbmsg );
             stringstream q;
@@ -353,6 +360,9 @@ namespace mongo {
             bb.append("name", h.toString());
             bb.append("health", 1.0);
             bb.append("state", (int) box.getState().s);
+            bb.append("stateStr", box.getState().toString());
+            bb.appendTimestamp("optime", lastOpTimeWritten.asDate());
+            bb.appendDate("optimeDate", lastOpTimeWritten.getSecs() * 1000LL);
             string s = _self->lhb();
             if( !s.empty() )
                 bb.append("errmsg", s);
@@ -365,9 +375,18 @@ namespace mongo {
             BSONObjBuilder bb;
             bb.append("_id", (int) m->id());
             bb.append("name", m->fullName());
-            bb.append("health", m->hbinfo().health);
+            double h = m->hbinfo().health;
+            bb.append("health", h);
             bb.append("state", (int) m->state().s);
+            if( h == 0 ) {
+                // if we can't connect the state info is from the past and could be confusing to show
+                bb.append("stateStr", "(not reachable/healthy)"); 
+            } else {
+                bb.append("stateStr", m->state().toString());
+            }
             bb.append("uptime", (unsigned) (m->hbinfo().upSince ? (time(0)-m->hbinfo().upSince) : 0));
+            bb.appendTimestamp("optime", m->hbinfo().opTime.asDate());
+            bb.appendDate("optimeDate", m->hbinfo().opTime.getSecs() * 1000LL);
             bb.appendTimeT("lastHeartbeat", m->hbinfo().lastHeartbeat);
             string s = m->lhb();
             if( !s.empty() )
@@ -380,6 +399,8 @@ namespace mongo {
         b.appendTimeT("date", time(0));
         b.append("myState", box.getState().s);
         b.append("members", v);
+        if( replSetBlind )
+            b.append("blind",true); // to avoid confusion if set...normally never set except for testing.
     }
 
     static struct Test : public UnitTest { 

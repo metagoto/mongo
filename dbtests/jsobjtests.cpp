@@ -441,7 +441,34 @@ namespace JsobjTests {
             }
 
         };
+        
+        class AppendAs {
+        public:
+            void run() {
+                BSONObjBuilder b;
+                {
+                    BSONObj foo = BSON( "foo" << 1 );
+                    b.appendAs( foo.firstElement(), "bar" );
+                }
+                ASSERT_EQUALS( BSON( "bar" << 1 ), b.done() );
+            }
+        };
 
+        class ArrayAppendAs {
+        public:
+            void run() {
+                BSONArrayBuilder b;
+                {
+                    BSONObj foo = BSON( "foo" << 1 );
+                    b.appendAs( foo.firstElement(), "3" );
+                }
+                BSONArray a = b.arr();
+                BSONObj expected = BSON( "3" << 1 );
+                ASSERT_EQUALS( expected.firstElement(), a[ 3 ] );
+                ASSERT_EQUALS( 4, a.nFields() );
+            }
+        };
+        
         namespace Validation {
 
             class Base {
@@ -1698,7 +1725,7 @@ namespace JsobjTests {
                 
         }
     };
-
+    
     class All : public Suite {
     public:
         All() : Suite( "jsobj" ){
@@ -1724,6 +1751,8 @@ namespace JsobjTests {
             add< BSONObjTests::ToStringArray >();
             add< BSONObjTests::ToStringNumber >();
             add< BSONObjTests::NullString >();
+            add< BSONObjTests::AppendAs >();
+            add< BSONObjTests::ArrayAppendAs >();
             add< BSONObjTests::Validation::BadType >();
             add< BSONObjTests::Validation::EooBeforeEnd >();
             add< BSONObjTests::Validation::Undefined >();

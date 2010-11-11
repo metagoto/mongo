@@ -32,8 +32,8 @@ namespace mongo {
      */
     struct Mod {
         // See opFromStr below
-        //        0    1    2     3         4     5          6    7      8       9       10    11
-        enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP, UNSET, BITAND, BITOR , BIT , ADDTOSET  } op;
+        //        0    1    2     3         4     5          6    7      8       9       10    11        12           13
+        enum Op { INC, SET, PUSH, PUSH_ALL, PULL, PULL_ALL , POP, UNSET, BITAND, BITOR , BIT , ADDTOSET, RENAME_FROM, RENAME_TO } op;
         
         static const char* modNames[];
         static unsigned modNamesNum;
@@ -43,12 +43,22 @@ namespace mongo {
         
         BSONElement elt; // x:5 note: this is the actual element from the updateobj
         boost::shared_ptr<Matcher> matcher;
+        bool matcherOnPrimitive;
 
         void init( Op o , BSONElement& e ){
             op = o;
             elt = e;
-            if ( op == PULL && e.type() == Object )
-                matcher.reset( new Matcher( e.embeddedObject() ) );
+            if ( op == PULL && e.type() == Object ){
+                BSONObj t = e.embeddedObject();
+                if ( t.firstElement().getGtLtOp() == 0 ){
+                    matcher.reset( new Matcher( t ) );
+                    matcherOnPrimitive = false;
+                }
+                else {
+                    matcher.reset( new Matcher( BSON( "" << t ) ) );
+                    matcherOnPrimitive = true;
+                }
+            }
         }
 
         void setFieldName( const char * s ){
@@ -64,8 +74,7 @@ namespace mongo {
          * @param in incrememnts the actual value inside in
          */
         void incrementMe( BSONElement& in ) const {
-            BSONElementManipulator manip( in );
-            
+            BSONElementManipulator manip( in );            
             switch ( in.type() ){
             case NumberDouble:
                 manip.setNumber( elt.numberDouble() + in.numberDouble() );
@@ -78,8 +87,23 @@ namespace mongo {
                 break;
             default:
                 assert(0);
-            }
-            
+            }            
+        }
+        void IncrementMe( BSONElement& in ) const {
+            BSONElementManipulator manip( in );            
+            switch ( in.type() ){
+            case NumberDouble:
+                manip.SetNumber( elt.numberDouble() + in.numberDouble() );
+                break;
+            case NumberLong:
+                manip.SetLong( elt.numberLong() + in.numberLong() );
+                break;
+            case NumberInt:
+                manip.SetInt( elt.numberInt() + in.numberInt() );
+                break;
+            default:
+                assert(0);
+            }            
         }
         
         template< class Builder >
@@ -207,6 +231,10 @@ namespace mongo {
             }
         }
         
+        const char *renameFrom() const {
+            massert( 13492, "mod must be RENAME_TO type", op == Mod::RENAME_TO );
+            return elt.fieldName();
+        }
     };
 
     /**
@@ -303,6 +331,13 @@ namespace mongo {
                         return Mod::ADDTOSET;
                     
                 }
+                break;
+            }
+            case 'r': {
+                if ( fn[2] == 'e' && fn[3] == 'n' && fn[4] == 'a' && fn[5] == 'm' && fn[6] =='e' ) {
+                    return Mod::RENAME_TO; // with this return code we handle both RENAME_TO and RENAME_FROM
+                }
+                break;
             }
             default: break;
             }
@@ -312,6 +347,13 @@ namespace mongo {
         
         ModSet(){}
 
+        void updateIsIndexed( const Mod &m, const set<string> &idxKeys, const set<string> *backgroundKeys ) {
+            if ( m.isIndexed( idxKeys ) ||
+                (backgroundKeys && m.isIndexed(*backgroundKeys)) ) {
+                _isIndexed++;
+            }            
+        }
+        
     public:
         
         ModSet( const BSONObj &from , 
@@ -379,6 +421,8 @@ namespace mongo {
     public:
         const Mod * m;
         BSONElement old;
+        BSONElement newVal;
+        BSONObj _objData;
         
         const char * fixedOpName;
         BSONElement * fixed;
@@ -389,11 +433,14 @@ namespace mongo {
         double incdouble;
         long long inclong;
         
+        bool dontApply;
+        
         ModState(){
             fixedOpName = 0;
             fixed = 0;
             pushStartSize = -1;
             incType = EOO;
+            dontApply = false;
         }
            
         Mod::Op op() const {
@@ -405,10 +452,16 @@ namespace mongo {
         }
         
         bool needOpLogRewrite() const {
+            if ( dontApply )
+                return false;
+            
             if ( fixed || fixedOpName || incType )
                 return true;
             
             switch( op() ){
+            case Mod::RENAME_FROM:
+            case Mod::RENAME_TO:
+                return true;
             case Mod::BIT:
             case Mod::BITAND:
             case Mod::BITOR:
@@ -443,6 +496,9 @@ namespace mongo {
         }
 
         string toString() const;
+        
+        template< class Builder >
+        void handleRename( Builder &newObjBuilder, const char *shortFieldName );
     };
     
     /**
@@ -459,6 +515,7 @@ namespace mongo {
         const BSONObj& _obj;
         ModStateHolder _mods;
         bool _inPlacePossible;
+        BSONObj _newFromMods; // keep this data alive, as oplog generation may depend on it
         
         ModSetState( const BSONObj& obj ) 
             : _obj( obj ) , _inPlacePossible(true){
@@ -481,6 +538,10 @@ namespace mongo {
         
         template< class Builder >
         void appendNewFromMod( ModState& ms , Builder& b ){
+            if ( ms.dontApply ) {
+                return;
+            }
+            
             //const Mod& m = *(ms.m); // HACK
             Mod& m = *((Mod*)(ms.m)); // HACK
                 
@@ -517,6 +578,10 @@ namespace mongo {
                 b.appendAs( m.elt, m.shortFieldName );
                 break;
             }
+            // shouldn't see RENAME_FROM here
+            case Mod::RENAME_TO:
+                ms.handleRename( b, m.shortFieldName );
+                break;
             default: 
                 stringstream ss;
                 ss << "unknown mod in appendNewFromMod: " << m.op;
@@ -533,8 +598,9 @@ namespace mongo {
         
         /**
          * modified underlying _obj
+         * @param isOnDisk - true means this is an on disk object, and this update needs to be made durable
          */
-        void applyModsInPlace();
+        void applyModsInPlace( bool isOnDisk );
 
         BSONObj createNewFromMods();
 

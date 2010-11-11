@@ -22,11 +22,12 @@
 
 #include "../pch.h"
 #include "../scripting/engine.h"
+#include "../util/timer.h"
 
 #include "dbtests.h"
 
 namespace mongo {
-    bool dbEval(const char *ns, BSONObj& cmd, BSONObjBuilder& result, string& errmsg);
+    bool dbEval(const string& dbName , BSONObj& cmd, BSONObjBuilder& result, string& errmsg);
 } // namespace mongo
 
 namespace JSTests {
@@ -637,7 +638,8 @@ namespace JSTests {
         BSONObj cmd;
         BSONObjBuilder result;
         string errmsg;
-        dbEval( "", cmd, result, errmsg);
+        dbEval( "test", cmd, result, errmsg);
+        assert(0);
     }
 
     DBDirectClient client;

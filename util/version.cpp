@@ -14,7 +14,7 @@ namespace mongo {
     // mongo processes version support
     //
 
-    const char versionString[] = "1.7.1-pre-";
+    const char versionString[] = "1.7.3-pre-";
 
     string mongodVersion() {
         stringstream ss;
@@ -55,7 +55,12 @@ namespace mongo {
 #endif
 #endif
 
-    void printSysInfo() { log() << "sys info: " << sysInfo() << endl; }
+    void printSysInfo() { 
+        log() << "sys info: " << sysInfo() << endl; 
+#if defined(_DURABLE)
+        log() << "_DURABLE defined, but durable is not finished" << endl;
+#endif
+    }
 
     //
     // 32 bit systems warning

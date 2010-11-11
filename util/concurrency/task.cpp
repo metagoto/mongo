@@ -17,10 +17,13 @@
 */
 
 #include "pch.h"
+
+#include <boost/thread/condition.hpp>
+
 #include "task.h"
 #include "../goodies.h"
 #include "../unittest.h"
-#include "boost/thread/condition.hpp"
+#include "../time_support.h"
 
 namespace mongo { 
 
@@ -34,10 +37,10 @@ namespace mongo {
             cond.notify_one();
         }*/
 
-        Task::Task() { 
+        Task::Task() 
+            : BackgroundJob( true /* deleteSelf */ ) { 
             n = 0;
             repeat = 0;
-            deleteSelf = true;
         }
 
         void Task::halt() { repeat = 0; }

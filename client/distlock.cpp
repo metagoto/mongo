@@ -73,18 +73,33 @@ namespace mongo {
             try {
                 ScopedDbConnection conn( addr );
                 
-                // do ping
+                // refresh the entry corresponding to this process in the lockpings collection
                 conn->update( lockPingNS , 
                               BSON( "_id" << process ) , 
                               BSON( "$set" << BSON( "ping" << DATENOW ) ) ,
                               true );
-                
-                
-                // remove really old entries
+                string err = conn->getLastError();
+                if ( ! err.empty() ){
+                    log( LL_WARNING ) << "dist_lock process: " << process << " pinging: " << addr << " failed: " 
+                                      << err << endl;
+                    conn.done();
+                    sleepsecs(30);
+                    continue;
+                }
+
+                // remove really old entries from the lockpings collection
                 BSONObjBuilder f;
-                f.appendDate( "$lt" , jsTime() - ( 4 * 86400 * 1000 ) );
+                f.appendDate( "$lt" , jsTime() - ( 4 * 86400 * 1000 ) ); // 4 days
                 BSONObj r = BSON( "ping" << f.obj() );
                 conn->remove( lockPingNS , r );
+                err = conn->getLastError();
+                if ( ! err.empty() ){
+                    log ( LL_WARNING ) << "dist_lock cleanup request from process: " << process << " to: " << addr 
+                                       << " failed: " << err << endl;
+                    conn.done();
+                    sleepsecs(30);
+                    continue;
+                }
                 
                 // create index so remove is fast even with a lot of servers
                 if ( loops++ == 0 ){
@@ -94,7 +109,7 @@ namespace mongo {
                 conn.done();
             }
             catch ( std::exception& e ){
-                log( LL_WARNING ) << "dist_lock couldn't ping: " << e.what() << endl;
+                log( LL_WARNING ) << "dist_lock exception during ping: " << e.what() << endl;
             }
 
             log(4) << "dist_lock pinged successfully for: " << process << endl;
@@ -132,6 +147,11 @@ namespace mongo {
 
        
     bool DistributedLock::lock_try( string why , BSONObj * other ){
+        // write to dummy if 'other' is null
+        BSONObj dummyOther; 
+        if ( other == NULL )
+            other = &dummyOther;
+
         ScopedDbConnection conn( _conn );
             
         BSONObjBuilder queryBuilder;
@@ -154,7 +174,7 @@ namespace mongo {
                 BSONObj lastPing = conn->findOne( lockPingNS , o["process"].wrap( "_id" ) );
                 if ( lastPing.isEmpty() ){
                     // TODO: maybe this should clear, not sure yet
-                    log() << "lastPing is empty! this could be bad: " << o << endl;
+                    log() << "config.locks: " << _name << " lastPing is empty! this could be bad: " << o << endl;
                     conn.done();
                     return false;
                 }
@@ -164,6 +184,8 @@ namespace mongo {
 
                 if ( elapsed <= _takeoverMinutes ){
                     log(1) << "dist_lock lock failed because taken by: " << o << " elapsed minutes: " << elapsed << endl;
+                    *other = o;
+                    other->getOwned();
                     conn.done();
                     return false;
                 }
@@ -194,10 +216,8 @@ namespace mongo {
             now = conn->findOne( _ns , _id );
                 
             if ( o["n"].numberInt() == 0 ){
-                if ( other ){
-                    *other = now;
-                    other->getOwned();
-                }
+                *other = now;
+                other->getOwned();
                 log() << "dist_lock error trying to aquire lock: " << lockDetails << " error: " << o << endl;
                 gotLock = false;
             }

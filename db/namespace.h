@@ -23,7 +23,7 @@
 #include "queryutil.h"
 #include "diskloc.h"
 #include "../util/hashtab.h"
-#include "../util/mmap.h"
+#include "mongommf.h"
 
 namespace mongo {
 
@@ -55,7 +55,7 @@ namespace mongo {
 
 #pragma pack(1)
 	/* This helper class is used to make the HashMap below in NamespaceDetails e.g. see line: 
-          HashTable<Namespace,NamespaceDetails,MMF::Pointer> *ht;
+          HashTable<Namespace,NamespaceDetails> *ht;
     */
     class Namespace {
     public:
@@ -94,7 +94,9 @@ namespace mongo {
 namespace mongo {
 
     /** @return true if a client can modify this namespace
-        things like *.system.users */
+        things like *.system.users 
+        @param write used when .system.js
+    */
     bool legalClientSystemNS( const string& ns , bool write );
 
     /* deleted lists -- linked lists of deleted records -- are placed in 'buckets' of various sizes
@@ -125,8 +127,10 @@ namespace mongo {
         */
         DiskLoc deletedList[Buckets];
         // ofs 168 (8 byte aligned)
-        long long datasize;
-        long long nrecords;
+        struct Stats {
+            long long datasize; //datasize and nrecords MUST Be adjacent code assumes!
+            long long nrecords;
+        } stats;
         int lastExtentSize;
         int nIndexes;
     private:
@@ -227,76 +231,47 @@ namespace mongo {
             Flag_HaveIdIndex = 1 << 0 // set when we have _id index (ONLY if ensureIdIndex was called -- 0 if that has never been called)
         };
 
-        IndexDetails& idx(int idxNo, bool missingExpected = false ) {
-            if( idxNo < NIndexesBase ) 
-                return _indexes[idxNo];
-            Extra *e = extra();
-            if ( ! e ){
-                if ( missingExpected )
-                    throw MsgAssertionException( 13283 , "Missing Extra" );
-                massert(13282, "missing Extra", e);
-            }
-            int i = idxNo - NIndexesBase;
-            if( i >= NIndexesExtra ) {
-                e = e->next(this);
-                if ( ! e ){
-                    if ( missingExpected )
-                        throw MsgAssertionException( 13283 , "missing extra" );
-                    massert(13283, "missing Extra", e);
-                }
-                i -= NIndexesExtra;
-            }
-            return e->details[i];
-        }
+        IndexDetails& idx(int idxNo, bool missingExpected = false );
+
+        /** get the IndexDetails for the index currently being built in the background. (there is at most one) */
         IndexDetails& backgroundIdx() { 
             DEV assert(backgroundIndexBuildInProgress);
             return idx(nIndexes);
         }
 
         class IndexIterator { 
-            friend class NamespaceDetails;
-            int i;
-            int n;
-            NamespaceDetails *d;
-            IndexIterator(NamespaceDetails *_d) { 
-                d = _d;
-                i = 0;
-                n = d->nIndexes;
-            }
         public:
             int pos() { return i; } // note this is the next one to come
             bool more() { return i < n; }
             IndexDetails& next() { return d->idx(i++); }
-        }; // IndexIterator
+        private:
+            friend class NamespaceDetails;
+            int i, n;
+            NamespaceDetails *d;
+            IndexIterator(NamespaceDetails *_d);
+        };
 
         IndexIterator ii() { return IndexIterator(this); }
 
-        /* hackish - find our index # in the indexes array
-        */
-        int idxNo(IndexDetails& idx) { 
-            IndexIterator i = ii();
-            while( i.more() ) {
-                if( &i.next() == &idx )
-                    return i.pos()-1;
-            }
-            massert( 10349 , "E12000 idxNo fails", false);
-            return -1;
-        }
+        /* hackish - find our index # in the indexes array */
+        int idxNo(IndexDetails& idx);
 
         /* multikey indexes are indexes where there are more than one key in the index
              for a single document. see multikey in wiki.
            for these, we have to do some dedup work on queries.
         */
-        bool isMultikey(int i) {
-            return (multiKeyIndexBits & (((unsigned long long) 1) << i)) != 0;
-        }
+        bool isMultikey(int i) const { return (multiKeyIndexBits & (((unsigned long long) 1) << i)) != 0; }
         void setIndexIsMultikey(int i) { 
             dassert( i < NIndexesMax );
-            multiKeyIndexBits |= (((unsigned long long) 1) << i);
+            unsigned long long x = ((unsigned long long) 1) << i;
+            if( multiKeyIndexBits & x ) return;
+            *dur::writing(&multiKeyIndexBits) |= x;
         }
         void clearIndexIsMultikey(int i) { 
             dassert( i < NIndexesMax );
-            multiKeyIndexBits &= ~(((unsigned long long) 1) << i);
+            unsigned long long x = ((unsigned long long) 1) << i;
+            if( (multiKeyIndexBits & x) == 0 ) return;
+            *dur::writing(&multiKeyIndexBits) &= ~x;
         }
 
         /* add a new index.  does not add to system.indexes etc. - just to NamespaceDetails.
@@ -312,33 +287,19 @@ namespace mongo {
         void paddingFits() {
             double x = paddingFactor - 0.01;
             if ( x >= 1.0 )
-                paddingFactor = x;
+                *dur::writingNoLog(&paddingFactor) = x;
         }
         void paddingTooSmall() {
             double x = paddingFactor + 0.6;
             if ( x <= 2.0 )
-                paddingFactor = x;
+                *dur::writingNoLog(&paddingFactor) = x;
         }
 
         // @return offset in indexes[]
-        int findIndexByName(const char *name) {
-            IndexIterator i = ii();
-            while( i.more() ) {
-                if ( strcmp(i.next().info.obj().getStringField("name"),name) == 0 )
-                    return i.pos()-1;
-            }
-            return -1;
-        }
+        int findIndexByName(const char *name);
 
         // @return offset in indexes[]
-        int findIndexByKeyPattern(const BSONObj& keyPattern) {
-            IndexIterator i = ii();
-            while( i.more() ) {
-                if( i.next().keyPattern() == keyPattern ) 
-                    return i.pos()-1;
-            }
-            return -1;
-        }
+        int findIndexByKeyPattern(const BSONObj& keyPattern);
         
         void findIndexByType( const string& name , vector<int>& matches ) {
             IndexIterator i = ii();
@@ -378,6 +339,12 @@ namespace mongo {
         // Start from lastExtent by default.
         DiskLoc lastRecord( const DiskLoc &startExtent = DiskLoc() ) const;
         long long storageSize( int * numExtents = 0 );
+
+        int averageObjectSize(){
+            if ( stats.nrecords == 0 )
+                return 5;
+            return (int) (stats.datasize / stats.nrecords);
+        }
         
     private:
         DiskLoc _alloc(const char *ns, int len);
@@ -551,20 +518,7 @@ namespace mongo {
             return d;
         }
 
-        void kill_ns(const char *ns) {
-            if ( !ht )
-                return;
-            Namespace n(ns);
-            ht->kill(n);
-
-            for( int i = 0; i<=1; i++ ) {
-                try {
-                    Namespace extra(n.extraName(i).c_str());
-                    ht->kill(extra);
-                }
-                catch(DBException&) { }
-            }
-        }
+        void kill_ns(const char *ns);
 
         bool find(const char *ns, DiskLoc& loc) {
             NamespaceDetails *l = details(ns);
@@ -588,8 +542,8 @@ namespace mongo {
     private:
         void maybeMkdir() const;
         
-        MMF f;
-        HashTable<Namespace,NamespaceDetails,MMF::Pointer> *ht;
+        MongoMMF f;
+        HashTable<Namespace,NamespaceDetails> *ht;
         string dir_;
         string database_;
     };
@@ -629,5 +583,3 @@ namespace mongo {
     }
 
 } // namespace mongo
-
-#include "namespace-inl.h"

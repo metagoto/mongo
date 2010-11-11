@@ -62,14 +62,12 @@ namespace mongo {
     bool useCursors = true;
     bool useHints = true;
     
-    void flushOpLog( stringstream &ss ) {
+    void flushDiagLog() {
         if( _diaglog.f && _diaglog.f->is_open() ) {
-            ss << "flushing op log and files\n";
+            log() << "flushing diag log" << endl;
             _diaglog.flush();
         }
     }
-
-    int ctr = 0;
 
     KillCurrentOp killCurrentOp;
     
@@ -98,9 +96,10 @@ namespace mongo {
                 for( set<Client*>::iterator i = Client::clients.begin(); i != Client::clients.end(); i++ ) { 
                     Client *c = *i;
                     assert( c );
-                    if ( c == &me )
-                        continue;
                     CurOp* co = c->curop();
+                    if ( c == &me && !co ) {
+                        continue;
+                    }
                     assert( co );
                     if( all || co->active() )
                         vals.push_back( co->infoNoauth() );
@@ -330,19 +329,21 @@ namespace mongo {
                         log = true;
                     }
                 }
+                catch ( UserException& ue ) {
+                    tlog(3) << " Caught Assertion in " << opToString(op) << ", continuing " << ue.toString() << endl;
+                    ss << " exception " << ue.toString();
+                }
                 catch ( AssertionException& e ) {
-                    static int n;
-                    tlog(3) << " Caught Assertion in " << opToString(op) << ", continuing" << endl;
-                    ss << " exception " + e.toString();
-                    log = ++n < 10;
+                    tlog(3) << " Caught Assertion in " << opToString(op) << ", continuing " << e.toString() << endl;
+                    ss << " exception " << e.toString();
+                    log = true;
                 }
             }
         }
         currentOp.ensureStarted();
         currentOp.done();
         int ms = currentOp.totalTimeMillis();
-        
-        log = log || (logLevel >= 2 && ++ctr % 512 == 0);
+
         //DEV log = true; 
         if ( log || ms > logThreshold ) {
             if( logLevel < 3 && op == dbGetMore && strstr(ns, ".oplog.") && ms < 3000 && !log ) {
@@ -359,7 +360,7 @@ namespace mongo {
                 mongo::log(1) << "note: not profiling because recursive read lock" << endl;
             }
             else {
-                mongolock lk(true);
+                writelock lk;
                 if ( dbHolder.isLoaded( nsToDatabase( currentOp.getNS() ) , dbpath ) ){
                     Client::Context c( currentOp.getNS() );
                     profile(ss.str().c_str(), ms);
@@ -373,17 +374,25 @@ namespace mongo {
         return true;
     } /* assembleResponse() */
 
-    void killCursors(int n, long long *ids);
     void receivedKillCursors(Message& m) {
         int *x = (int *) m.singleData()->_data;
         x++; // reserved
         int n = *x++;
+
+        assert( m.dataSize() == 8 + ( 8 * n ) ); 
+
         uassert( 13004 , "sent 0 cursors to kill" , n >= 1 );
         if ( n > 2000 ) {
             log( n < 30000 ? LL_WARNING : LL_ERROR ) << "receivedKillCursors, n=" << n << endl;
             assert( n < 30000 );
         }
-        killCursors(n, (long long *) x);
+        
+        int found = ClientCursor::erase(n, (long long *) x);
+
+        if ( logLevel > 0 || found != n ){
+            log( found == n ) << "killcursors: found " << found << " of " << n << endl;
+        }
+
     }
 
     /* db - database name
@@ -428,7 +437,7 @@ namespace mongo {
         assert( d.moreJSObjs() );
         assert( query.objsize() < m.header()->dataLen() );
         BSONObj toupdate = d.nextJsObj();
-        uassert( 10055 , "update object too large", toupdate.objsize() <= MaxBSONObjectSize);
+        uassert( 10055 , "update object too large", toupdate.objsize() <= BSONObjMaxUserSize);
         assert( toupdate.objsize() < m.header()->dataLen() );
         assert( query.objsize() + toupdate.objsize() < m.header()->dataLen() );
         bool upsert = flags & UpdateOption_Upsert;
@@ -444,7 +453,7 @@ namespace mongo {
             op.setQuery(query);
         }        
 
-        mongolock lk(1);
+        writelock lk;
 
         // if this ever moves to outside of lock, need to adjust check Client::Context::_finishInit
         if ( ! broadcast && handlePossibleShardedMessage( m , 0 ) )
@@ -506,7 +515,7 @@ namespace mongo {
         QueryResult* msgdata;
         while( 1 ) {
             try {
-                mongolock lk(false);
+                readlock lk;
                 Client::Context ctx(ns);
                 msgdata = processGetMore(ns, ntoreturn, cursorid, curop, pass, exhaust);
             }
@@ -568,7 +577,15 @@ namespace mongo {
         Client::Context ctx(ns);		
         while ( d.moreJSObjs() ) {
             BSONObj js = d.nextJsObj();
-            uassert( 10059 , "object to insert too large", js.objsize() <= MaxBSONObjectSize);
+            uassert( 10059 , "object to insert too large", js.objsize() <= BSONObjMaxUserSize);
+
+            { // check no $ modifiers
+                BSONObjIterator i( js );
+                while ( i.more() ){
+                    BSONElement e = i.next();
+                    uassert( 13511 , "object to insert can't have $ mofidiers" , e.fieldName()[0] != '$' );
+                }
+            }
             theDataFileMgr.insertWithObjMod(ns, js, false);
             logOp("i", ns, js);
             globalOpCounters.gotInsert();
@@ -745,9 +762,7 @@ namespace mongo {
         ListeningSockets::get()->closeAll();
 
         log() << "shutdown: going to flush oplog..." << endl;
-        stringstream ss2;
-        flushOpLog( ss2 );
-        rawOut( ss2.str() );
+        flushDiagLog();
 
         /* must do this before unmapping mem or you may get a seg fault */
         log() << "shutdown: going to close sockets..." << endl;
@@ -770,6 +785,9 @@ namespace mongo {
 #if !defined(_WIN32) && !defined(__sunos__)
         if ( lockFile ){
             log() << "shutdown: removing fs lock..." << endl;
+            /* This ought to be an unlink(), but Eliot says the last
+               time that was attempted, there was a race condition
+               with acquirePathLock().  */
             if( ftruncate( lockFile , 0 ) ) 
                 log() << "couldn't remove fs lock " << errnoWithDescription() << endl;
             flock( lockFile, LOCK_UN );

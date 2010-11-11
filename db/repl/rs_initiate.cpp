@@ -26,6 +26,7 @@
 #include "rs.h"
 #include "rs_config.h"
 #include "../dbhelpers.h"
+#include "../oplog.h"
 
 using namespace bson;
 using namespace mongoutils;
@@ -40,7 +41,7 @@ namespace mongo {
         int failures = 0;
         int me = 0;
         for( vector<ReplSetConfig::MemberCfg>::const_iterator i = cfg.members.begin(); i != cfg.members.end(); i++ ) {
-            if( ListeningSockets::listeningOn(i->h) ) {
+            if( i->h.isSelf() ) {
                 me++;
                 if( !i->potentiallyHot() ) { 
                     uasserted(13420, "initiation and reconfiguration of a replica set must be sent to a node that can become primary");
@@ -48,7 +49,13 @@ namespace mongo {
             }
         }
         uassert(13278, "bad config - dups?", me <= 1); // dups?
-        uassert(13279, "can't find self in the replset config", me == 1);
+        if( me != 1 ) {
+            stringstream ss;
+            ss << "can't find self in the replset config";
+            if( !cmdLine.isDefaultPort() ) ss << " my port: " << cmdLine.port;
+            if( me != 0 ) ss << " found: " << me;
+            uasserted(13279, ss.str());
+        }
 
         for( vector<ReplSetConfig::MemberCfg>::const_iterator i = cfg.members.begin(); i != cfg.members.end(); i++ ) {
             BSONObj res;
@@ -114,7 +121,7 @@ namespace mongo {
             if( initial ) {
                 bool hasData = res["hasData"].Bool();
                 uassert(13311, "member " + i->h.toString() + " has data already, cannot initiate set.  All members except initiator must be empty.", 
-                    !hasData || ListeningSockets::listeningOn(i->h));
+                    !hasData || i->h.isSelf());
             }
         }
     }
@@ -214,6 +221,8 @@ namespace mongo {
 
                 log() << "replSet replSetInitiate all members seem up" << rsLog;
 
+                createOplog();
+                
                 writelock lk("");
                 bo comment = BSON( "msg" << "initiating set");
                 newConfig.saveConfigLocally(comment);

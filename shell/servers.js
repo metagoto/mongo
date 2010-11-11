@@ -29,6 +29,7 @@ createMongoArgs = function( binaryName , args ){
     if ( args.length == 1 && isObject( args[0] ) ){
         var o = args[0];
         for ( var k in o ){
+          if ( o.hasOwnProperty(k) ){
             if ( k == "v" && isNumber( o[k] ) ){
                 var n = o[k];
                 if ( n > 0 ){
@@ -43,6 +44,7 @@ createMongoArgs = function( binaryName , args ){
                 if ( o[k] != "" )
                     fullArgs.push( "" + o[k] );
             }
+          }
         }
     }
     else {
@@ -457,13 +459,15 @@ printShardingStatus = function( configDB ){
             if (db.partitioned){
                 configDB.collections.find( { _id : new RegExp( "^" + db._id + "\." ) } ).sort( { _id : 1 } ).forEach(
                     function( coll ){
-                        output("\t\t" + coll._id + " chunks:");
-                        configDB.chunks.find( { "ns" : coll._id } ).sort( { min : 1 } ).forEach( 
-                            function(chunk){
-                                output( "\t\t\t" + tojson( chunk.min ) + " -->> " + tojson( chunk.max ) + 
-                                        " on : " + chunk.shard + " " + tojson( chunk.lastmod ) );
-                            }
-                        );
+                        if ( coll.dropped == false ){
+                            output("\t\t" + coll._id + " chunks:");
+                            configDB.chunks.find( { "ns" : coll._id } ).sort( { min : 1 } ).forEach( 
+                                function(chunk){
+                                    output( "\t\t\t" + tojson( chunk.min ) + " -->> " + tojson( chunk.max ) + 
+                                            " on : " + chunk.shard + " " + tojson( chunk.lastmod ) );
+                                }
+                            );
+                        }
                     }
                 )
             }
@@ -578,6 +582,20 @@ ShardingTest.prototype.chunkCounts = function( collName , dbName ){
 
 }
 
+ShardingTest.prototype.chunkDiff = function( collName , dbName ){
+    var c = this.chunkCounts( collName , dbName );
+    var min = 100000000;
+    var max = 0;
+    for ( var s in c ){
+        if ( c[s] < min )
+            min = c[s];
+        if ( c[s] > max )
+            max = c[s];
+    }
+    print( "input: " + tojson( c ) + " min: " + min + " max: " + max  );
+    return max - min;
+}
+
 ShardingTest.prototype.shardGo = function( collName , key , split , move , dbName ){
     split = split || key;
     move = move || split;
@@ -589,16 +607,34 @@ ShardingTest.prototype.shardGo = function( collName , key , split , move , dbNam
     s.adminCommand( { split : c , middle : split } );
     s.adminCommand( { movechunk : c , find : move , to : this.getOther( s.getServer( dbName ) ).name } );
     
-}
+};
 
-MongodRunner = function( port, dbpath, peer, arbiter, extraArgs ) {
+/**
+ * Run a mongod process.
+ *
+ * After initializing a MongodRunner, you must call start() on it.
+ * @param {int} port port to run db on, use allocatePorts(num) to requision
+ * @param {string} dbpath path to use
+ * @param {boolean} peer pass in false (DEPRECATED, was used for replica pair host)
+ * @param {boolean} arbiter pass in false (DEPRECATED, was used for replica pair host)
+ * @param {array} extraArgs other arguments for the command line
+ * @param {object} options other options include no_bind to not bind_ip to 127.0.0.1
+ *    (necessary for replica set testing)
+ */
+MongodRunner = function( port, dbpath, peer, arbiter, extraArgs, options ) {
     this.port_ = port;
     this.dbpath_ = dbpath;
     this.peer_ = peer;
     this.arbiter_ = arbiter;
     this.extraArgs_ = extraArgs;
-}
+    this.options_ = options ? options : {};
+};
 
+/**
+ * Start this mongod process.
+ *
+ * @param {boolean} reuseData If the data directory should be left intact (default is to wipe it)
+ */
 MongodRunner.prototype.start = function( reuseData ) {
     var args = [];
     if ( reuseData ) {
@@ -620,8 +656,10 @@ MongodRunner.prototype.start = function( reuseData ) {
     args.push( "--nohttpinterface" );
     args.push( "--noprealloc" );
     args.push( "--smallfiles" );
-    args.push( "--bind_ip" );
-    args.push( "127.0.0.1" );
+    if (!this.options_.no_bind) {
+      args.push( "--bind_ip" );
+      args.push( "127.0.0.1" );
+    }
     if ( this.extraArgs_ ) {
         args = args.concat( this.extraArgs_ );
     }
@@ -972,8 +1010,13 @@ SyncCCTest.prototype.tempStart = function( num ){
 }
 
 
-function startParallelShell( jsCode ){
-    var x = startMongoProgramNoConnect( "mongo" , "--eval" , jsCode , db ? db.getMongo().host : null );
+function startParallelShell( jsCode, port ){
+    var x;
+    if ( port ) {
+        x = startMongoProgramNoConnect( "mongo" , "--port" , port , "--eval" , jsCode );
+    } else {
+        x = startMongoProgramNoConnect( "mongo" , "--eval" , jsCode , db ? db.getMongo().host : null );        
+    }
     return function(){
         waitProgram( x );
     };
@@ -1312,7 +1355,7 @@ ReplSetTest.prototype.awaitReplication = function() {
                var entry = log.find({}).sort({'$natural': -1}).limit(1).next();
                printjson( entry );
                var ts = entry['ts'];
-               print("TS for " + slave + " is " + ts + " and latest is " + latest);
+               print("TS for " + slave + " is " + ts.t+":"+ts.i + " and latest is " + latest.t+":"+latest.i);
                print("Oplog size for " + slave + " is " + log.count());
                synced = (synced && friendlyEqual(latest,ts))
              }

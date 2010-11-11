@@ -24,6 +24,7 @@
 #include "../util/stringutils.h"
 #include "../util/version.h"
 #include "../util/signal_handlers.h"
+#include "../util/admin_access.h"
 #include "../db/dbwebserver.h"
 
 #include "server.h"
@@ -33,6 +34,7 @@
 #include "balance.h"
 #include "grid.h"
 #include "cursors.h"
+#include "shard_version.h"
 
 namespace mongo {
     
@@ -113,7 +115,7 @@ namespace mongo {
         dbexit(EXIT_CLEAN, (string("received signal ") + BSONObjBuilder::numStr(sig)).c_str());
     }
     
-    void setupSignals(){
+    void setupSignals( bool inFork ){
         signal(SIGTERM, sighandler);
         signal(SIGINT, sighandler);
 
@@ -132,10 +134,12 @@ namespace mongo {
         serverID.init();
         setupSIGTRAPforGDB();
         setupCoreSignals();
-        setupSignals();
+        setupSignals( false );
     }
 
     void start( const MessageServer::Options& opts ){
+        setThreadName( "mongosMain" );
+        installChunkShardVersioning();
         balancer.go();
         cursorCache.startTimeoutThread();
 
@@ -297,7 +301,7 @@ int main(int argc, char* argv[], char *envp[] ) {
 
     init();
 
-    boost::thread web( webServerThread );
+    boost::thread web( boost::bind(&webServerThread, new NoAdminAccess() /* takes ownership */) );
     
     MessageServer::Options opts;
     opts.port = cmdLine.port;

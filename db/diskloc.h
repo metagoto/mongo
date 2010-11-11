@@ -71,9 +71,7 @@ namespace mongo {
             _a = -2; 
             ofs = 0;
         }
-        bool isValid() const {
-            return _a != -2;
-        }
+        bool isValid() const { return _a != -2; }
 
         string toString() const {
             if ( isNull() )
@@ -83,11 +81,9 @@ namespace mongo {
             return ss.str();
         }
 
-        BSONObj toBSONObj() const {
-            return BSON( "file" << _a << "offset" << ofs );
-        }
+        BSONObj toBSONObj() const { return BSON( "file" << _a << "offset" << ofs );  }
 
-        int a() const      { return _a; }
+        int a() const { return _a; }
 
         int& GETOFS()      { return ofs; }
         int getOfs() const { return ofs; }
@@ -127,6 +123,13 @@ namespace mongo {
             return compare(b) < 0;
         }
 
+        /**
+         * Marks this disk loc for writing
+         * @returns a non const reference to this disk loc
+         * This function explicitly signals we are writing and casts away const
+         */
+        DiskLoc& writing() const; // see dur.h
+
         /* Get the "thing" associated with this disk location.
            it is assumed the object is what you say it is -- you must assure that
            (think of this as an unchecked type cast)
@@ -136,8 +139,9 @@ namespace mongo {
         Record* rec() const;
         DeletedRecord* drec() const;
         Extent* ext() const;
-        BtreeBucket* btree() const;
-        BtreeBucket* btreemod() const; // marks modified / dirty
+        const BtreeBucket* btree() const;
+        // Explicitly signals we are writing and casts away const
+        BtreeBucket* btreemod() const;
 
         /*MongoDataFile& pdf() const;*/
     };

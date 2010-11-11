@@ -28,7 +28,7 @@
 // error codes 8010-8040
 
 namespace mongo {
-    
+
     class ShardStrategy : public Strategy {
 
         virtual void queryOp( Request& r ){
@@ -145,7 +145,10 @@ namespace mongo {
                     }
                     
                 }
-                
+
+                // Many operations benefit from having the shard key early in the object
+                o = manager->getShardKey().moveToFront(o);
+
                 bool gotThrough = false;
                 for ( int i=0; i<10; i++ ){
                     try {
@@ -175,6 +178,7 @@ namespace mongo {
             int flags = d.pullInt();
             
             BSONObj query = d.nextJsObj();
+            uassert( 13506 ,  "$atomic not supported sharded" , query["$atomic"].eoo() );
             uassert( 10201 ,  "invalid update" , d.moreJSObjs() );
             BSONObj toupdate = d.nextJsObj();
 
@@ -224,7 +228,7 @@ namespace mongo {
                         }
                     }
                 } else if ( manager->hasShardKey( toupdate ) ){
-                    uassert( 8014, "change would move shards!", manager->getShardKey().compare( query , toupdate ) == 0 );
+                    uassert( 8014, "cannot modify shard key", manager->getShardKey().compare( query , toupdate ) == 0 );
                 } else {
                     uasserted(12376, "shard key must be in update object");
                 }
@@ -269,6 +273,7 @@ namespace mongo {
             
             uassert( 10203 ,  "bad delete message" , d.moreJSObjs() );
             BSONObj pattern = d.nextJsObj();
+            uassert( 13505 ,  "$atomic not supported sharded" , pattern["$atomic"].eoo() );
 
             set<Shard> shards;
             int left = 5;

@@ -41,7 +41,7 @@ namespace mongo {
         bool ok() const { return _ok; }
 
         struct MemberCfg {
-            MemberCfg() : _id(-1), votes(1), priority(1.0), arbiterOnly(false), slaveDelay(0), hidden(false) { }
+            MemberCfg() : _id(-1), votes(1), priority(1.0), arbiterOnly(false), slaveDelay(0), hidden(false), buildIndexes(true) { }
             int _id;              /* ordinal */
             unsigned votes;       /* how many votes this node gets. default 1. */
             HostAndPort h;
@@ -49,15 +49,16 @@ namespace mongo {
             bool arbiterOnly;
             int slaveDelay;       /* seconds.  int rather than unsigned for convenient to/front bson conversion. */
             bool hidden;          /* if set, don't advertise to drives in isMaster. for non-primaries (priority 0) */
+            bool buildIndexes;    /* if false, do not create any non-_id indexes */
+            set<string> tags;     /* tagging for data center, rack, etc. */
 
             void check() const;   /* check validity, assert if not. */
             BSONObj asBson() const;
-            bool potentiallyHot() const { 
-                return !arbiterOnly && priority > 0;
-            }
+            bool potentiallyHot() const { return !arbiterOnly && priority > 0; }
             bool operator==(const MemberCfg& r) const { 
                 return _id==r._id && votes == r.votes && h == r.h && priority == r.priority && 
-                    arbiterOnly == r.arbiterOnly && slaveDelay == r.slaveDelay && hidden == r.hidden;
+                    arbiterOnly == r.arbiterOnly && slaveDelay == r.slaveDelay && hidden == r.hidden &&
+                    buildIndexes == buildIndexes;
             }
             bool operator!=(const MemberCfg& r) const { return !(*this == r); }
         };

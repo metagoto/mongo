@@ -26,19 +26,6 @@ namespace mongo {
 
 //    void jniCallback(Message& m, Message& out);
 
-    /* Note the limit here is rather arbitrary and is simply a standard. generally the code works
-       with any object that fits in ram.
-
-       Also note that the server has some basic checks to enforce this limit but those checks are not exhaustive
-       for example need to check for size too big after
-         update $push (append) operation
-         various db.eval() type operations
-
-       Note also we sometimes do work with objects slightly larger - an object in the replication local.oplog
-       could be slightly larger.
-    */
-    const int MaxBSONObjectSize = 4 * 1024 * 1024;
-    
     /**
      * class to hold path + dbname -> Database
      * might be able to optimizer further
@@ -48,8 +35,7 @@ namespace mongo {
         typedef map<string,Database*> DBs;
         typedef map<string,DBs> Paths;
 
-        DatabaseHolder() : _size(0){
-        }
+        DatabaseHolder() : _size(0) { }
 
         bool isLoaded( const string& ns , const string& path ) const {
             dbMutex.assertAtLeastReadLocked();
@@ -88,32 +74,7 @@ namespace mongo {
             d = db;
         }
         
-        Database* getOrCreate( const string& ns , const string& path , bool& justCreated ){
-            dbMutex.assertWriteLocked();
-            DBs& m = _paths[path];
-            
-            string dbname = _todb( ns );
-
-            Database* & db = m[dbname];
-            if ( db ){
-                justCreated = false;
-                return db;
-            }
-            
-            log(1) << "Accessing: " << dbname << " for the first time" << endl;
-            try {
-                db = new Database( dbname.c_str() , justCreated , path );
-            }
-            catch ( ... ){
-                m.erase( dbname );
-                throw;
-            }
-            _size++;
-            return db;
-        }
-        
-
-
+        Database* getOrCreate( const string& ns , const string& path , bool& justCreated );
 
         void erase( const string& ns , const string& path ){
             dbMutex.assertWriteLocked();

@@ -134,7 +134,7 @@ namespace mongo {
         assert( theReplSet == 0 || !theReplSet->lockedByMe() );
 
         ScopedConn conn(memberFullName);
-        return conn->runCommand("admin", cmd, result);
+        return conn.runCommand("admin", cmd, result, 0);
     }
 
     /* poll every other set member to check its status */
@@ -144,7 +144,7 @@ namespace mongo {
     public:
         ReplSetHealthPollTask(const HostAndPort& hh, const HeartbeatInfo& mm) : h(hh), m(mm) { }
 
-        string name() { return "ReplSetHealthPollTask"; }
+        string name() const { return "ReplSetHealthPollTask"; }
         void doWork() { 
             if ( !theReplSet ) {
                 log(2) << "theReplSet not initialized yet, skipping health poll this round" << rsLog;
@@ -163,15 +163,17 @@ namespace mongo {
 
                 time_t after = mem.lastHeartbeat = time(0); // we set this on any response - we don't get this far if couldn't connect because exception is thrown
 
-                try {
-                    mem.skew = 0;
-                    long long t = info["time"].Long();
+                if ( info["time"].isNumber() ) {
+                    long long t = info["time"].numberLong();
                     if( t > after ) 
                         mem.skew = (int) (t - after);
                     else if( t < before ) 
                         mem.skew = (int) (t - before); // negative
                 }
-                catch(...) { 
+                else {
+                    // it won't be there if remote hasn't initialized yet
+                    if( info.hasElement("time") )
+                        warning() << "heatbeat.time isn't a number: " << info << endl;
                     mem.skew = INT_MIN;
                 }
 
@@ -182,7 +184,7 @@ namespace mongo {
                 }
                 if( ok ) {
                     if( mem.upSince == 0 ) {
-                        log() << "replSet info " << h.toString() << " is now up" << rsLog;
+                        log() << "replSet info " << h.toString() << " is up" << rsLog;
                         mem.upSince = mem.lastHeartbeat;
                     }
                     mem.health = 1.0;
@@ -202,8 +204,11 @@ namespace mongo {
                     down(mem, info.getStringField("errmsg"));
                 }
             }
-            catch(...) { 
-                down(mem, "connect/transport error");             
+            catch(DBException& e) {
+                down(mem, e.what());
+            }
+            catch(...) {
+                down(mem, "something unusual went wrong");
             }
             m = mem;
 
@@ -228,7 +233,7 @@ namespace mongo {
             if( mem.upSince || mem.downSince == 0 ) {
                 mem.upSince = 0;
                 mem.downSince = jsTime();
-                log() << "replSet info " << h.toString() << " is now down (or slow to respond)" << rsLog;
+                log() << "replSet info " << h.toString() << " is down (or slow to respond): " << msg << rsLog;
             }
             mem.lastHeartbeatMsg = msg;
         }

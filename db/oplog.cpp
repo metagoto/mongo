@@ -22,6 +22,7 @@
 #include "repl.h"
 #include "commands.h"
 #include "repl/rs.h"
+#include "stats/counters.h"
 
 namespace mongo {
 
@@ -238,17 +239,20 @@ namespace mongo {
             r = theDataFileMgr.fast_oplog_insert( nsdetails( logNS ), logNS, len);
         }
 
-        char *p = r->data;
-        memcpy(p, partial.objdata(), posz);
-        *((unsigned *)p) += obj.objsize() + 1 + 2;
-        p += posz - 1;
-        *p++ = (char) Object;
-        *p++ = 'o';
-        *p++ = 0;
-        memcpy(p, obj.objdata(), obj.objsize());
-        p += obj.objsize();
-        *p = EOO;
-        
+        {
+            const int size2 = obj.objsize() + 1 + 2;
+            char *p = (char *) dur::writingPtr(r->data, size2+posz);
+            memcpy(p, partial.objdata(), posz);
+            *((unsigned *)p) += size2;
+            p += posz - 1;
+            *p++ = (char) Object;
+            *p++ = 'o'; // { o : ... }
+            *p++ = 0;
+            memcpy(p, obj.objdata(), obj.objsize());
+            p += obj.objsize();
+            *p = EOO;
+        }
+
         context.getClient()->setLastOp( ts.asDate() );
 
         if ( logLevel >= 6 ) {
@@ -356,7 +360,7 @@ namespace mongo {
         }
 
         log() << "******" << endl;
-        log() << "creating replication oplog of size: " << (int)( sz / ( 1024 * 1024 ) ) << "MB... (use --oplogSize to change)" << endl;
+        log() << "creating replication oplog of size: " << (int)( sz / ( 1024 * 1024 ) ) << "MB..." << endl;
 
         b.append("size", sz);
         b.appendBool("capped", 1);
@@ -466,7 +470,9 @@ namespace mongo {
         }
     }
 
-    void applyOperation_inlock(const BSONObj& op){
+    void applyOperation_inlock(const BSONObj& op , bool fromRepl ){
+        OpCounters * opCounters = fromRepl ? &replOpCounters : &globalOpCounters;
+
         if( logLevel >= 6 ) 
             log() << "applying op: " << op << endl;
         
@@ -479,6 +485,8 @@ namespace mongo {
         const char *opType = op.getStringField("op");
 
         if ( *opType == 'i' ) {
+            opCounters->gotInsert();
+
             const char *p = strchr(ns, '.');
             if ( p && strcmp(p, ".system.indexes") == 0 ) {
                 // updates aren't allowed for indexes -- so we will do a regular insert. if index already
@@ -511,10 +519,14 @@ namespace mongo {
             }
         }
         else if ( *opType == 'u' ) {
+            opCounters->gotUpdate();
+            
             RARELY ensureHaveIdIndex(ns); // otherwise updates will be super slow
             updateObjects(ns, o, op.getObjectField("o2"), /*upsert*/ op.getBoolField("b"), /*multi*/ false, /*logop*/ false , debug );
         }
         else if ( *opType == 'd' ) {
+            opCounters->gotDelete();
+
             if ( opType[1] == 0 )
                 deleteObjects(ns, o, op.getBoolField("b"));
             else
@@ -524,6 +536,8 @@ namespace mongo {
             // no op
         }
         else if ( *opType == 'c' ){
+            opCounters->gotCommand();
+
             BufBuilder bb;
             BSONObjBuilder ob;
             _runCommands(ns, o, bb, ob, true, 0);
@@ -587,7 +601,7 @@ namespace mongo {
             BSONObjIterator i( ops );
             while ( i.more() ){
                 BSONElement e = i.next();
-                applyOperation_inlock( e.Obj() );
+                applyOperation_inlock( e.Obj() , false );
                 num++;
             }
 

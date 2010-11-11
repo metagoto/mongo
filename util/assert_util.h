@@ -27,51 +27,6 @@ namespace mongo {
         StaleConfigInContextCode = 13388
     };
 
-	/* these are manipulated outside of mutexes, so be careful */
-    struct Assertion {
-        Assertion() {
-            msg[0] = msg[127] = 0;
-            context[0] = context[127] = 0;
-            file = "";
-            line = 0;
-            when = 0;
-        }
-    private:
-        static mongo::mutex *_mutex;
-        char msg[128];
-        char context[128];
-        const char *file;
-        unsigned line;
-        time_t when;
-    public:
-        void set(const char *m, const char *ctxt, const char *f, unsigned l) {
-            if( _mutex == 0 ) {
-                /* asserted during global variable initialization */
-                return;
-            }
-            scoped_lock lk(*_mutex);
-            strncpy(msg, m, 127);
-            strncpy(context, ctxt, 127);
-            file = f;
-            line = l;
-            when = time(0);
-        }
-        std::string toString();
-        bool isSet() {
-            return when != 0;
-        }
-    };
-
-    enum {
-        AssertRegular = 0,
-        AssertW = 1,
-        AssertMsg = 2,
-        AssertUser = 3
-    };
-
-    /* last assert of diff types: regular, wassert, msgassert, uassert: */
-    extern Assertion lastAssert[4];
-
     class AssertionCount {
     public:
         AssertionCount();
@@ -95,14 +50,10 @@ namespace mongo {
         ExceptionInfo( const string& m , int c )
             : msg( m ) , code( c ){
         }
-
-        void append( BSONObjBuilder& b , const char * m = "$err" , const char * c = "code" ) const ;
-        
+        void append( BSONObjBuilder& b , const char * m = "$err" , const char * c = "code" ) const ;        
         string toString() const { stringstream ss; ss << "exception: " << code << " " << msg; return ss.str(); }
-
         bool empty() const { return msg.empty(); }
                 
-
         string msg;
         int code;
     };
@@ -172,6 +123,7 @@ namespace mongo {
     inline void uasserted(int msgid , string msg) { uasserted(msgid, msg.c_str()); }
     void uassert_nothrow(const char *msg); // reported via lasterror, but don't throw exception
     void msgassertedNoTrace(int msgid, const char *msg);
+    inline void msgassertedNoTrace(int msgid, const string& msg) { msgassertedNoTrace( msgid , msg.c_str() ); }
     void msgasserted(int msgid, const char *msg);
     inline void msgasserted(int msgid, string msg) { msgasserted(msgid, msg.c_str()); }
 

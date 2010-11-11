@@ -197,6 +197,30 @@ namespace mongo {
             if ( _connectCallback )
                 _connectCallback( c );
         }
+
+        // engine implementation may either respond to interrupt events or
+        // poll for interrupts
+        
+        // the interrupt functions must not wait indefinitely on a lock
+        virtual void interrupt( unsigned opSpec ) {}
+        virtual void interruptAll() {}
+        
+        static void setGetInterruptSpecCallback( unsigned ( *func )() ) { _getInterruptSpecCallback = func; }
+        static bool haveGetInterruptSpecCallback() { return _getInterruptSpecCallback; }
+        static unsigned getInterruptSpec() {
+            massert( 13474, "no _getInterruptSpecCallback", _getInterruptSpecCallback );
+            return _getInterruptSpecCallback();
+        }
+        
+        static void setCheckInterruptCallback( const char * ( *func )() ) { _checkInterruptCallback = func; }
+        static bool haveCheckInterruptCallback() { return _checkInterruptCallback; }
+        static const char * checkInterrupt() {
+            return _checkInterruptCallback ? _checkInterruptCallback() : "";
+        }
+        static bool interrupted() {
+            const char *r = checkInterrupt();
+            return r && r[ 0 ];
+        }
         
     protected:
         virtual Scope * createScope() = 0;
@@ -204,6 +228,8 @@ namespace mongo {
     private:
         void ( *_scopeInitCallback )( Scope & );
         static void ( *_connectCallback )( DBClientWithCommands & );
+        static const char * ( *_checkInterruptCallback )();
+        static unsigned ( *_getInterruptSpecCallback )();
     };
 
     bool hasJSReturn( const string& s );

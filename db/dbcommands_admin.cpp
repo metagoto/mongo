@@ -25,11 +25,11 @@
 #include "pch.h"
 #include "jsobj.h"
 #include "pdfile.h"
-#include "namespace.h"
+#include "namespace-inl.h"
 #include "commands.h"
 #include "cmdline.h"
 #include "btree.h"
-#include "curop.h"
+#include "curop-inl.h"
 #include "../util/background.h"
 #include "../scripting/engine.h"
 
@@ -128,7 +128,7 @@ namespace mongo {
                 ss << " extent asserted ";
             }
 
-            ss << "  datasize?:" << d->datasize << " nrecords?:" << d->nrecords << " lastExtentSize:" << d->lastExtentSize << '\n';
+            ss << "  datasize?:" << d->stats.datasize << " nrecords?:" << d->stats.nrecords << " lastExtentSize:" << d->lastExtentSize << '\n';
             ss << "  padding:" << d->paddingFactor << '\n';
             try {
 
@@ -175,7 +175,7 @@ namespace mongo {
                         else ss << " (OK)";
                         ss << '\n';
                     }
-                    ss << "  " << n << " objects found, nobj:" << d->nrecords << '\n';
+                    ss << "  " << n << " objects found, nobj:" << d->stats.nrecords << '\n';
                     ss << "  " << len << " bytes data w/headers\n";
                     ss << "  " << nlen << " bytes data wout/headers\n";
                 }
@@ -316,8 +316,7 @@ namespace mongo {
             }
         public:
             bool& _ready;
-            LockDBJob(bool& ready) : _ready(ready) {
-                deleteSelf = true;
+            LockDBJob(bool& ready) : BackgroundJob( true /* delete self */ ), _ready(ready){
                 _ready = false;
             }
         };

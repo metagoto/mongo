@@ -43,6 +43,7 @@ namespace mongo {
     class Member : public List1<Member>::Base {
     public:
         Member(HostAndPort h, unsigned ord, const ReplSetConfig::MemberCfg *c, bool self);
+
         string fullName() const { return h().toString(); }
         const ReplSetConfig::MemberCfg& config() const { return _config; }
         const HeartbeatInfo& hbinfo() const { return _hbinfo; }
@@ -51,10 +52,12 @@ namespace mongo {
         MemberState state() const { return _hbinfo.hbstate; }
         const HostAndPort& h() const { return _h; }
         unsigned id() const { return _hbinfo.id(); }
+
         bool potentiallyHot() const { return _config.potentiallyHot(); } // not arbiter, not priority 0
         void summarizeMember(stringstream& s) const;
-        friend class ReplSetImpl;
+
     private:
+        friend class ReplSetImpl;
         const ReplSetConfig::MemberCfg _config;
         const HostAndPort _h;
         HeartbeatInfo _hbinfo;
@@ -75,7 +78,7 @@ namespace mongo {
         virtual void starting();
     public:
         Manager(ReplSetImpl *rs);
-        ~Manager();
+        virtual ~Manager();
         void msgReceivedNewConfig(BSONObj);
         void msgCheckNewState();
     };
@@ -260,11 +263,14 @@ namespace mongo {
         void relinquish();
         void forgetPrimary();
     protected:
-        bool _stepDown();
+        bool _stepDown(int secs);
+        bool _freeze(int secs);
     private:
         void assumePrimary();
         void loadLastOpTimeWritten();
         void changeState(MemberState s);
+        const Member* getMemberToSyncTo();
+        void _changeArbiterState();
     protected:
         // "heartbeat message"
         // sent in requestHeartbeat respond in field "hbm" 
@@ -306,8 +312,10 @@ namespace mongo {
         bool iAmArbiterOnly() const { return myConfig().arbiterOnly; }
         bool iAmPotentiallyHot() const { return myConfig().potentiallyHot(); }
     protected:
-        Member *_self;        
-    private:
+        Member *_self;     
+        bool _buildIndexes;       // = _self->config().buildIndexes
+        void setSelfTo(Member *); // use this as it sets buildIndexes var
+   private:
         List1<Member> _members; /* all members of the set EXCEPT self. */
 
     public:
@@ -330,7 +338,7 @@ namespace mongo {
 
     private:
         /* pulling data from primary related - see rs_sync.cpp */
-        bool initialSyncOplogApplication(string hn, const Member *primary, OpTime applyGTE, OpTime minValid);
+        bool initialSyncOplogApplication(const Member *primary, OpTime applyGTE, OpTime minValid);
         void _syncDoInitialSync();
         void syncDoInitialSync();
         void _syncThread();
@@ -348,12 +356,18 @@ namespace mongo {
     public:
         ReplSet(ReplSetCmdline& replSetCmdline) : ReplSetImpl(replSetCmdline) {  }
 
-        bool stepDown() { return _stepDown(); }
+        // for the replSetStepDown command
+        bool stepDown(int secs) { return _stepDown(secs); }
+
+        // for the replSetFreeze command
+        bool freeze(int secs) { return _freeze(secs); }
 
         string selfFullName() { 
             lock lk(this);
             return _self->fullName();
         }
+
+        bool buildIndexes() const { return _buildIndexes; }
 
         /* call after constructing to start - returns fairly quickly after la[unching its threads */
         void go() { _go(); }

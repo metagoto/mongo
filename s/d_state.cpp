@@ -76,7 +76,12 @@ namespace mongo {
         uasserted( 13298 , ss.str() );
     }
     
-    void ShardingState::gotShardHost( const string& host ){
+    void ShardingState::gotShardHost( string host ){
+        
+        size_t slash = host.find( '/' );
+        if ( slash != string::npos )
+            host = host.substr( 0 , slash );
+
         if ( _shardHost.size() == 0 ){
             _shardHost = host;
             return;
@@ -147,9 +152,10 @@ namespace mongo {
         
         if ( ! ShardedConnectionInfo::get( false ) )
             return ChunkMatcherPtr();
-
+        
         ConfigVersion version;
-        {
+        { 
+            // check cache
             scoped_lock lk( _mutex );
             version = _versions[ns];
             
@@ -157,18 +163,15 @@ namespace mongo {
                 return ChunkMatcherPtr();
             
             ChunkMatcherPtr p = _chunks[ns];
-            if ( p && p->_version >= version )
+            if ( p && p->_version >= version ){
+                // our cached version is good, so just return
                 return p;                
+            }
         }
 
-        BSONObj q;
-        {
-            BSONObjBuilder b;
-            b.append( "ns" , ns.c_str() );
-            b.append( "shard" , BSON( "$in" << BSON_ARRAY( _shardHost << _shardName ) ) );
-            q = b.obj();
-        }
-
+        // have to get a connection to the config db
+        // special case if i'm the configdb since i'm locked and if i connect to myself
+        // its a deadlock
         auto_ptr<ScopedDbConnection> scoped;
         auto_ptr<DBDirectClient> direct;
         
@@ -183,37 +186,52 @@ namespace mongo {
             conn = scoped->get();
         }
 
+        // actually query all the chunks for 'ns' that live in this shard
+        // sorting so we can efficiently bucket them
+        BSONObj q;
+        {
+            BSONObjBuilder b;
+            b.append( "ns" , ns.c_str() );
+            b.append( "shard" , BSON( "$in" << BSON_ARRAY( _shardHost << _shardName ) ) );
+            q = b.obj();
+        }
         auto_ptr<DBClientCursor> cursor = conn->query( "config.chunks" , Query(q).sort( "min" ) );
+
         assert( cursor.get() );
         if ( ! cursor->more() ){
+            // TODO: should we update the local version or cache this result?
             if ( scoped.get() )
                 scoped->done();
             return ChunkMatcherPtr();
         }
         
         ChunkMatcherPtr p( new ChunkMatcher( version ) );
-        
+
+        // coallesce the chunk's bounds in ranges if there are adjacent chunks 
         BSONObj min,max;
         while ( cursor->more() ){
             BSONObj d = cursor->next();
             
+            // first chunk
             if ( min.isEmpty() ){
                 min = d["min"].Obj().getOwned();
                 max = d["max"].Obj().getOwned();
                 continue;
             }
 
+            // chunk is adjacent to last chunk
             if ( max == d["min"].Obj() ){
                 max = d["max"].Obj().getOwned();
                 continue;
             }
 
-            p->gotRange( min.getOwned() , max.getOwned() );
+            // discontinuity; register range and reset min/max
+            p->addRange( min.getOwned() , max.getOwned() );
             min = d["min"].Obj().getOwned();
             max = d["max"].Obj().getOwned();
         }
         assert( ! min.isEmpty() );
-        p->gotRange( min.getOwned() , max.getOwned() );
+        p->addRange( min.getOwned() , max.getOwned() );
         
         if ( scoped.get() )
             scoped->done();
@@ -235,7 +253,7 @@ namespace mongo {
     boost::thread_specific_ptr<ShardedConnectionInfo> ShardedConnectionInfo::_tl;
 
     ShardedConnectionInfo::ShardedConnectionInfo(){
-        _forceMode = false;
+        _forceVersionOk = false;
         _id.clear();
     }
     
@@ -337,11 +355,6 @@ namespace mongo {
  
         bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
 
-            // Debugging code for SERVER-1633. Commands have already a coarser timer for
-            // normal operation.
-            Timer timer;
-            vector<int> laps;
-
             lastError.disableForCommand();
             ShardedConnectionInfo* info = ShardedConnectionInfo::get( true );
 
@@ -371,9 +384,6 @@ namespace mongo {
                 }
             }
 
-            // SERVER-1633
-            laps.push_back( timer.millis() );
-            
             if ( cmdObj["shard"].type() == String ){
                 shardingState.gotShardName( cmdObj["shard"].String() );
                 shardingState.gotShardHost( cmdObj["shardHost"].String() );
@@ -397,9 +407,6 @@ namespace mongo {
                 }
             }
 
-            // SERVER-1633
-            laps.push_back( timer.millis() );
-            
             unsigned long long version = extractVersion( cmdObj["version"] , errmsg );
 
             if ( errmsg.size() ){
@@ -426,9 +433,6 @@ namespace mongo {
                 return 1;
             }
 
-            // SERVER-1633
-            laps.push_back( timer.millis() );
-
             if ( version == 0 && globalVersion > 0 ){
                 if ( ! authoritative ){
                     result.appendBool( "need_authoritative" , true );
@@ -454,9 +458,6 @@ namespace mongo {
                 return false;
             }
             
-            // SERVER-1633
-            laps.push_back( timer.millis() );
-
             if ( version < globalVersion ){
                 while ( shardingState.inCriticalMigrateSection() ){
                     dbtemprelease r;
@@ -477,9 +478,6 @@ namespace mongo {
                 return false;
             }
 
-            // SERVER-1633
-            laps.push_back( timer.millis() );
-
             {
                 dbtemprelease unlock;
                 shardingState.getChunkMatcher( ns );
@@ -489,20 +487,11 @@ namespace mongo {
             oldVersion = version;
             globalVersion = version;
 
-            // SERVER-1633
-            ostringstream lapString;
-            lapString << name /* command name */ << " partials: " ;
-            for (size_t i = 1; i<laps.size(); ++i){ 
-                lapString << (laps[i] - laps[i-1]) / 1000 << " ";
-            }
-            lapString << endl;
-            logIfSlow( timer, lapString.str() );
-
             result.append( "ok" , 1 );
             return 1;
         }
         
-    } setShardVersion;
+    } setShardVersionCmd;
     
     class GetShardVersion : public MongodShardCommand {
     public:
@@ -566,7 +555,7 @@ namespace mongo {
             return true;
         }
         
-        if ( info->inForceMode() ){
+        if ( info->inForceVersionOkMode() ){
             return true;
         }
 
@@ -610,12 +599,10 @@ namespace mongo {
 
     // --- ChunkMatcher ---
 
-    ChunkMatcher::ChunkMatcher( ConfigVersion version )
-        : _version( version ){
+    ChunkMatcher::ChunkMatcher( ConfigVersion version ) : _version( version ) {}
 
-    }
-
-    void ChunkMatcher::gotRange( const BSONObj& min , const BSONObj& max ){
+    void ChunkMatcher::addRange( const BSONObj& min , const BSONObj& max ){
+        // get the key pattern if it hasn't yet
         if (_key.isEmpty()){
             BSONObjBuilder b;
 
@@ -639,7 +626,7 @@ namespace mongo {
         
         BSONObj x = loc.obj().extractFields(_key);
         
-        MyMap::const_iterator a = _map.upper_bound( x );
+        RangeMap::const_iterator a = _map.upper_bound( x );
         if ( a != _map.begin() )
             a--;
         

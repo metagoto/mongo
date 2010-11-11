@@ -221,6 +221,12 @@ namespace mongo {
         void help(stringstream&h) const { h << "resync (from scratch) an out of date replica slave.\nhttp://www.mongodb.org/display/DOCS/Master+Slave"; }
         CmdResync() : Command("resync") { }
         virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            if( cmdLine.usingReplSets() ) { 
+                errmsg = "resync command not currently supported with replica sets.  See RS102 info in the mongodb documentations";
+                result.append("info", "http://www.mongodb.org/display/DOCS/Resyncing+a+Very+Stale+Replica+Set+Member");
+                return false;
+            }
+
             if ( cmdObj.getBoolField( "force" ) ) {
                 if ( !waitForSyncToFinish( errmsg ) )
                     return false;
@@ -262,9 +268,22 @@ namespace mongo {
         return replPair || replSettings.slave || replSettings.master;
     }
 
-    bool replAuthenticate(DBClientConnection *conn);
+    bool replAuthenticate(DBClientBase *conn);
     
     void appendReplicationInfo( BSONObjBuilder& result , bool authed , int level ){
+
+        if ( replSet ) {
+            if( theReplSet == 0 ) { 
+                result.append("ismaster", false);
+                result.append("secondary", false);
+                result.append("info", ReplSet::startupStatusMsg);
+                result.append( "isreplicaset" , true );
+                return;
+            }
+            
+            theReplSet->fillIsMaster(result);
+            return;
+        }
         
         if ( replAllDead ) {
             result.append("ismaster", 0);
@@ -316,6 +335,7 @@ namespace mongo {
                 
                 if ( level > 1 ){
                     dbtemprelease unlock;
+                    // note: there is no so-style timeout on this connection; perhaps we should have one.
                     ScopedDbConnection conn( s["host"].valuestr() );
                     DBClientConnection *cliConn = dynamic_cast< DBClientConnection* >( &conn.conn() );
                     if ( cliConn && replAuthenticate( cliConn ) ) {
@@ -355,21 +375,10 @@ namespace mongo {
 			   we allow unauthenticated ismaster but we aren't as verbose informationally if 
 			   one is not authenticated for admin db to be safe.
 			*/
-
-            if( replSet ) {
-                if( theReplSet == 0 ) { 
-                    result.append("ismaster", false);
-                    result.append("secondary", false);
-                    errmsg = "replSet still trying to initialize";
-                    result.append("info", ReplSet::startupStatusMsg);
-                    return true;
-                }
-                theReplSet->fillIsMaster(result);
-                return true;
-            }
-            
-			bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
+            bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
             appendReplicationInfo( result , authed );
+
+            result.appendNumber("maxBsonObjectSize", BSONObjMaxUserSize);
             return true;
         }
     } cmdismaster;
@@ -663,6 +672,8 @@ namespace mongo {
                 ReplSource tmp(c->current());
                 if ( tmp.hostName != cmdLine.source ) {
                     log() << "repl: --source " << cmdLine.source << " != " << tmp.hostName << " from local.sources collection" << endl;
+                    log() << "repl: for instructions on changing this slave's source, see:" << endl;
+                    log() << "http://dochub.mongodb.org/core/masterslave" << endl;
                     log() << "repl: terminating mongod after 30 seconds" << endl;
                     sleepsecs(30);
                     dbexit( EXIT_REPLICATION_ERROR );
@@ -1393,7 +1404,7 @@ namespace mongo {
 
 	BSONObj userReplQuery = fromjson("{\"user\":\"repl\"}");
     
-	bool replAuthenticate(DBClientConnection *conn) {
+	bool replAuthenticate(DBClientBase *conn) {
 		if( ! cc().isAdmin() ){
 			log() << "replauthenticate: requires admin permissions, failing\n";
 			return false;
@@ -1741,7 +1752,6 @@ namespace mongo {
                 log() << "ERROR: can't use --slave or --master replication options with --replSet" << endl;
                 log() << "***" << endl;
             }
-            createOplog();
             newRepl();
             return;
         }

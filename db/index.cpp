@@ -17,11 +17,12 @@
 */
 
 #include "pch.h"
-#include "namespace.h"
+#include "namespace-inl.h"
 #include "index.h"
 #include "btree.h"
 #include "query.h"
 #include "background.h"
+#include "repl/rs.h"
 
 namespace mongo {
 
@@ -62,27 +63,32 @@ namespace mongo {
     */
     void IndexDetails::kill_idx() {
         string ns = indexNamespace(); // e.g. foo.coll.$ts_1
+        try {
 
-        string pns = parentNS(); // note we need a copy, as parentNS() won't work after the drop() below 
+            string pns = parentNS(); // note we need a copy, as parentNS() won't work after the drop() below 
         
-        // clean up parent namespace index cache
-        NamespaceDetailsTransient::get_w( pns.c_str() ).deletedIndex();
+            // clean up parent namespace index cache
+            NamespaceDetailsTransient::get_w( pns.c_str() ).deletedIndex();
 
-        string name = indexName();
+            string name = indexName();
 
-        /* important to catch exception here so we can finish cleanup below. */
-        try { 
-            btreeStore->drop(ns.c_str());
+            /* important to catch exception here so we can finish cleanup below. */
+            try { 
+                dropNS(ns.c_str());
+            }
+            catch(DBException& ) { 
+                log(2) << "IndexDetails::kill(): couldn't drop ns " << ns << endl;
+            }
+            head.setInvalid();
+            info.setInvalid();
+
+            // clean up in system.indexes.  we do this last on purpose.
+            int n = removeFromSysIndexes(pns.c_str(), name.c_str());
+            wassert( n == 1 );
+            
+        } catch ( DBException &e ) {
+            log() << "exception in kill_idx: " << e << ", ns: " << ns << endl;
         }
-        catch(DBException& ) { 
-            log(2) << "IndexDetails::kill(): couldn't drop ns " << ns << endl;
-        }
-        head.setInvalid();
-        info.setInvalid();
-
-        // clean up in system.indexes.  we do this last on purpose.
-        int n = removeFromSysIndexes(pns.c_str(), name.c_str());
-        wassert( n == 1 );
     }
     
     void IndexDetails::getKeysFromObject( const BSONObj& obj, BSONObjSetDefaultOrder& keys) const {
@@ -154,12 +160,11 @@ namespace mongo {
 
        throws DBException
 
-       @return 
-         true if ok to continue.  when false we stop/fail silently (index already exists)
-         sourceNS - source NS we are indexing
-         sourceCollection - its details ptr
+       @param sourceNS - source NS we are indexing
+       @param sourceCollection - its details ptr
+       @return true if ok to continue.  when false we stop/fail silently (index already exists)
     */
-    bool prepareToBuildIndex(const BSONObj& io, bool god, string& sourceNS, NamespaceDetails *&sourceCollection) {
+    bool prepareToBuildIndex(const BSONObj& io, bool god, string& sourceNS, NamespaceDetails *&sourceCollection, BSONObj& fixedIndexObject ) {
         sourceCollection = 0;
 
         // logical name of the index.  todo: get rid of the name, we don't need it!
@@ -172,11 +177,6 @@ namespace mongo {
         uassert(10097, "bad table to index name on add index attempt", 
             cc().database()->name == nsToDatabase(sourceNS.c_str()));
 
-        /* we can't build a new index for the ns if a build is already in progress in the background - 
-           EVEN IF this is a foreground build.
-           */
-        uassert(12588, "cannot add index with a background operation in progress", 
-            !BackgroundOperation::inProgForNs(sourceNS.c_str()));
 
         BSONObj key = io.getObjectField("key");
         uassert(12524, "index key pattern too large", key.objsize() <= 2048);
@@ -222,12 +222,43 @@ namespace mongo {
             uasserted(12505,s);
         }
 
+        /* we can't build a new index for the ns if a build is already in progress in the background - 
+           EVEN IF this is a foreground build.
+           */
+        uassert(12588, "cannot add index with a background operation in progress", 
+            !BackgroundOperation::inProgForNs(sourceNS.c_str()));
+
         /* this is because we want key patterns like { _id : 1 } and { _id : <someobjid> } to 
            all be treated as the same pattern.
         */
-        if ( !god && IndexDetails::isIdIndexPattern(key) ) {
-            ensureHaveIdIndex( sourceNS.c_str() );
-            return false;
+        if ( IndexDetails::isIdIndexPattern(key) ) {
+            if( !god ) {
+                ensureHaveIdIndex( sourceNS.c_str() );
+                return false;
+            }
+        }
+        else { 
+            /* is buildIndexes:false set for this replica set member? 
+               if so we don't build any indexes except _id
+            */
+            if( theReplSet && !theReplSet->buildIndexes() ) 
+                return false;
+        }
+        
+        string pluginName = IndexPlugin::findPluginName( key );
+        IndexPlugin * plugin = pluginName.size() ? IndexPlugin::get( pluginName ) : 0;
+        
+        if ( plugin ){
+            fixedIndexObject = plugin->adjustIndexSpec( io );
+        }
+        else if ( io["v"].eoo() ) { 
+            // add "v" if it doesn't exist
+            // if it does - leave whatever value was there
+            // this is for testing and replication
+            BSONObjBuilder b( io.objsize() + 32 );
+            b.appendElements( io );
+            b.append( "v" , 0 );
+            fixedIndexObject = b.obj();
         }
 
         return true;

@@ -40,11 +40,12 @@
 #include "stats/counters.h"
 #include "background.h"
 #include "../util/version.h"
+#include "../s/d_writeback.h"
 
 namespace mongo {
 
     extern int otherTraceLevel;
-    void flushOpLog( stringstream &ss );
+    void flushDiagLog();
 
     /* reset any errors so that getlasterror comes back clean.
 
@@ -98,14 +99,17 @@ namespace mongo {
         CmdGetLastError() : Command("getLastError", false, "getlasterror") {}
         bool run(const string& dbnamne, BSONObj& _cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             LastError *le = lastError.disableForCommand();
+            
+            bool err = false;
+
             if ( le->nPrev != 1 )
-                LastError::noError.appendSelf( result );
+                err = LastError::noError.appendSelf( result , false );
             else
-                le->appendSelf( result );
+                err = le->appendSelf( result , false );
             
             Client& c = cc();
             c.appendLastOp( result );
-
+            
             BSONObj cmdObj = _cmdObj;
             { 
                 BSONObj::iterator i(_cmdObj);
@@ -122,7 +126,13 @@ namespace mongo {
                 log() << "fsync from getlasterror" << endl;
                 result.append( "fsyncFiles" , MemoryMappedFile::flushAll( true ) );
             }
-            
+
+            if ( err ){
+                // doesn't make sense to wait for replication
+                // if there was an error
+                return true;
+            }
+
             BSONElement e = cmdObj["w"];
             if ( e.isNumber() ){
                 int timeout = cmdObj["wtimeout"].numberInt();
@@ -140,7 +150,8 @@ namespace mongo {
                         result.append( "wtimeout" , true );
                         errmsg = "timed out waiting for slaves";
                         result.append( "waited" , t.millis() );
-                        return false;
+                        result.append( "err" , "timeout" );
+                        return true;
                     }
 
                     assert( sprintf( buf , "w block pass: %lld" , ++passes ) < 30 );
@@ -151,6 +162,7 @@ namespace mongo {
                 result.appendNumber( "wtime" , t.millis() );
             }
             
+            result.appendNull( "err" );
             return true;
         }
     } cmdGetLastError;
@@ -311,13 +323,27 @@ namespace mongo {
                 t.append("lockTime", tl);
                 t.append("ratio", (tt ? tl/tt : 0));
                 
-                BSONObjBuilder ttt( t.subobjStart( "currentQueue" ) );
-                int w=0, r=0;
-                Client::recommendedYieldMicros( &w , &r );
-                ttt.append( "total" , w + r );
-                ttt.append( "readers" , r );
-                ttt.append( "writers" , w );
-                ttt.done();
+                {
+                    BSONObjBuilder ttt( t.subobjStart( "currentQueue" ) );
+                    int w=0, r=0;
+                    Client::recommendedYieldMicros( &w , &r );
+                    ttt.append( "total" , w + r );
+                    ttt.append( "readers" , r );
+                    ttt.append( "writers" , w );
+                    ttt.done();
+                }
+                
+                {
+                    BSONObjBuilder ttt( t.subobjStart( "activeClients" ) );
+                    int w=0, r=0;
+                    Client::getActiveClientCount( w , r );
+                    ttt.append( "total" , w + r );
+                    ttt.append( "readers" , r );
+                    ttt.append( "writers" , w );
+                    ttt.done();
+                }
+
+                
 
                 result.append( "globalLock" , t.obj() );
             }
@@ -382,6 +408,13 @@ namespace mongo {
                 ClientCursor::appendStats( bb );
                 bb.done();
             }
+
+            {
+                BSONObjBuilder bb( result.subobjStart( "network" ) );
+                networkCounter.append( bb );
+                bb.done();
+            }
+
             
             timeBuilder.appendNumber( "after counters" , Listener::getElapsedTimeMillis() - start );            
 
@@ -389,6 +422,11 @@ namespace mongo {
                 BSONObjBuilder bb( result.subobjStart( "repl" ) );
                 appendReplicationInfo( bb , authed , cmdObj["repl"].numberInt() );
                 bb.done();
+
+                if ( ! _isMaster() ){
+                    result.append( "opcountersRepl" , replOpCounters.getObj() );
+                }
+                    
             }
 
             timeBuilder.appendNumber( "after repl" , Listener::getElapsedTimeMillis() - start );            
@@ -407,11 +445,16 @@ namespace mongo {
 
             timeBuilder.appendNumber( "after asserts" , Listener::getElapsedTimeMillis() - start );            
 
+            result.append( "writeBacksQueued" , ! writeBackManager.queuesEmpty() );
+
             if ( ! authed )
                 result.append( "note" , "run against admin for more info" );
             
-            if ( Listener::getElapsedTimeMillis() - start > 1000 )
-                result.append( "timing" , timeBuilder.obj() );
+            if ( Listener::getElapsedTimeMillis() - start > 1000 ){
+                BSONObj t = timeBuilder.obj();
+                log() << "serverStatus was very slow: " << t << endl;
+                result.append( "timing" , t );
+            }
 
             return true;
         }
@@ -457,9 +500,7 @@ namespace mongo {
         virtual LockType locktype() const { return WRITE; } 
         bool run(const string& dbname , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
             int was = _diaglog.setLevel( cmdObj.firstElement().numberInt() );
-            stringstream ss;
-            flushOpLog( ss );
-            out() << ss.str() << endl;
+            flushDiagLog();
             if ( !cmdLine.quiet )
                 tlog() << "CMD: diagLogging set to " << _diaglog.level << " from: " << was << endl;
             result.append( "was" , was );
@@ -497,6 +538,7 @@ namespace mongo {
 
         BackgroundOperation::assertNoBgOpInProgForNs(ns);
 
+        d = dur::writing(d);
         d->aboutToDeleteAnIndex();
 
         /* there may be pointers pointing at keys in the btree(s).  kill them. */
@@ -773,7 +815,7 @@ namespace mongo {
         }
         virtual LockType locktype() const { return READ; } 
         virtual void help( stringstream& help ) const { help << "list databases on this server"; }
-        CmdListDatabases() : Command("listDatabases") {}
+        CmdListDatabases() : Command("listDatabases" , true ) {}
         bool run(const string& dbname , BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
             vector< string > dbNames;
             getDatabaseNames( dbNames );
@@ -950,7 +992,7 @@ namespace mongo {
             Client::Context ctx( ns );
             NamespaceDetails *d = nsdetails(ns.c_str());
             
-            if ( ! d || d->nrecords == 0 ){
+            if ( ! d || d->stats.nrecords == 0 ){
                 result.appendNumber( "size" , 0 );
                 result.appendNumber( "numObjects" , 0 );
                 result.append( "millis" , timer.millis() );
@@ -962,8 +1004,8 @@ namespace mongo {
             shared_ptr<Cursor> c;
             if ( min.isEmpty() && max.isEmpty() ) {
                 if ( estimate ){
-                    result.appendNumber( "size" , d->datasize );
-                    result.appendNumber( "numObjects" , d->nrecords );
+                    result.appendNumber( "size" , d->stats.datasize );
+                    result.appendNumber( "numObjects" , d->stats.nrecords );
                     result.append( "millis" , timer.millis() );
                     return 1;
                 }
@@ -981,7 +1023,7 @@ namespace mongo {
                 c.reset( new BtreeCursor( d, d->idxNo(*idx), *idx, min, max, false, 1 ) );
             }
             
-            long long avgObjSize = d->datasize / d->nrecords;
+            long long avgObjSize = d->stats.datasize / d->stats.nrecords;
 
             long long maxSize = jsobj["maxSize"].numberLong();
             long long maxObjects = jsobj["maxObjects"].numberLong();
@@ -1039,9 +1081,9 @@ namespace mongo {
                     log() << "error: have index ["  << collNS << "] but no NamespaceDetails" << endl;
                     continue;
                 }
-                totalSize += mine->datasize;
+                totalSize += mine->stats.datasize;
                 if ( details )
-                    details->appendNumber( d.indexName() , mine->datasize / scale );
+                    details->appendNumber( d.indexName() , mine->stats.datasize / scale );
             }
             return totalSize;
         }
@@ -1081,10 +1123,11 @@ namespace mongo {
                 return false;
             }
 
-            long long size = nsd->datasize / scale;
-            result.appendNumber( "count" , nsd->nrecords );
+            long long size = nsd->stats.datasize / scale;
+            result.appendNumber( "count" , nsd->stats.nrecords );
             result.appendNumber( "size" , size );
-            result.append      ( "avgObjSize" , double(size) / double(nsd->nrecords) );
+            if( nsd->stats.nrecords )
+                result.append      ( "avgObjSize" , double(size) / double(nsd->stats.nrecords) );
             int numExtents;
             result.appendNumber( "storageSize" , nsd->storageSize( &numExtents ) / scale );
             result.append( "numExtents" , numExtents );
@@ -1139,8 +1182,8 @@ namespace mongo {
                 }
 
                 ncollections += 1;
-                objects += nsd->nrecords;
-                size += nsd->datasize;
+                objects += nsd->stats.nrecords;
+                size += nsd->stats.datasize;
 
                 int temp;
                 storageSize += nsd->storageSize( &temp );
@@ -1160,7 +1203,7 @@ namespace mongo {
             result.appendNumber( "indexSize" , indexSize );
             result.appendNumber( "fileSize" , d->fileSize() );
 
-                return true;
+            return true;
         }
     } cmdDBStats;
 
@@ -1187,7 +1230,7 @@ namespace mongo {
             string toNs = dbname + "." + to;
             NamespaceDetails *nsd = nsdetails( fromNs.c_str() );
             massert( 10301 ,  "source collection " + fromNs + " does not exist", nsd );
-            long long excessSize = nsd->datasize - size * 2; // datasize and extentSize can't be compared exactly, so add some padding to 'size'
+            long long excessSize = nsd->stats.datasize - size * 2; // datasize and extentSize can't be compared exactly, so add some padding to 'size'
             DiskLoc extent = nsd->firstExtent;
             for( ; excessSize > extent.ext()->length && extent != nsd->lastExtent; extent = extent.ext()->xnext ) {
                 excessSize -= extent.ext()->length;
@@ -1200,7 +1243,7 @@ namespace mongo {
             {
                 shared_ptr<Cursor> c = theDataFileMgr.findAll( fromNs.c_str(), startLoc );
                 ClientCursor *cc = new ClientCursor(0, c, fromNs.c_str());
-                id = cc->cursorid;
+                id = cc->cursorid();
             }
 
             DBDirectClient client;
@@ -1245,12 +1288,15 @@ namespace mongo {
                 return false;
             }
 
+            string shortTmpName = str::stream() << ".tmp.convertToCapped." << from;
+            string longTmpName = str::stream() << dbname << "." << shortTmpName;
+
             DBDirectClient client;
-            client.dropCollection( dbname + "." + from + ".$temp_convertToCapped" );
+            client.dropCollection( longTmpName );
 
             BSONObj info;
             if ( !client.runCommand( dbname ,
-                                    BSON( "cloneCollectionAsCapped" << from << "toCollection" << ( from + ".$temp_convertToCapped" ) << "size" << double( size ) ),
+                                    BSON( "cloneCollectionAsCapped" << from << "toCollection" << shortTmpName << "size" << double( size ) ),
                                     info ) ) {
                 errmsg = "cloneCollectionAsCapped failed: " + info.toString();
                 return false;
@@ -1262,8 +1308,8 @@ namespace mongo {
             }
 
             if ( !client.runCommand( "admin",
-                                    BSON( "renameCollection" << ( dbname + "." + from + ".$temp_convertToCapped" ) 
-                                          << "to" << ( dbname + "." + from ) ),
+                                     BSON( "renameCollection" << longTmpName <<
+                                           "to" << ( dbname + "." + from ) ),
                                     info ) ) {
                 errmsg = "renameCollection failed: " + info.toString();
                 return false;
@@ -1272,230 +1318,6 @@ namespace mongo {
             return true;
         }
     } cmdConvertToCapped;
-
-    class GroupCommand : public Command {
-    public:
-        GroupCommand() : Command("group"){}
-        virtual LockType locktype() const { return READ; } 
-        virtual bool slaveOk() const { return true; }
-        virtual bool slaveOverrideOk() { return true; }
-        virtual void help( stringstream &help ) const {
-            help << "http://www.mongodb.org/display/DOCS/Aggregation";
-        }
-
-        BSONObj getKey( const BSONObj& obj , const BSONObj& keyPattern , ScriptingFunction func , double avgSize , Scope * s ){
-            if ( func ){
-                BSONObjBuilder b( obj.objsize() + 32 );
-                b.append( "0" , obj );
-                int res = s->invoke( func , b.obj() );
-                uassert( 10041 ,  (string)"invoke failed in $keyf: " + s->getError() , res == 0 );
-                int type = s->type("return");
-                uassert( 10042 ,  "return of $key has to be an object" , type == Object );
-                return s->getObject( "return" );
-            }
-            return obj.extractFields( keyPattern , true );
-        }
-
-        bool group( string realdbname , const string& ns , const BSONObj& query , 
-                    BSONObj keyPattern , string keyFunctionCode , string reduceCode , const char * reduceScope ,
-                    BSONObj initial , string finalize ,
-                    string& errmsg , BSONObjBuilder& result ){
-
-
-            auto_ptr<Scope> s = globalScriptEngine->getPooledScope( realdbname );
-            s->localConnect( realdbname.c_str() );
-
-            if ( reduceScope )
-                s->init( reduceScope );
-
-            s->setObject( "$initial" , initial , true );
-
-            s->exec( "$reduce = " + reduceCode , "reduce setup" , false , true , true , 100 );
-            s->exec( "$arr = [];" , "reduce setup 2" , false , true , true , 100 );
-            ScriptingFunction f = s->createFunction(
-                "function(){ "
-                "  if ( $arr[n] == null ){ "
-                "    next = {}; "
-                "    Object.extend( next , $key ); "
-                "    Object.extend( next , $initial , true ); "
-                "    $arr[n] = next; "
-                "    next = null; "
-                "  } "
-                "  $reduce( obj , $arr[n] ); "
-                "}" );
-
-            ScriptingFunction keyFunction = 0;
-            if ( keyFunctionCode.size() ){
-                keyFunction = s->createFunction( keyFunctionCode.c_str() );
-            }
-
-
-            double keysize = keyPattern.objsize() * 3;
-            double keynum = 1;
-
-            map<BSONObj,int,BSONObjCmp> map;
-            list<BSONObj> blah;
-
-            shared_ptr<Cursor> cursor = bestGuessCursor(ns.c_str() , query , BSONObj() );
-
-            while ( cursor->ok() ){
-                if ( cursor->matcher() && ! cursor->matcher()->matchesCurrent( cursor.get() ) ){
-                    cursor->advance();
-                    continue;
-                }
-
-                BSONObj obj = cursor->current();
-                cursor->advance();
-
-                BSONObj key = getKey( obj , keyPattern , keyFunction , keysize / keynum , s.get() );
-                keysize += key.objsize();
-                keynum++;
-
-                int& n = map[key];
-                if ( n == 0 ){
-                    n = map.size();
-                    s->setObject( "$key" , key , true );
-
-                    uassert( 10043 ,  "group() can't handle more than 10000 unique keys" , n <= 10000 );
-                }
-
-                s->setObject( "obj" , obj , true );
-                s->setNumber( "n" , n - 1 );
-                if ( s->invoke( f , BSONObj() , 0 , true ) ){
-                    throw UserException( 9010 , (string)"reduce invoke failed: " + s->getError() );
-                }
-            }
-
-            if (!finalize.empty()){
-                s->exec( "$finalize = " + finalize , "finalize define" , false , true , true , 100 );
-                ScriptingFunction g = s->createFunction(
-                    "function(){ "
-                    "  for(var i=0; i < $arr.length; i++){ "
-                    "  var ret = $finalize($arr[i]); "
-                    "  if (ret !== undefined) "
-                    "    $arr[i] = ret; "
-                    "  } "
-                    "}" );
-                s->invoke( g , BSONObj() , 0 , true );
-            }
-            
-            result.appendArray( "retval" , s->getObject( "$arr" ) );
-            result.append( "count" , keynum - 1 );
-            result.append( "keys" , (int)(map.size()) );
-            s->exec( "$arr = [];" , "reduce setup 2" , false , true , true , 100 );
-            s->gc();
-
-            return true;
-        }
-
-        bool run(const string& dbname, BSONObj& jsobj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
-
-            /* db.$cmd.findOne( { group : <p> } ) */
-            const BSONObj& p = jsobj.firstElement().embeddedObjectUserCheck();
-
-            BSONObj q;
-            if ( p["cond"].type() == Object )
-                q = p["cond"].embeddedObject();
-            else if ( p["condition"].type() == Object )
-                q = p["condition"].embeddedObject();
-            else 
-                q = getQuery( p );
-
-            if ( p["ns"].type() != String ){
-                errmsg = "ns has to be set";
-                return false;
-            }
-            
-            string ns = dbname + "." + p["ns"].String();
-
-            BSONObj key;
-            string keyf;
-            if ( p["key"].type() == Object ){
-                key = p["key"].embeddedObjectUserCheck();
-                if ( ! p["$keyf"].eoo() ){
-                    errmsg = "can't have key and $keyf";
-                    return false;
-                }
-            }
-            else if ( p["$keyf"].type() ){
-                keyf = p["$keyf"]._asCode();
-            }
-            else {
-                // no key specified, will use entire object as key
-            }
-
-            BSONElement reduce = p["$reduce"];
-            if ( reduce.eoo() ){
-                errmsg = "$reduce has to be set";
-                return false;
-            }
-
-            BSONElement initial = p["initial"];
-            if ( initial.type() != Object ){
-                errmsg = "initial has to be an object";
-                return false;
-            }
-
-
-            string finalize;
-            if (p["finalize"].type())
-                finalize = p["finalize"]._asCode();
-
-            return group( dbname , ns , q ,
-                          key , keyf , reduce._asCode() , reduce.type() != CodeWScope ? 0 : reduce.codeWScopeScopeData() ,
-                          initial.embeddedObject() , finalize ,
-                          errmsg , result );
-        }
-
-    } cmdGroup;
-
-
-    class DistinctCommand : public Command {
-    public:
-        DistinctCommand() : Command("distinct"){}
-        virtual bool slaveOk() const { return true; }
-        virtual LockType locktype() const { return READ; } 
-        virtual void help( stringstream &help ) const {
-            help << "{ distinct : 'collection name' , key : 'a.b' , query : {} }";
-        }
-
-        bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
-            string ns = dbname + '.' + cmdObj.firstElement().valuestr();
-
-            string key = cmdObj["key"].valuestrsafe();
-            BSONObj keyPattern = BSON( key << 1 );
-
-            BSONObj query = getQuery( cmdObj );
-            
-            BSONElementSet values;
-            shared_ptr<Cursor> cursor = bestGuessCursor(ns.c_str() , query , BSONObj() );
-            scoped_ptr<ClientCursor> cc (new ClientCursor(QueryOption_NoCursorTimeout, cursor, ns));
-
-            while ( cursor->ok() ){
-                if ( !cursor->matcher() || cursor->matcher()->matchesCurrent( cursor.get() ) ){
-                    BSONObj o = cursor->current();
-                    o.getFieldsDotted( key, values );
-                }
-
-                cursor->advance();
-
-                if (!cc->yieldSometimes())
-                    break;
-            }
-
-            BSONArrayBuilder b( result.subarrayStart( "values" ) );
-            for ( BSONElementSet::iterator i = values.begin() ; i != values.end(); i++ ){
-                b.append( *i );
-            }
-            BSONObj arr = b.done();
-
-            uassert(10044,  "distinct too big, 4mb cap",
-                    (arr.objsize() + 1024) < (4 * 1024 * 1024));
-
-            return true;
-        }
-
-    } distinctCmd;
 
     /* Find and Modify an object returning either the old (default) or new value*/
     class CmdFindAndModify : public Command {
@@ -1544,9 +1366,13 @@ namespace mongo {
                 uassert(13330, "upsert mode requires query field", !origQuery.isEmpty());
                 db.update(ns, origQuery, update.embeddedObjectUserCheck(), true);
 
-                if (cmdObj["new"].trueValue()){
-                    BSONObj gle = db.getLastErrorDetailed();
+                BSONObj gle = db.getLastErrorDetailed();
+                if (gle["err"].type() == String){
+                    errmsg = gle["err"].String();
+                    return false;
+                }
 
+                if (cmdObj["new"].trueValue()){
                     BSONElement _id = gle["upserted"];
                     if (_id.eoo())
                         _id = origQuery["_id"];
@@ -1556,31 +1382,39 @@ namespace mongo {
 
             } else {
 
-                Query idQuery = QUERY( "_id" << out["_id"]);
-
                 if (cmdObj["remove"].trueValue()){
                     uassert(12515, "can't remove and update", cmdObj["update"].eoo());
-                    db.remove(ns, idQuery, 1);
+                    db.remove(ns, QUERY("_id" << out["_id"]), 1);
 
                 } else { // update
 
-                    // need to include original query for $ positional operator
-                    BSONObjBuilder b;
-                    b.append(out["_id"]);
-                    BSONObjIterator it(origQuery);
-                    while (it.more()){
-                        BSONElement e = it.next();
-                        if (strcmp(e.fieldName(), "_id"))
-                            b.append(e);
+                    BSONElement queryId = origQuery["_id"];
+                    if (queryId.eoo() || getGtLtOp(queryId) != BSONObj::Equality){
+                        // need to include original query for $ positional operator
+
+                        BSONObjBuilder b;
+                        b.append(out["_id"]);
+                        BSONObjIterator it(origQuery);
+                        while (it.more()){
+                            BSONElement e = it.next();
+                            if (strcmp(e.fieldName(), "_id"))
+                                b.append(e);
+                        }
+                        q = Query(b.obj());
                     }
-                    q = Query(b.obj());
 
                     BSONElement update = cmdObj["update"];
                     uassert(12516, "must specify remove or update", !update.eoo());
                     db.update(ns, q, update.embeddedObjectUserCheck());
 
+                    BSONObj gle = db.getLastErrorDetailed();
+                    if (gle["err"].type() == String){
+                        errmsg = gle["err"].String();
+                        return false;
+                    }
+
                     if (cmdObj["new"].trueValue())
-                        out = db.findOne(ns, idQuery, fields);
+                        out = db.findOne(ns, QUERY("_id" << out["_id"]), fields);
                 }
             }
 
@@ -1737,14 +1571,21 @@ namespace mongo {
         }
         CmdSleep() : Command("sleep") { }
         bool run(const string& ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
+            
+            
+            int secs = 100;
+            if ( cmdObj["secs"].isNumber() )
+                secs = cmdObj["secs"].numberInt();
+            
             if( cmdObj.getBoolField("w") ) { 
                 writelock lk("");
-                sleepsecs(100);
+                sleepsecs(secs);
             }
             else {
                 readlock lk("");
-                sleepsecs(100);
+                sleepsecs(secs);
             }
+
             return true;
         }
     } cmdSleep;
@@ -1827,7 +1668,6 @@ namespace mongo {
             log() << "command denied: " << cmdObj.toString() << endl;
             return false;
         }
-        
 
         if ( c->adminOnly() && ! fromRepl && dbname != "admin" ) {
             result.append( "errmsg" ,  "access denied; use admin db" );

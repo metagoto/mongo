@@ -26,7 +26,6 @@
 
 namespace mongo {
 
-    struct HostAndPort;
     const int SOCK_FAMILY_UNKNOWN_ERROR=13078;
     string getAddrInfoStrError(int code);
 
@@ -247,46 +246,55 @@ namespace mongo {
 
     string getHostNameCached();
 
-    const OID& getServerID();
-
     class ListeningSockets {
     public:
-        ListeningSockets() : _mutex("ListeningSockets"), _sockets( new set<int>() ), _ready(false) { }
+        ListeningSockets() 
+            : _mutex("ListeningSockets")
+            , _sockets( new set<int>() )
+            , _socketPaths( new set<string>() )
+        { }
         void add( int sock ){
             scoped_lock lk( _mutex );
             _sockets->insert( sock );
+        }
+        void addPath( string path ){
+            scoped_lock lk( _mutex );
+            _socketPaths->insert( path );
         }
         void remove( int sock ){
             scoped_lock lk( _mutex );
             _sockets->erase( sock );
         }
         void closeAll(){
-            set<int>* s;
+            set<int>* sockets;
+            set<string>* paths;
+
             {
                 scoped_lock lk( _mutex );
-                s = _sockets;
+                sockets = _sockets;
                 _sockets = new set<int>();
+                paths = _socketPaths;
+                _socketPaths = new set<string>();
             }
-            for ( set<int>::iterator i=s->begin(); i!=s->end(); i++ ) {
+
+            for ( set<int>::iterator i=sockets->begin(); i!=sockets->end(); i++ ) {
                 int sock = *i;
                 log() << "closing listening socket: " << sock << endl;
                 closesocket( sock );
             }            
+
+            for ( set<string>::iterator i=paths->begin(); i!=paths->end(); i++ ) {
+                string path = *i;
+                log() << "removing socket file: " << path << endl;
+                ::remove( path.c_str() );
+            }            
         }
-
-        void setReady() { _ready = true; }
-        bool isReady() { return _ready; }
-
         static ListeningSockets* get();
-
-        /* returns true if the host/port combo identifies this process instance. */
-        static bool listeningOn(const HostAndPort& addr);
     private:
         mongo::mutex _mutex;
         set<int>* _sockets;
+        set<string>* _socketPaths; // for unix domain sockets
         static ListeningSockets* _instance;
-
-        volatile bool _ready;
     };
 
 } // namespace mongo

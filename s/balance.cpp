@@ -54,27 +54,28 @@ namespace mongo {
         
             const BSONObj& chunkToMove = chunkInfo.chunk;
             ChunkPtr c = cm->findChunk( chunkToMove["min"].Obj() );
-            if ( c->getMin().woCompare( chunkToMove["min"].Obj() ) ){
+            if ( c->getMin().woCompare( chunkToMove["min"].Obj() ) || c->getMax().woCompare( chunkToMove["max"].Obj() ) ) {
                 // likely a split happened somewhere
-                cm = cfg->getChunkManager( chunkInfo.ns , true );
+                cm = cfg->getChunkManager( chunkInfo.ns , true /* reload */);
                 assert( cm );
 
                 c = cm->findChunk( chunkToMove["min"].Obj() );
-                if ( c->getMin().woCompare( chunkToMove["min"].Obj() ) ){
+                if ( c->getMin().woCompare( chunkToMove["min"].Obj() ) || c->getMax().woCompare( chunkToMove["max"].Obj() ) ) {
                     log() << "chunk mismatch after reload, ignoring will retry issue cm: " 
                           << c->getMin() << " min: " << chunkToMove["min"].Obj() << endl;
                     continue;
                 }
             }
         
-            string errmsg;
-            if ( c->moveAndCommit( Shard::make( chunkInfo.to ) , errmsg ) ){
+            BSONObj res;
+            if ( c->moveAndCommit( Shard::make( chunkInfo.to ) , res ) ){
                 movedCount++;
                 continue;
             }
 
-            log() << "MOVE FAILED **** " << errmsg << "\n"
-                  << "           from: " << chunkInfo.from << " to: " << chunkInfo.to << " chunk: " << chunkToMove << endl;
+            // the move requires acquiring the collection metadata's lock, which can fail
+            log() << "balacer move failed: " << res << " from: " << chunkInfo.from << " to: " << chunkInfo.to 
+                  << " chunk: " << chunkToMove << endl;
         }
 
         return movedCount;
@@ -178,8 +179,10 @@ namespace mongo {
             ShardStatus status = s.getStatus();
 
             BSONObj limitsObj = BSON( ShardFields::maxSize( s.getMaxSize() ) << 
-                                      ShardFields::currSize( status.mapped() ) <<
-                                      ShardFields::draining( s.isDraining()) );
+                                      LimitsFields::currSize( status.mapped() ) <<
+                                      ShardFields::draining( s.isDraining() )  <<
+                                      LimitsFields::hasOpsQueued( status.hasOpsQueued() )
+                                    );
 
             shardLimitsMap[ s.getName() ] = limitsObj;
         }

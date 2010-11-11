@@ -41,6 +41,7 @@
 #include "grid.h"
 #include "strategy.h"
 #include "stats.h"
+#include "writeback_listener.h"
 
 namespace mongo {
 
@@ -140,6 +141,13 @@ namespace mongo {
                     asserts.append( "rollovers" , assertionCount.rollovers );
                     asserts.done();
                 }
+                
+                {
+                    BSONObjBuilder bb( result.subobjStart( "network" ) );
+                    networkCounter.append( bb );
+                    bb.done();
+                }
+
 
                 return 1;
             }
@@ -439,18 +447,18 @@ namespace mongo {
             }
         } getShardVersionCmd;
 
-        class SplitCollectionHelper : public GridAdminCmd {
+        class SplitCollectionCmd : public GridAdminCmd {
         public:
-            SplitCollectionHelper( const char * name ) : GridAdminCmd( name ) , _name( name ){}
+            SplitCollectionCmd() : GridAdminCmd( "split" ) {}
             virtual void help( stringstream& help ) const {
                 help
-                    << " example: { split : 'alleyinsider.blog.posts' , find : { ts : 1 } } - split the shard that contains give key \n"
-                    << " example: { split : 'alleyinsider.blog.posts' , middle : { ts : 1 } } - split the shard that contains the key with this as the middle \n"
+                    << " example: - split the shard that contains give key \n" 
+                    << " { split : 'alleyinsider.blog.posts' , find : { ts : 1 } }\n" 
+                    << " example: - split the shard that contains the key with this as the middle \n"
+                    << " { split : 'alleyinsider.blog.posts' , middle : { ts : 1 } }\n"
                     << " NOTE: this does not move move the chunks, it merely creates a logical seperation \n"
                     ;
             }
-
-            virtual bool _split( BSONObjBuilder& result , string&errmsg , const string& ns , ChunkManagerPtr manager , ChunkPtr old , BSONObj middle ) = 0;
 
             bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool){
                 ShardConnection::sync();
@@ -478,54 +486,29 @@ namespace mongo {
                 }
                 
                 ChunkManagerPtr info = config->getChunkManager( ns );
-                ChunkPtr old = info->findChunk( find );
+                ChunkPtr chunk = info->findChunk( find );
+                BSONObj middle = cmdObj.getObjectField( "middle" );
 
-                return _split( result , errmsg , ns , info , old , cmdObj.getObjectField( "middle" ) );
-            }
-
-        protected:
-            string _name;
-        };
-
-        class SplitValueCommand : public SplitCollectionHelper {
-        public:
-            SplitValueCommand() : SplitCollectionHelper( "splitValue" ){}
-            virtual bool _split( BSONObjBuilder& result , string& errmsg , const string& ns , ChunkManagerPtr manager , ChunkPtr old , BSONObj middle ){
-
-                result << "shardinfo" << old->toString();
-
-                result.appendBool( "auto" , middle.isEmpty() );
+                assert( chunk.get() );
+                log() << "splitting: " << ns << "  shard: " << chunk << endl;
 
                 if ( middle.isEmpty() )
-                    middle = old->pickSplitPoint();
+                    chunk->singleSplit( true /* force a split even if not enough data */ );
 
-                result.append( "middle" , middle );
-
-                return true;
-            }
-
-        } splitValueCmd;
-
-
-        class SplitCollection : public SplitCollectionHelper {
-        public:
-            SplitCollection() : SplitCollectionHelper( "split" ){}
-            virtual bool _split( BSONObjBuilder& result , string& errmsg , const string& ns , ChunkManagerPtr manager , ChunkPtr old , BSONObj middle ){
-                assert( old.get() );
-                log() << "splitting: " << ns << "  shard: " << old << endl;
-
-                if ( middle.isEmpty() )
-                    old->split();
                 else {
+                    // sanity check if the key provided is a valid split point
+                    if ( ( middle == chunk->getMin() ) || ( middle == chunk->getMax() ) ) {
+                        errmsg = "cannot split on initial or final chunk's key";
+                        return false;
+                    }
+
                     vector<BSONObj> splitPoints;
                     splitPoints.push_back( middle );
-                    old->multiSplit( splitPoints );
+                    chunk->multiSplit( splitPoints );
                 }
 
                 return true;
             }
-
-
         } splitCollectionCmd;
 
         class MoveChunkCmd : public GridAdminCmd {
@@ -575,8 +558,12 @@ namespace mongo {
                     return false;
                 }
                 
-                if ( ! c->moveAndCommit( to , errmsg ) )
+                BSONObj res;
+                if ( ! c->moveAndCommit( to , res ) ){
+                    errmsg = "move failed";
+                    result.append( "cause" , res );
                     return false;
+                }
 
                 result.append( "millis" , t.millis() );
                 return true;
@@ -781,6 +768,7 @@ namespace mongo {
             virtual bool run(const string& , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool) {
                 result.append("ismaster", 1.0 );
                 result.append("msg", "isdbgrid");
+                result.appendNumber("maxBsonObjectSize", BSONObjMaxUserSize);
                 return true;
             }
         } ismaster;
@@ -849,7 +837,7 @@ namespace mongo {
                     return;
                 
                 for ( unsigned i=0; i<all.size(); i++ ){
-                    waitForWriteback( all[i] );
+                    WriteBackListener::waitFor( all[i] );
                 }
             }
             
@@ -972,10 +960,40 @@ namespace mongo {
         } cmdGetLastError;
         
     }
+
+    class CmdShardingResetError : public Command {
+    public:
+        CmdShardingResetError() : Command( "resetError" , false , "reseterror" ){}
+        
+        virtual LockType locktype() const { return NONE; } 
+        virtual bool requiresAuth() { return false; }
+        virtual bool slaveOk() const {
+            return true;
+        }
+        
+        bool run(const string& dbName , BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
+            LastError *le = lastError.get();
+            if ( le )
+                le->reset();
+
+            ClientInfo * client = ClientInfo::get();
+            set<string> * shards = client->getPrev();
+
+            for ( set<string>::iterator i = shards->begin(); i != shards->end(); i++ ){
+                string theShard = *i;
+                ShardConnection conn( theShard , "" );
+                BSONObj res;
+                conn->runCommand( dbName , cmdObj , res );
+                conn.done();
+            }
+            
+            return true;
+        }
+    } cmdShardingResetError;
     
     class CmdListDatabases : public Command {
     public:
-        CmdListDatabases() : Command("listDatabases", false , "listdatabases" ) {}
+        CmdListDatabases() : Command("listDatabases", true , "listdatabases" ) {}
 
         virtual bool logTheOp() { return false; }
         virtual bool slaveOk() const { return true; }

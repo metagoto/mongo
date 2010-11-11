@@ -24,6 +24,7 @@
 
 namespace mongo {
     
+    class NamespaceDetails;
     class Record;
     class CoveredIndexMatcher;
 
@@ -123,22 +124,15 @@ namespace mongo {
 
     /* table-scan style cursor */
     class BasicCursor : public Cursor {
-    protected:
-        DiskLoc curr, last;
-        const AdvanceStrategy *s;
-        void incNscanned() { if ( !curr.isNull() ) { ++_nscanned; } }
-
-    private:
-        bool tailable_;
-        shared_ptr< CoveredIndexMatcher > _matcher;
-        long long _nscanned;
-        void init() {
-            tailable_ = false;
-        }
     public:
-        bool ok() {
-            return !curr.isNull();
+        BasicCursor(DiskLoc dl, const AdvanceStrategy *_s = forward()) : curr(dl), s( _s ), _nscanned() {
+            incNscanned();
+            init();
         }
+        BasicCursor(const AdvanceStrategy *_s = forward()) : s( _s ), _nscanned() {
+            init();
+        }
+        bool ok() { return !curr.isNull(); }
         Record* _current() {
             assert( ok() );
             return curr.rec();
@@ -148,45 +142,30 @@ namespace mongo {
             BSONObj j(r);
             return j;
         }
-        virtual DiskLoc currLoc() {
-            return curr;
-        }
-        virtual DiskLoc refLoc() {
-            return curr.isNull() ? last : curr;
-        }
-        
+        virtual DiskLoc currLoc() { return curr; }
+        virtual DiskLoc refLoc()  { return curr.isNull() ? last : curr; }        
         bool advance();
-
-        BasicCursor(DiskLoc dl, const AdvanceStrategy *_s = forward()) : curr(dl), s( _s ), _nscanned() {
-            incNscanned();
-            init();
-        }
-        BasicCursor(const AdvanceStrategy *_s = forward()) : s( _s ), _nscanned() {
-            init();
-        }
-        virtual string toString() {
-            return "BasicCursor";
-        }
+        virtual string toString() { return "BasicCursor"; }
         virtual void setTailable() {
             if ( !curr.isNull() || !last.isNull() )
                 tailable_ = true;
         }
-        virtual bool tailable() {
-            return tailable_;
-        }
+        virtual bool tailable() { return tailable_; }
         virtual bool getsetdup(DiskLoc loc) { return false; }
-
         virtual bool supportGetMore() { return true; }
         virtual bool supportYields() { return true; }
-
-        virtual CoveredIndexMatcher *matcher() const { return _matcher.get(); }
-        
-        virtual void setMatcher( shared_ptr< CoveredIndexMatcher > matcher ) {
-            _matcher = matcher;
-        }
-        
-        virtual long long nscanned() { return _nscanned; }
-        
+        virtual CoveredIndexMatcher *matcher() const { return _matcher.get(); }        
+        virtual void setMatcher( shared_ptr< CoveredIndexMatcher > matcher ) { _matcher = matcher; }
+        virtual long long nscanned() { return _nscanned; }        
+    protected:
+        DiskLoc curr, last;
+        const AdvanceStrategy *s;
+        void incNscanned() { if ( !curr.isNull() ) { ++_nscanned; } }
+    private:
+        bool tailable_;
+        shared_ptr< CoveredIndexMatcher > _matcher;
+        long long _nscanned;
+        void init() { tailable_ = false; }
     };
 
     /* used for order { $natural: -1 } */
@@ -194,12 +173,8 @@ namespace mongo {
     public:
         ReverseCursor(DiskLoc dl) : BasicCursor( dl, reverse() ) { }
         ReverseCursor() : BasicCursor( reverse() ) { }
-        virtual string toString() {
-            return "ReverseCursor";
-        }
+        virtual string toString() { return "ReverseCursor"; }
     };
-
-    class NamespaceDetails;
 
     class ForwardCappedCursor : public BasicCursor, public AdvanceStrategy {
     public:

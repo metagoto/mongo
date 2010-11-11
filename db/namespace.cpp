@@ -19,7 +19,7 @@
 #include "pch.h"
 #include "pdfile.h"
 #include "db.h"
-#include "../util/mmap.h"
+#include "mongommf.h"
 #include "../util/hashtab.h"
 #include "../scripting/engine.h"
 #include "btree.h"
@@ -47,7 +47,7 @@ namespace mongo {
     NamespaceDetails::NamespaceDetails( const DiskLoc &loc, bool _capped ) {
         /* be sure to initialize new fields here -- doesn't default to zeroes the way we use it */
         firstExtent = lastExtent = capExtent = loc;
-        datasize = nrecords = 0;
+        stats.datasize = stats.nrecords = 0;
         lastExtentSize = 0;
         nIndexes = 0;
         capped = _capped;
@@ -102,12 +102,17 @@ namespace mongo {
             return;
         }
 
-        assertInWriteLock();
-        if( backgroundIndexBuildInProgress ) { 
-            log() << "backgroundIndexBuildInProgress was " << backgroundIndexBuildInProgress << " for " << k << ", indicating an abnormal db shutdown" << endl;
-            backgroundIndexBuildInProgress = 0;
+        DEV assertInWriteLock();
+
+        if( backgroundIndexBuildInProgress || capped2.cc2_ptr ) {
+            assertInWriteLock();
+            NamespaceDetails *d = (NamespaceDetails *) MongoMMF::_switchToWritableView(this);
+            if( backgroundIndexBuildInProgress ) { 
+                log() << "backgroundIndexBuildInProgress was " << backgroundIndexBuildInProgress << " for " << k << ", indicating an abnormal db shutdown" << endl;
+                d->backgroundIndexBuildInProgress = 0;
+            }
+            d->capped2.cc2_ptr = 0;
         }
-        capped2.cc2_ptr = 0;
     }
 
     static void namespaceOnLoadCallback(const Namespace& k, NamespaceDetails& v) { 
@@ -129,39 +134,41 @@ namespace mongo {
             i.dbDropped();
         }
 		*/
+
 		unsigned long long len = 0;
         boost::filesystem::path nsPath = path();
         string pathString = nsPath.string();
-        MMF::Pointer p;
+        MoveableBuffer p;
         if( MMF::exists(nsPath) ) {
-			p = f.mapWithOptions(pathString.c_str(), durable?MMF::READONLY:0);
-            if( !p.isNull() ) {
+            if( f.open(pathString, true) ) {
                 len = f.length();
                 if ( len % (1024*1024) != 0 ){
                     log() << "bad .ns file: " << pathString << endl;
                     uassert( 10079 ,  "bad .ns file length, cannot open database", len % (1024*1024) == 0 );
                 }
+                p = f.getView();
             }
 		}
 		else {
 			// use lenForNewNsFiles, we are making a new database
-			massert( 10343 ,  "bad lenForNewNsFiles", lenForNewNsFiles >= 1024*1024 );
+			massert( 10343, "bad lenForNewNsFiles", lenForNewNsFiles >= 1024*1024 );
             maybeMkdir();
 			unsigned long long l = lenForNewNsFiles;
-			p = f.map(pathString.c_str(), l, durable?MMF::READONLY:0);
-            if( !p.isNull() ) {
+            if( f.create(pathString, l, true) ) {
                 len = l;
                 assert( len == lenForNewNsFiles );
+                p = f.getView();
             }
 		}
 
-        if ( p.isNull() ) {
-            problem() << "couldn't open file " << pathString << " terminating" << endl;
+        if ( p.p == 0 ) {
+            /** TODO: this shouldn't terminate? */
+            log() << "error couldn't open file " << pathString << " terminating" << endl;
             dbexit( EXIT_FS );
         }
 
         assert( len <= 0x7fffffff );
-        ht = new HashTable<Namespace,NamespaceDetails,MMF::Pointer>(p, (int) len, "namespace index");
+        ht = new HashTable<Namespace,NamespaceDetails>(p, (int) len, "namespace index");
         if( checkNsFilesOnLoad )
             ht->iterAll(namespaceOnLoadCallback);
     }
@@ -171,7 +178,6 @@ namespace mongo {
         if ( ! k.hasDollarSign() )
             l->push_back( (string)k );
     }
-
     void NamespaceIndex::getNamespaces( list<string>& tofill , bool onlyCollections ) const {
         assert( onlyCollections ); // TODO: need to implement this
         //                                  need boost::bind or something to make this less ugly
@@ -181,41 +187,47 @@ namespace mongo {
     }
 
     void NamespaceDetails::addDeletedRec(DeletedRecord *d, DiskLoc dloc) {
+        dur::assertReading(this);
 		BOOST_STATIC_ASSERT( sizeof(NamespaceDetails::Extra) <= sizeof(NamespaceDetails) );
+
+#if defined(_DEBUG) && !defined(_DURABLE)
+        if( dloc.drec() != d ) {
+            assert(false);
+        }
+#endif
+        d = dur::writing(d);
         {
             // defensive code: try to make us notice if we reference a deleted record
             (unsigned&) (((Record *) d)->data) = 0xeeeeeeee;
         }
-        dassert( dloc.drec() == d );
-        DEBUGGING out() << "TEMP: add deleted rec " << dloc.toString() << ' ' << hex << d->extentOfs << endl;
+        DEBUGGING log() << "TEMP: add deleted rec " << dloc.toString() << ' ' << hex << d->extentOfs << endl;
         if ( capped ) {
             if ( !cappedLastDelRecLastExtent().isValid() ) {
                 // Initial extent allocation.  Insert at end.
                 d->nextDeleted = DiskLoc();
                 if ( cappedListOfAllDeletedRecords().isNull() )
-                    cappedListOfAllDeletedRecords() = dloc;
+                    dur::writingDiskLoc( cappedListOfAllDeletedRecords() ) = dloc;
                 else {
                     DiskLoc i = cappedListOfAllDeletedRecords();
-                    for (; !i.drec()->nextDeleted.isNull(); i = i.drec()->nextDeleted );
-                    i.drec()->nextDeleted = dloc;
+                    for (; !i.drec()->nextDeleted.isNull(); i = i.drec()->nextDeleted )
+                        ;
+                    i.drec()->nextDeleted.writing() = dloc;
                 }
             } else {
                 d->nextDeleted = cappedFirstDeletedInCurExtent();
-                cappedFirstDeletedInCurExtent() = dloc;
+                dur::writingDiskLoc( cappedFirstDeletedInCurExtent() ) = dloc;
                 // always compact() after this so order doesn't matter
             }
         } else {
             int b = bucket(d->lengthWithHeaders);
             DiskLoc& list = deletedList[b];
             DiskLoc oldHead = list;
-            list = dloc;
+            dur::writingDiskLoc(list) = dloc;
             d->nextDeleted = oldHead;
         }
     }
 
-    /*
-       lenToAlloc is WITH header
-    */
+    // lenToAlloc is WITH header
     DiskLoc NamespaceDetails::alloc(const char *ns, int lenToAlloc, DiskLoc& extentLoc) {
         lenToAlloc = (lenToAlloc + 3) & 0xfffffffc;
         DiskLoc loc = _alloc(ns, lenToAlloc);
@@ -223,6 +235,7 @@ namespace mongo {
             return loc;
 
         DeletedRecord *r = loc.drec();
+        r = dur::writing(r);
 
         /* note we want to grab from the front so our next pointers on disk tend
         to go in a forward direction which is important for performance. */
@@ -236,20 +249,21 @@ namespace mongo {
         if ( capped == 0 ) {
             if ( left < 24 || left < (lenToAlloc >> 3) ) {
                 // you get the whole thing.
-				DataFileMgr::grow(loc, regionlen);
+				//DataFileMgr::grow(loc, regionlen);
                 return loc;
             }
         }
 
         /* split off some for further use. */
         r->lengthWithHeaders = lenToAlloc;
-		DataFileMgr::grow(loc, lenToAlloc);
+		//DataFileMgr::grow(loc, lenToAlloc);
         DiskLoc newDelLoc = loc;
         newDelLoc.inc(lenToAlloc);
         DeletedRecord *newDel = DataFileMgr::makeDeletedRecord(newDelLoc, left);
-        newDel->extentOfs = r->extentOfs;
-        newDel->lengthWithHeaders = left;
-        newDel->nextDeleted.Null();
+        DeletedRecord *newDelW = dur::writing(newDel);
+        newDelW->extentOfs = r->extentOfs;
+        newDelW->lengthWithHeaders = left;
+        newDelW->nextDeleted.Null();
 
         addDeletedRec(newDel, newDelLoc);
 
@@ -323,8 +337,8 @@ namespace mongo {
 
         /* unlink ourself from the deleted list */
         {
-            DeletedRecord *bmr = bestmatch.drec();
-            *bestprev = bmr->nextDeleted;
+            DeletedRecord *bmr = dur::writing(bestmatch.drec());
+            *dur::writing(bestprev) = bmr->nextDeleted;
             bmr->nextDeleted.setInvalid(); // defensive.
             assert(bmr->extentOfs < bestmatch.getOfs());
         }
@@ -394,6 +408,21 @@ namespace mongo {
         return cappedAlloc(ns,len);
     }
 
+    void NamespaceIndex::kill_ns(const char *ns) {
+        if ( !ht )
+            return;
+        Namespace n(ns);
+        ht->kill(n);
+
+        for( int i = 0; i<=1; i++ ) {
+            try {
+                Namespace extra(n.extraName(i).c_str());
+                ht->kill(extra);
+            }
+            catch(DBException&) { }
+        }
+    }
+
     /* extra space for indexes when more than 10 */
     NamespaceDetails::Extra* NamespaceIndex::newExtra(const char *ns, int i, NamespaceDetails *d) {
         assert( i >= 0 && i <= 1 );
@@ -429,7 +458,10 @@ namespace mongo {
 
     /* you MUST call when adding an index.  see pdfile.cpp */
     IndexDetails& NamespaceDetails::addIndex(const char *thisns, bool resetTransient) {
+#if !defined(_DEBUG) || !defined(_DURABLE)
+        // in debug durable mode the write view could be "this" not the nsdetails returned view...
         assert( nsdetails(thisns) == this );
+#endif
 
         IndexDetails *id;
         try {
@@ -440,7 +472,7 @@ namespace mongo {
             id = &idx(nIndexes,false);
         }
 
-        nIndexes++;
+        (*dur::writing(&nIndexes))++;
         if ( resetTransient )
             NamespaceDetailsTransient::get_w(thisns).addedIndex();
         return *id;
@@ -571,8 +603,10 @@ namespace mongo {
     }
 
     void renameNamespace( const char *from, const char *to ) {
-		NamespaceIndex *ni = nsindex( from );
-		assert( ni && ni->details( from ) && !ni->details( to ) );
+        NamespaceIndex *ni = nsindex( from );
+		assert( ni );
+        assert( ni->details( from ) );
+        assert( ! ni->details( to ) );
 		
 		// Our namespace and index details will move to a different 
 		// memory location.  The only references to namespace and 

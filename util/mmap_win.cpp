@@ -23,19 +23,19 @@
 namespace mongo {
 
     MemoryMappedFile::MemoryMappedFile()
-        : _flushMutex(new mutex("flushMutex"))
+        : _flushMutex(new mutex("flushMutex")), _filename("??")
     {
         fd = 0;
         maphandle = 0;
-        view = 0;
         len = 0;
         created();
     }
 
     void MemoryMappedFile::close() {
-        if ( view )
-            UnmapViewOfFile(view);
-        view = 0;
+        for( vector<void*>::iterator i = views.begin(); i != views.end(); i++ ) {
+            UnmapViewOfFile(*i);
+        }
+        views.clear();
         if ( maphandle )
             CloseHandle(maphandle);
         maphandle = 0;
@@ -45,6 +45,34 @@ namespace mongo {
     }
     
     unsigned long long mapped = 0;
+
+    void MemoryMappedFile::testCloseCopyOnWriteView(void *p) { 
+        UnmapViewOfFile(p);
+    }
+
+    void* MemoryMappedFile::testGetCopyOnWriteView() { 
+        assert(false); // todo: not added to views array yet...
+        assert( maphandle );
+        void *p = MapViewOfFile(maphandle, FILE_MAP_COPY, /*f ofs hi*/0, /*f ofs lo*/ 0, /*dwNumberOfBytesToMap 0 means to eof*/0);
+        if ( p == 0 ) {
+            DWORD e = GetLastError();
+            log() << "FILE_MAP_COPY MapViewOfFile failed " << _filename << " " << errnoWithDescription(e) << endl;
+        }
+        return p;
+    }
+
+    void* MemoryMappedFile::createReadOnlyMap() {
+        assert( maphandle );
+        void *p = MapViewOfFile(maphandle, FILE_MAP_READ, /*f ofs hi*/0, /*f ofs lo*/ 0, /*dwNumberOfBytesToMap 0 means to eof*/0);
+        if ( p == 0 ) {
+            DWORD e = GetLastError();
+            log() << "FILE_MAP_READ MapViewOfFile failed " << _filename << " " << errnoWithDescription(e) << endl;
+        }
+        else { 
+            views.push_back(p);
+        }
+        return p;
+    }
 
     void* MemoryMappedFile::map(const char *filenameIn, unsigned long long &length, int options) {
         _filename = filenameIn;
@@ -66,39 +94,41 @@ namespace mongo {
 
         updateLength( filename, length );
 
-        DWORD createOptions = FILE_ATTRIBUTE_NORMAL;
-        if ( options & SEQUENTIAL )
-            createOptions |= FILE_FLAG_SEQUENTIAL_SCAN;
-        DWORD rw = GENERIC_READ | GENERIC_WRITE;
-        //if ( options & READONLY ) 
-        //    rw = GENERIC_READ;
-
-        fd = CreateFile(
-                 toNativeString(filename).c_str(),
-                 rw, // desired access
-                 FILE_SHARE_READ, // share mode
-                 NULL, // security
-                 OPEN_ALWAYS, // create disposition
-                 createOptions , // flags
-                 NULL); // hTempl
-        if ( fd == INVALID_HANDLE_VALUE ) {
-            log() << "Create/OpenFile failed " << filename << ' ' << GetLastError() << endl;
-            return 0;
+        {
+            DWORD createOptions = FILE_ATTRIBUTE_NORMAL;
+            if ( options & SEQUENTIAL )
+                createOptions |= FILE_FLAG_SEQUENTIAL_SCAN;
+            DWORD rw = GENERIC_READ | GENERIC_WRITE;
+            fd = CreateFile(
+                     toNativeString(filename).c_str(),
+                     rw, // desired access
+                     FILE_SHARE_READ, // share mode
+                     NULL, // security
+                     OPEN_ALWAYS, // create disposition
+                     createOptions , // flags
+                     NULL); // hTempl
+            if ( fd == INVALID_HANDLE_VALUE ) {
+                log() << "Create/OpenFile failed " << filename << ' ' << GetLastError() << endl;
+                return 0;
+            }
         }
 
         mapped += length;
 
-        DWORD flProtect = PAGE_READWRITE; //(options & READONLY)?PAGE_READONLY:PAGE_READWRITE;
-        maphandle = CreateFileMapping(fd, NULL, flProtect, 
-            length >> 32 /*maxsizehigh*/, 
-            (unsigned) length /*maxsizelow*/, 
-            NULL/*lpName*/);
-        if ( maphandle == NULL ) {
-            DWORD e = GetLastError(); // log() call was killing lasterror before we get to that point in the stream
-            log() << "CreateFileMapping failed " << filename << ' ' << errnoWithDescription(e) << endl;
-            return 0;
+        {
+            DWORD flProtect = PAGE_READWRITE; //(options & READONLY)?PAGE_READONLY:PAGE_READWRITE;
+            maphandle = CreateFileMapping(fd, NULL, flProtect, 
+                length >> 32 /*maxsizehigh*/, 
+                (unsigned) length /*maxsizelow*/, 
+                NULL/*lpName*/);
+            if ( maphandle == NULL ) {
+                DWORD e = GetLastError(); // log() call was killing lasterror before we get to that point in the stream
+                log() << "CreateFileMapping failed " << filename << ' ' << errnoWithDescription(e) << endl;
+                return 0;
+            }
         }
 
+        void *view = 0;
         {
             DWORD access = (options&READONLY)? FILE_MAP_READ : FILE_MAP_ALL_ACCESS;
             view = MapViewOfFile(maphandle, access, /*f ofs hi*/0, /*f ofs lo*/ 0, /*dwNumberOfBytesToMap 0 means to eof*/0);
@@ -107,7 +137,29 @@ namespace mongo {
             DWORD e = GetLastError();
             log() << "MapViewOfFile failed " << filename << " " << errnoWithDescription(e) << endl;
         }
+        else { 
+            views.push_back(view);
+        }
         len = length;
+
+#if 0
+        {
+            if( !( options & READONLY ) ) { 
+                log() << "dur: not readonly view which is wrong : " << filename << endl;
+            }
+            void *p = MapViewOfFile(maphandle, FILE_MAP_ALL_ACCESS, /*f ofs hi*/0, /*f ofs lo*/ 0, /*dwNumberOfBytesToMap 0 means to eof*/0);
+            assert( p );
+            writeView = p;
+            {
+                mutex::scoped_lock lk(viewToWritableMutex);
+                viewToWritable[view] = this;
+            }
+            log() << filenameIn << endl;
+            log() << "  ro: " << view << " - " << (void*) (((char *)view)+length) << endl;
+            log() << "  w : " << writeView << " - " << (void*) (((char *)writeView)+length) << endl;
+        }
+#endif
+
         return view;
     }
 
@@ -144,13 +196,14 @@ namespace mongo {
     
     void MemoryMappedFile::flush(bool sync) {
         uassert(13056, "Async flushing not supported on windows", sync);
-        
-        WindowsFlushable f( view , fd , _filename , _flushMutex);
-        f.flush();
+        if( !views.empty() ) {
+            WindowsFlushable f( views[0] , fd , _filename , _flushMutex);
+            f.flush();
+        }
     }
 
-    MemoryMappedFile::Flushable * MemoryMappedFile::prepareFlush(){
-        return new WindowsFlushable( view , fd , _filename , _flushMutex );
+    MemoryMappedFile::Flushable * MemoryMappedFile::prepareFlush() {
+        return new WindowsFlushable( views.empty() ? 0 : views[0] , fd , _filename , _flushMutex );
     }
     void MemoryMappedFile::_lock() {}
     void MemoryMappedFile::_unlock() {}

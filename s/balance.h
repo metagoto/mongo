@@ -34,7 +34,7 @@ namespace mongo {
 
         virtual void run();
 
-        virtual string name() { return "Balancer"; }        
+        virtual string name() const { return "Balancer"; }        
 
     private:
         typedef BalancerPolicy::ChunkInfo CandidateChunk;
@@ -69,11 +69,6 @@ namespace mongo {
         time_t          _started;          // time Balancer starte running
         int             _balancedLastTime; // number of moved chunks in last round
         BalancerPolicy* _policy;           // decide which chunks to move; owned here.
-
-        // non-copyable, non-assignable
-
-        Balancer(const Balancer&);
-        Balancer operator=(const Balancer&);
     };
     
     extern Balancer balancer;

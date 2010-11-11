@@ -160,7 +160,6 @@ namespace mongo {
         static boost::scoped_ptr<ostream> stream;
         static vector<Tee*> * globalTees;
     public:
-
         inline static void logLockless( const StringData& s );
         
         static void setLogFile(FILE* f){
@@ -297,6 +296,9 @@ namespace mongo {
             return nullstream;
         return Logstream::get().prolog();
     }
+
+#define MONGO_LOG(level) if ( logLevel >= (level) ) log( level )
+#define LOG MONGO_LOG
 
     inline Nullstream& log( LogLevel l ) {
         return Logstream::get().prolog().setLogLevel( l );

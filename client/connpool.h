@@ -141,12 +141,30 @@ namespace mongo {
     };
 
     /** Use to get a connection from the pool.  On exceptions things
-       clean up nicely.
+       clean up nicely (i.e. the socket gets closed automatically when the 
+       scopeddbconnection goes out of scope).
     */
     class ScopedDbConnection : public AScopedConnection {
-        const string _host;
-        DBClientBase *_conn;
     public:
+        /** the main constructor you want to use
+            throws UserException if can't connect 
+            */
+        explicit ScopedDbConnection(const string& host) : _host(host), _conn( pool.get(host) ) {}
+        
+        ScopedDbConnection() : _host( "" ) , _conn(0) {}
+
+        /* @param conn - bind to an existing connection */
+        ScopedDbConnection(const string& host, DBClientBase* conn ) : _host( host ) , _conn( conn ) {}
+        
+        /** throws UserException if can't connect */
+        explicit ScopedDbConnection(const ConnectionString& url ) : _host(url.toString()), _conn( pool.get(url) ) {}
+
+        /** throws UserException if can't connect */
+        explicit ScopedDbConnection(const Shard& shard );
+        explicit ScopedDbConnection(const Shard* shard );
+
+        ~ScopedDbConnection();
+
         /** get the associated connection object */
         DBClientBase* operator->(){ 
             uassert( 11004 ,  "did you call done already" , _conn );
@@ -165,27 +183,6 @@ namespace mongo {
             return _conn;
         }
         
-        ScopedDbConnection()
-            : _host( "" ) , _conn(0) {
-        }
-
-        /** throws UserException if can't connect */
-        ScopedDbConnection(const string& host)
-            : _host(host), _conn( pool.get(host) ) {
-        }
-        
-        ScopedDbConnection(const string& host, DBClientBase* conn )
-            : _host( host ) , _conn( conn ){
-        }
-        
-        ScopedDbConnection(const Shard& shard );
-        ScopedDbConnection(const Shard* shard );
-
-        ScopedDbConnection(const ConnectionString& url )
-            : _host(url.toString()), _conn( pool.get(url) ) {
-        }
-
-
         string getHost() const { return _host; }
 
         /** Force closure of the connection.  You should call this if you leave it in
@@ -217,7 +214,9 @@ namespace mongo {
         
         ScopedDbConnection * steal();
 
-        ~ScopedDbConnection();
+    private:
+        const string _host;
+        DBClientBase *_conn;
 
     };
 

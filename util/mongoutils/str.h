@@ -75,6 +75,8 @@ namespace mongoutils {
             return strncmp(s.c_str()+x-l, p.c_str(), l) == 0;
         }
 
+        inline bool equals( const char * a , const char * b ) { return strcmp( a , b ) == 0; }
+
         /** find char x, and return rest of string thereafter, or "" if not found */
         inline const char * after(const char *s, char x) {
             const char *p = strchr(s, x);
@@ -112,6 +114,19 @@ namespace mongoutils {
             return ofs; }
         inline int shareCommonPrefix(const string &a, const string &b)
         { return shareCommonPrefix(a.c_str(), b.c_str()); }
+
+        /** string to unsigned. zero if not a number. can end with non-num chars */
+        inline unsigned toUnsigned(const string& a) {
+            unsigned x = 0;
+            const char *p = a.c_str();
+            while( 1 ) { 
+                if( !isdigit(*p) )
+                    break;
+                x = x * 10 + (*p - '0');
+                p++;
+            }
+            return x;
+        }
 
     }
 

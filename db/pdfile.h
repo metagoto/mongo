@@ -29,8 +29,9 @@
 #include "../util/mmap.h"
 #include "diskloc.h"
 #include "jsobjmanipulator.h"
-#include "namespace.h"
+#include "namespace-inl.h"
 #include "client.h"
+#include "mongommf.h"
 
 namespace mongo {
 
@@ -51,7 +52,7 @@ namespace mongo {
     bool userCreateNS(const char *ns, BSONObj j, string& err, bool logForReplication, bool *deferIdIndex = 0);
     shared_ptr<Cursor> findTableScan(const char *ns, const BSONObj& order, const DiskLoc &startLoc=DiskLoc());
 
-// -1 if library unavailable.
+    // -1 if library unavailable.
     boost::intmax_t freeSpace( const string &path = dbpath );
 
     /*---------------------------------------------------------------------*/
@@ -69,19 +70,17 @@ namespace mongo {
         */
         Extent* createExtent(const char *ns, int approxSize, bool capped = false, int loops = 0);
 
-        DataFileHeader *getHeader() {
-            return header;
-        }
+        DataFileHeader *getHeader() { return header(); }
 
         /* return max size an extent may be */
         static int maxSize();
         
+        /** fsync */
         void flush( bool sync );
         
     private:
         void badOfs(int) const;
         void badOfs2(int) const;
-
         int defaultSize( const char *filename ) const;
 
         Extent* getExtent(DiskLoc loc);
@@ -90,9 +89,11 @@ namespace mongo {
         Record* makeRecord(DiskLoc dl, int size);
 		void grow(DiskLoc dl, int size);
 
-        MMF mmf;
-        MMF::Pointer _p;
-        DataFileHeader *header;
+        char* p() { return (char *) _mb.p; }
+        DataFileHeader* header() { return (DataFileHeader*) _mb.p; }
+
+        MongoMMF mmf;
+        MoveableBuffer _mb;
         int fileNo;
     };
 
@@ -123,7 +124,6 @@ namespace mongo {
         void insertNoReturnVal(const char *ns, BSONObj o, bool god = false);
 
         DiskLoc insert(const char *ns, const void *buf, int len, bool god = false, const BSONElement &writeId = BSONElement(), bool mayAddIndex = true);
-        void deleteRecord(const char *ns, Record *todelete, const DiskLoc& dl, bool cappedOK = false, bool noWarn = false);
         static shared_ptr<Cursor> findAll(const char *ns, const DiskLoc &startLoc = DiskLoc());
 
         /* special version of insert for transaction logging -- streamlined a bit.
@@ -135,9 +135,10 @@ namespace mongo {
         static Extent* getExtent(const DiskLoc& dl);
         static Record* getRecord(const DiskLoc& dl);
         static DeletedRecord* makeDeletedRecord(const DiskLoc& dl, int len);
-		static void grow(const DiskLoc& dl, int len);
 
-        /* does not clean up indexes, etc. : just deletes the record in the pdfile. */
+        void deleteRecord(const char *ns, Record *todelete, const DiskLoc& dl, bool cappedOK = false, bool noWarn = false);
+
+        /* does not clean up indexes, etc. : just deletes the record in the pdfile. use deleteRecord() to unindex */
         void _deleteRecord(NamespaceDetails *d, const char *ns, Record *todelete, const DiskLoc& dl);
 
     private:
@@ -193,6 +194,12 @@ namespace mongo {
         /* get the next record in the namespace, traversing extents as necessary */
         DiskLoc getNext(const DiskLoc& myLoc);
         DiskLoc getPrev(const DiskLoc& myLoc);
+
+        struct NP { 
+            int nextOfs;
+            int prevOfs;
+        };
+        NP* np() { return (NP*) &nextOfs; }
     };
 
     /* extents are datafile regions where all the records within the region
@@ -213,7 +220,8 @@ namespace mongo {
         Namespace nsDiagnostic; 
 
         int length;   /* size of the extent, including these fields */
-        DiskLoc firstRecord, lastRecord;
+        DiskLoc firstRecord;
+        DiskLoc lastRecord;
         char _extentData[4];
 
         static int HeaderSize() { return sizeof(Extent)-4; }
@@ -238,9 +246,7 @@ namespace mongo {
         /* like init(), but for a reuse case */
         DiskLoc reuse(const char *nsname);
 
-        void assertOk() {
-            assert(magic == 0x41424344);
-        }
+        void assertOk() { assert(magic == 0x41424344); }
 
         Record* newRecord(int len);
 
@@ -252,19 +258,24 @@ namespace mongo {
             return (Record *) (((char *) this) + x);
         }
 
-        Extent* getNextExtent() {
-            return xnext.isNull() ? 0 : DataFileMgr::getExtent(xnext);
-        }
-        Extent* getPrevExtent() {
-            return xprev.isNull() ? 0 : DataFileMgr::getExtent(xprev);
-        }
+        Extent* getNextExtent() { return xnext.isNull() ? 0 : DataFileMgr::getExtent(xnext); }
+        Extent* getPrevExtent() { return xprev.isNull() ? 0 : DataFileMgr::getExtent(xprev); }
         
         static int maxSize();
+
+        struct FL { 
+            DiskLoc firstRecord;
+            DiskLoc lastRecord;
+        };
+        FL* fl() { return (FL*) &firstRecord; }
+    private:
+        DiskLoc _reuse(const char *nsname);
     };
 
-    /*
+    /*  a datafile - i.e. the "dbname.<#>" files :
+
           ----------------------
-          Header
+          DataFileHeader
           ----------------------
           Extent (for a particular namespace)
             Record
@@ -274,7 +285,6 @@ namespace mongo {
           more Extents...
           ----------------------
     */
-
     class DataFileHeader {
     public:
         int version;
@@ -288,32 +298,21 @@ namespace mongo {
 
         enum { HeaderSize = 8192 };
 
-        bool currentVersion() const {
-            return ( version == VERSION ) && ( versionMinor == VERSION_MINOR );
-        }
+        bool currentVersion() const { return ( version == VERSION ) && ( versionMinor == VERSION_MINOR ); }
 
-        bool uninitialized() const {
-            if ( version == 0 ) return true;
-            return false;
-        }
-
-        /*Record* __getRecord(DiskLoc dl) {
-            int ofs = dl.getOfs();
-            assert( ofs >= HeaderSize );
-            return (Record*) (((char *) this) + ofs);
-        }*/
+        bool uninitialized() const { return version == 0; }
 
         void init(int fileno, int filelength) {
             if ( uninitialized() ) {
                 assert(filelength > 32768 );
                 assert( HeaderSize == 8192 );
-                fileLength = filelength;
-                version = VERSION;
-                versionMinor = VERSION_MINOR;
-                unused.set( fileno, HeaderSize );
+                DataFileHeader *h = dur::writing(this);
+                h->fileLength = filelength;
+                h->version = VERSION;
+                h->versionMinor = VERSION_MINOR;
+                h->unused.set( fileno, HeaderSize );
                 assert( (data-(char*)this) == HeaderSize );
-                unusedLength = fileLength - HeaderSize - 16;
-                //memcpy(data+unusedLength, "      \nthe end\n", 16);
+                h->unusedLength = fileLength - HeaderSize - 16;
             }
         }
         
@@ -326,7 +325,7 @@ namespace mongo {
 
     inline Extent* MongoDataFile::_getExtent(DiskLoc loc) {
         loc.assertOk();
-        Extent *e = (Extent *) _p.at(loc.getOfs(), Extent::HeaderSize());
+        Extent *e = (Extent *) (p()+loc.getOfs());
         return e;
     }
 
@@ -345,18 +344,13 @@ namespace mongo {
     inline Record* MongoDataFile::recordAt(DiskLoc dl) {
         int ofs = dl.getOfs();
         if( ofs < DataFileHeader::HeaderSize ) badOfs(ofs); // will uassert - external call to keep out of the normal code path
-        return (Record*) _p.at(ofs, -1);
+        return (Record*) (p()+ofs);
     }
-
-	inline void MongoDataFile::grow(DiskLoc dl, int size) { 
-        int ofs = dl.getOfs();
-        _p.grow(ofs, size);
-	}
 
     inline Record* MongoDataFile::makeRecord(DiskLoc dl, int size) { 
         int ofs = dl.getOfs();	   
         if( ofs < DataFileHeader::HeaderSize ) badOfs(ofs); // will uassert - external call to keep out of the normal code path
-        return (Record*) _p.at(ofs, size);
+        return (Record*) (p()+ofs);
     }
 
     inline DiskLoc Record::getNext(const DiskLoc& myLoc) {
@@ -402,12 +396,13 @@ namespace mongo {
     inline Extent* DiskLoc::ext() const {
         return DataFileMgr::getExtent(*this);
     }
-
-    /*---------------------------------------------------------------------*/
+    inline const BtreeBucket* DiskLoc::btree() const {
+        assert( _a != -1 );
+        return (const BtreeBucket *) rec()->data;
+    }
 
 } // namespace mongo
 
-#include "rec.h"
 #include "database.h"
 
 namespace mongo {
@@ -435,11 +430,6 @@ namespace mongo {
         return nsindex(ns)->details(ns);
     }
 
-    /*inline MongoDataFile& DiskLoc::pdf() const {
-        assert( fileNo != -1 );
-        return *cc().database()->getFile(fileNo);
-    }*/
-
     inline Extent* DataFileMgr::getExtent(const DiskLoc& dl) {
         assert( dl.a() != -1 );
         return cc().database()->getFile(dl.a())->getExtent(dl);
@@ -452,11 +442,6 @@ namespace mongo {
 
 	BOOST_STATIC_ASSERT( 16 == sizeof(DeletedRecord) );
 
-	inline void DataFileMgr::grow(const DiskLoc& dl, int len) { 
-        assert( dl.a() != -1 );
-        cc().database()->getFile(dl.a())->grow(dl, len);
-	}
-
     inline DeletedRecord* DataFileMgr::makeDeletedRecord(const DiskLoc& dl, int len) { 
         assert( dl.a() != -1 );
         return (DeletedRecord*) cc().database()->getFile(dl.a())->makeRecord(dl, sizeof(DeletedRecord));
@@ -468,12 +453,12 @@ namespace mongo {
 
 
     /**
-     * @return true if ns is ok
+     * @return true if ns is 'normal'.  $ used for collections holding index data, which do not contain BSON objects in their records.
+     * special case for the local.oplog.$main ns -- naming it as such was a mistake.
      */
-    inline bool nsDollarCheck( const char* ns ){
+    inline bool isANormalNSName( const char* ns ){
         if ( strchr( ns , '$' ) == 0 )
-            return true;
-        
+            return true;        
         return strcmp( ns, "local.oplog.$main" ) == 0;
     }
 

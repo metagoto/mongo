@@ -66,8 +66,6 @@ namespace mongo {
             return 0;
         }
 
-        virtual bool primaryListener() const { return true; }
-
     private:
         string _ip;
         bool _logConnect;
@@ -88,6 +86,7 @@ namespace mongo {
         virtual int getClientId(){
             int x = remotePort();
             x = x << 16;
+            x |= ( ( 0xFF0 & (long long)this ) >> 8 ); // lowest byte in pointer often meaningless
             return x;
         }
     };
@@ -99,7 +98,7 @@ namespace mongo {
         // in some cases the timeout will actually be 2x this value - eg we do a partial send,
         // then the timeout fires, then we try to send again, then the timeout fires again with
         // no data sent, then we detect that the other side is down
-        MessagingPort(double timeout = 0, int logLevel = 0 );
+        MessagingPort(double so_timeout = 0, int logLevel = 0 );
 
         virtual ~MessagingPort();
 
@@ -129,9 +128,17 @@ namespace mongo {
         void recv( char * data , int len );
         
         int unsafe_recv( char *buf, int max );
+
+        void clearCounters() { _bytesIn = 0; _bytesOut = 0; }
+        long long getBytesIn() const { return _bytesIn; }
+        long long getBytesOut() const { return _bytesOut; }
     private:
         int sock;
         PiggyBackData * piggyBackData;
+
+        long long _bytesIn;
+        long long _bytesOut;
+
     public:
         SockAddr farEnd;
         double _timeout;
@@ -226,11 +233,15 @@ struct OP_GETMORE : public MSGHEADER {
         int len; /* len of the msg, including this field */
         MSGID id; /* request/reply id's match... */
         MSGID responseTo; /* id of the message we are responding to */
-        int _operation;
+        short _operation;
+        char _flags;
+        char _version;
         int operation() const {
             return _operation;
         }
         void setOperation(int o) {
+            _flags = 0;
+            _version = 0;
             _operation = o;
         }
         char _data[4];
@@ -240,9 +251,9 @@ struct OP_GETMORE : public MSGHEADER {
         }
         
         bool valid(){
-            if ( len <= 0 || len > ( 1024 * 1024 * 10 ) )
+            if ( len <= 0 || len > ( 4 * BSONObjMaxInternalSize ) )
                 return false;
-            if ( _operation < 0 || _operation > 100000 )
+            if ( _operation < 0 || _operation > 30000 )
                 return false;
             return true;
         }
@@ -304,6 +315,8 @@ struct OP_GETMORE : public MSGHEADER {
             return res;
         }
         
+        int dataSize() const { return size() - sizeof(MSGHEADER); }
+
         // concat multiple buffers - noop if <2 buffers already, otherwise can be expensive copy
         // can get rid of this if we make response handling smarter
         void concat() {
@@ -423,13 +436,14 @@ struct OP_GETMORE : public MSGHEADER {
 
     class SocketException : public DBException {
     public:
-        enum Type { CLOSED , RECV_ERROR , SEND_ERROR } type;
-        SocketException( Type t ) : DBException( "socket exception" , 9001 ) , type(t){}
-        
-        bool shouldPrint() const {
-            return type != CLOSED;
-        }
-        
+        const enum Type { CLOSED , RECV_ERROR , SEND_ERROR, RECV_TIMEOUT, SEND_TIMEOUT, FAILED_STATE, CONNECT_ERROR } _type;
+        SocketException( Type t ) : DBException( "socket exception" , 9001 ) , _type(t) { }        
+        bool shouldPrint() const { return _type != CLOSED; }        
+        virtual string toString() const {
+            stringstream ss; 
+            ss << "9001 socket exception " << _type;
+            return ss.str();
+        }        
     };
 
     MSGID nextMessageId();

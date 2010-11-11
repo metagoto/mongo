@@ -26,8 +26,10 @@
 #include "../db/namespace.h"
 #include "../client/dbclient.h"
 #include "../client/model.h"
-#include "shardkey.h"
+
+#include "chunk.h"
 #include "shard.h"
+#include "shardkey.h"
 
 namespace mongo {
 
@@ -46,9 +48,8 @@ namespace mongo {
      * Field names used in the 'shards' collection.
      */
     struct ShardFields {
-        static BSONField<bool> draining;
-        static BSONField<long long> maxSize;
-        static BSONField<long long> currSize;
+        static BSONField<bool> draining;      // is it draining chunks?
+        static BSONField<long long> maxSize;  // max allowed disk space usage
     };
         
     class ConfigServer;
@@ -59,9 +60,6 @@ namespace mongo {
     extern DBConfigPtr configServerPtr;
     extern ConfigServer& configServer;
 
-    class ChunkManager;
-    typedef shared_ptr<ChunkManager> ChunkManagerPtr;
-    
     /**
      * top level configuration for a database
      */
@@ -73,7 +71,7 @@ namespace mongo {
                 _dropped = false;
             }
             
-            CollectionInfo( DBConfig * db , const BSONObj& in );
+            CollectionInfo( const BSONObj& in );
             
             bool isSharded() const {
                 return _cm.get();
@@ -83,7 +81,7 @@ namespace mongo {
                 return _cm;
             }
 
-            void shard( DBConfig * db , const string& ns , const ShardKeyPattern& key , bool unique );
+            void shard( const string& ns , const ShardKeyPattern& key , bool unique );
             void unshard();
 
             bool isDirty() const { return _dirty; }
@@ -124,6 +122,11 @@ namespace mongo {
         ChunkManagerPtr shardCollection( const string& ns , ShardKeyPattern fieldsAndOrder , bool unique );
         
         /**
+           @return true if there was sharding info to remove
+         */
+        bool removeSharding( const string& ns );
+
+        /**
          * @return whether or not the 'ns' collection is partitioned
          */
         bool isSharded( const string& ns );
@@ -153,10 +156,7 @@ namespace mongo {
         // lockless loading
         void serialize(BSONObjBuilder& to);
 
-        /**
-         * if i need save in new format
-         */
-        bool unserialize(const BSONObj& from);
+        void unserialize(const BSONObj& from);
 
         void getAllShards(set<Shard>& shards) const;
 
@@ -173,12 +173,6 @@ namespace mongo {
         bool _reload();
         void _save();
 
-        
-        /**
-           @return true if there was sharding info to remove
-         */
-        bool removeSharding( const string& ns );
-
         string _name; // e.g. "alleyinsider"
         Shard _primary; // e.g. localhost , mongo.foo.com:9999
         bool _shardingEnabled;
@@ -189,8 +183,6 @@ namespace mongo {
         Collections _collections;
 
         mongo::mutex _lock; // TODO: change to r/w lock ??
-
-        friend class ChunkManager;
     };
 
     class ConfigServer : public DBConfig {
@@ -227,9 +219,13 @@ namespace mongo {
         int checkConfigVersion( bool upgrade );
         
         /**
-         * log a change to config.changes 
+         * Create a metadata change log entry in the config.changelog collection.
+         *
          * @param what e.g. "split" , "migrate"
-         * @param msg any more info
+         * @param ns to which collection the metadata change is being applied
+         * @param msg additional info about the metadata change
+         *
+         * This call is guaranteed never to throw.
          */
         void logChange( const string& what , const string& ns , const BSONObj& detail = BSONObj() );
 

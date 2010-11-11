@@ -61,6 +61,9 @@ namespace mongo {
             return _host == r._host && port() == r.port();
         }
 
+        /* returns true if the host/port combo identifies this process instance. */
+        bool isSelf() const; // defined in message.cpp
+
         bool isLocalHost() const;
 
         // @returns host:port
@@ -81,15 +84,40 @@ namespace mongo {
     };
 
     /** returns true if strings seem to be the same hostname.
-        "nyc1" and "nyc1.acme.com" are treated as the same.
-        in fact "nyc1.foo.com" and "nyc1.acme.com" are treated the same - 
-        we oly look up to the first period.
+        "nyc1", "nyc1.acme", and "nyc1.acme.com" are treated as the same.
     */
     inline bool sameHostname(const string& a, const string& b) {
-        return str::before(a, '.') == str::before(b, '.');
+        size_t prefixLen = str::shareCommonPrefix(a.c_str(), b.c_str());
+
+        if (prefixLen == a.size()) { // (a == b) or (a isPrefixOf b)
+            if ( b[prefixLen] == '.' || b[prefixLen] == '\0')
+                return true;
+        } else if(prefixLen == b.size()) { // (b isPrefixOf a)
+            if ( a[prefixLen] == '.') // can't be '\0'
+                return true;
+        }
+
+        return false;
     }
 
     inline HostAndPort HostAndPort::Me() { 
+        const char* ips = cmdLine.bind_ip.c_str();
+        while(*ips){
+            string ip;
+            const char * comma = strchr(ips, ',');
+            if (comma){
+                ip = string(ips, comma - ips);
+                ips = comma + 1;
+            }else{
+                ip = string(ips);
+                ips = "";
+            }
+            HostAndPort h = HostAndPort(ip, cmdLine.port);
+            if (!h.isLocalHost()) {
+                return h;
+            }
+        }
+            
         string h = getHostName();
         assert( !h.empty() );
         assert( h != "localhost" );

@@ -25,10 +25,10 @@
 #include "../db/pdfile.h"
 #include "../db/cmdline.h"
 
-#include "server.h"
-#include "config.h"
 #include "chunk.h"
+#include "config.h"
 #include "grid.h"
+#include "server.h"
 
 namespace mongo {
 
@@ -45,23 +45,23 @@ namespace mongo {
 
     BSONField<bool>      ShardFields::draining("draining");
     BSONField<long long> ShardFields::maxSize ("maxSize");
-    BSONField<long long> ShardFields::currSize("currSize");
 
     OID serverID;
 
     /* --- DBConfig --- */
 
-    DBConfig::CollectionInfo::CollectionInfo( DBConfig * db , const BSONObj& in ){
+    DBConfig::CollectionInfo::CollectionInfo( const BSONObj& in ){
         _dirty = false;
         _dropped = in["dropped"].trueValue();
         if ( in["key"].isABSONObj() )
-            shard( db , in["_id"].String() , in["key"].Obj() , in["unique"].trueValue() );
+            shard( in["_id"].String() , in["key"].Obj() , in["unique"].trueValue() );
     }
 
 
-    void DBConfig::CollectionInfo::shard( DBConfig * db , const string& ns , const ShardKeyPattern& key , bool unique ){
-        _cm.reset( new ChunkManager( db, ns , key , unique ) );
+    void DBConfig::CollectionInfo::shard( const string& ns , const ShardKeyPattern& key , bool unique ){
+        _cm.reset( new ChunkManager( ns , key , unique ) );
         _dirty = true;
+        _dropped = false;
     }
 
     void DBConfig::CollectionInfo::unshard(){
@@ -81,9 +81,11 @@ namespace mongo {
             _cm->getInfo( val );
         
         conn->update( ShardNS::collection , key , val.obj() , true );
+        string err = conn->getLastError();
+        uassert( 13473 , (string)"failed to save collection (" + ns + "): " + err , err.size() == 0 );
+
         _dirty = false;
     }
-
 
     bool DBConfig::isSharded( const string& ns ){
         if ( ! _shardingEnabled )
@@ -124,15 +126,28 @@ namespace mongo {
         scoped_lock lk( _lock );
 
         CollectionInfo& ci = _collections[ns];
-        uassert( 8043 , "already sharded" , ! ci.isSharded() );
+        uassert( 8043 , "collection already sharded" , ! ci.isSharded() );
 
         log() << "enable sharding on: " << ns << " with shard key: " << fieldsAndOrder << endl;
 
-        ci.shard( this , ns , fieldsAndOrder , unique );
-        ci.getCM()->maybeChunkCollection();
+        // From this point on, 'ns' is going to be treated as a sharded collection. We assume this is the first 
+        // time it is seen by the sharded system and thus create the first chunk for the collection. All the remaining
+        // chunks will be created as a by-product of splitting.
+        ci.shard( ns , fieldsAndOrder , unique );        
+        ChunkManagerPtr cm = ci.getCM();
+        uassert( 13449 , "collections already sharded" , (cm->numChunks() == 0) );
+        cm->createFirstChunk( getPrimary() );
+        _save(); 
+                
+        try {
+            cm->maybeChunkCollection();
+        }
+        catch ( UserException& e ){
+            // failure to chunk is not critical enough to abort the command (and undo the _save()'d configDB state)
+            log() << "couldn't chunk recently created collection: " << ns << " " << e << endl;
+        }
 
-        _save();
-        return ci.getCM();
+        return cm;
     }
 
     bool DBConfig::removeSharding( const string& ns ){
@@ -179,29 +194,19 @@ namespace mongo {
         to.append("primary", _primary.getName() );
     }
     
-    bool DBConfig::unserialize(const BSONObj& from){
+    void DBConfig::unserialize(const BSONObj& from){
         log(1) << "DBConfig unserialize: " << _name << " " << from << endl;
         assert( _name == from["_id"].String() );
 
         _shardingEnabled = from.getBoolField("partitioned");
         _primary.reset( from.getStringField("primary") );
 
-        // this is a temporary migration thing
+        // In the 1.5.x series, we used to have collection metadata nested in the database entry. The 1.6.x series
+        // had migration code that ported that info to where it belongs now: the 'collections' collection. We now
+        // just assert that we're not migrating from a 1.5.x directly into a 1.7.x without first converting. 
         BSONObj sharded = from.getObjectField( "sharded" );
-        if ( sharded.isEmpty() )
-             return false;
-        
-        BSONObjIterator i(sharded);
-        while ( i.more() ){
-            BSONElement e = i.next();
-            uassert( 10182 ,  "sharded things have to be objects" , e.type() == Object );
-            
-            BSONObj c = e.embeddedObject();
-            uassert( 10183 ,  "key has to be an object" , c["key"].type() == Object );
-            
-            _collections[e.fieldName()].shard( this , e.fieldName() , c["key"].Obj() , c["unique"].trueValue() );
-        }
-        return true;
+        if ( ! sharded.isEmpty() )
+            uasserted( 13509 , "can't migrate from 1.5.x release to the current one; need to upgrade to 1.6.x first");
     }
 
     bool DBConfig::load(){
@@ -214,24 +219,21 @@ namespace mongo {
         
         BSONObj o = conn->findOne( ShardNS::database , BSON( "_id" << _name ) );
 
-
         if ( o.isEmpty() ){
             conn.done();
             return false;
         }
         
-        if ( unserialize( o ) )
-            _save();
+        unserialize( o );
         
         BSONObjBuilder b;
         b.appendRegex( "_id" , (string)"^" + _name + "." );
-        
 
         auto_ptr<DBClientCursor> cursor = conn->query( ShardNS::collection ,b.obj() );
         assert( cursor.get() );
         while ( cursor->more() ){
             BSONObj o = cursor->next();
-            _collections[o["_id"].String()] = CollectionInfo( this , o );
+            _collections[o["_id"].String()] = CollectionInfo( o );
         }
         
         conn.done();        
@@ -261,7 +263,6 @@ namespace mongo {
 
         conn.done();
     }
-
     
     bool DBConfig::reload(){
         scoped_lock lk( _lock );
@@ -309,7 +310,7 @@ namespace mongo {
 
         // 3
         while ( true ){
-            int num;
+            int num = 0;
             if ( ! _dropShardedCollections( num , allServers , errmsg ) )
                 return 0;
             log() << "   DBConfig::dropDatabase: " << _name << " dropped sharded collections: " << num << endl;
@@ -354,7 +355,7 @@ namespace mongo {
                 if ( i->second.isSharded() )
                     break;
             }
-            
+
             if ( i == _collections.end() )
                 break;
 
@@ -368,15 +369,16 @@ namespace mongo {
 
             i->second.getCM()->getAllShards( allServers );
             i->second.getCM()->drop( i->second.getCM() );
-            
+            uassert( 10176 , str::stream() << "shard state missing for " << i->first , removeSharding( i->first ) );
+
             num++;
             uassert( 10184 ,  "_dropShardedCollections too many collections - bailing" , num < 100000 );
             log(2) << "\t\t dropped " << num << " so far" << endl;
         }
-        
+
         return true;
     }
-    
+
     void DBConfig::getAllShards(set<Shard>& shards) const{
         shards.insert(getPrimary());
         for (Collections::const_iterator it(_collections.begin()), end(_collections.end()); it != end; ++it){
@@ -628,40 +630,48 @@ namespace mongo {
         return name;
     }
 
+    /* must never throw */
     void ConfigServer::logChange( const string& what , const string& ns , const BSONObj& detail ){
-        assert( _primary.ok() );
-
-        static bool createdCapped = false;
-        static AtomicUInt num;
-        
-        ScopedDbConnection conn( _primary );
-        
-        if ( ! createdCapped ){
-            try {
-                conn->createCollection( "config.changelog" , 1024 * 1024 * 10 , true );
-            }
-            catch ( UserException& e ){
-                log(1) << "couldn't create changelog (like race condition): " << e << endl;
-                // don't care
-            }
-            createdCapped = true;
-        }
-     
-        stringstream id;
-        id << getHostNameCached() << "-" << terseCurrentTime() << "-" << num++;
-
-        BSONObj msg = BSON( "_id" << id.str() << "server" << getHostNameCached() << "time" << DATENOW <<
-                            "what" << what << "ns" << ns << "details" << detail );
-        log() << "config change: " << msg << endl;
+        string changeID;
 
         try {
-            conn->insert( "config.changelog" , msg );
-        }
-        catch ( std::exception& e ){
-            log() << "not logging config change: " << e.what() << endl;                
-        }
+            // get this entry's ID so we can use on the exception code path too
+            stringstream id;
+            static AtomicUInt num;
+            id << getHostNameCached() << "-" << terseCurrentTime() << "-" << num++;
+            changeID = id.str();
+
+            // send a copy of the message to the log in case it doesn't manage to reach config.changelog
+            BSONObj msg = BSON( "_id" << changeID << "server" << getHostNameCached() << "time" << DATENOW <<
+                                "what" << what << "ns" << ns << "details" << detail );
+            log() << "about to issue config change: " << msg << endl;
+
+            assert( _primary.ok() );
+
+            ScopedDbConnection conn( _primary );
         
-        conn.done();
+            static bool createdCapped = false;
+            if ( ! createdCapped ){
+                try {
+                    conn->createCollection( "config.changelog" , 1024 * 1024 * 10 , true );
+                }
+                catch ( UserException& e ){
+                    log(1) << "couldn't create changelog (like race condition): " << e << endl;
+                    // don't care
+                }
+                createdCapped = true;
+            }
+     
+            conn->insert( "config.changelog" , msg );
+
+            conn.done();
+
+        }
+
+        catch ( std::exception& e ) {
+            // if we got here, it means the config change is only in the log; it didn't make it to config.changelog
+            log() << "not logging config change: " << changeID << " " << e.what() << endl;
+        }
     }
 
     DBConfigPtr configServerPtr (new ConfigServer());    

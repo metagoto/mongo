@@ -18,9 +18,10 @@
 #pragma once
 
 #include "../pch.h"
-#include "../util/goodies.h"
 
 #include <queue>
+
+#include "../util/timer.h"
 
 namespace mongo {
     
@@ -80,8 +81,7 @@ namespace mongo {
 
             scoped_lock l( _lock );
             while( _queue.empty() ){
-                _condition.timed_wait( l.boost() , xt );
-                if ( timer.seconds() >= maxSecondsToWait )
+                if ( ! _condition.timed_wait( l.boost() , xt ) )
                     return false;
             }
             

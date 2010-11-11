@@ -46,27 +46,30 @@ namespace mongo {
             ("verbose,v", "be more verbose (include multiple times for more verbosity e.g. -vvvvv)")
             ;
 
-        if ( access == ALL || access == NO_LOCAL){
+        if ( access & REMOTE_SERVER )
             _options->add_options()
                 ("host,h",po::value<string>(), "mongo host to connect to (\"left,right\" for pairs)" )
                 ("port",po::value<string>(), "server port. Can also use --host hostname:port" )
-                ("db,d",po::value<string>(), "database to use" )
-                ("collection,c",po::value<string>(), "collection to use (some commands)" )
+                ("ipv6", "enable IPv6 support (disabled by default)")
+
                 ("username,u",po::value<string>(), "username" )
                 ("password,p", new PasswordValue( &_password ), "password" )
-                ("ipv6", "enable IPv6 support (disabled by default)")
                 ;
-        }
-
-        if ( access == ALL ) {
+        
+        if ( access & LOCAL_SERVER )
             _options->add_options()
                 ("dbpath",po::value<string>(), "directly access mongod database "
                  "files in the given path, instead of connecting to a mongod  "
                  "server - needs to lock the data directory, so cannot be "
                  "used if a mongod is currently accessing the same path" )
                 ("directoryperdb", "if dbpath specified, each db is in a separate directory" )
+                ;            
+        
+        if ( access & SPECIFY_DBCOL )
+            _options->add_options()
+                ("db,d",po::value<string>(), "database to use" )
+                ("collection,c",po::value<string>(), "collection to use (some commands)" )
                 ;
-        }
 
         _hidden_options = new po::options_description( name + " hidden options" );
 
@@ -173,9 +176,10 @@ namespace mongo {
                     cerr << "couldn't connect to [" << _host << "] " << errmsg << endl;
                     return -1;
                 }
+
+                (_usesstdout ? cout : cerr ) << "connected to: " << _host << endl;
             }
-            
-            (_usesstdout ? cout : cerr ) << "connected to: " << _host << endl;
+
         }
         else {
             if ( _params.count( "directoryperdb" ) ) {
@@ -236,10 +240,27 @@ namespace mongo {
     }
 
     DBClientBase& Tool::conn( bool slaveIfPaired ){
-        // TODO: _paired is deprecated
         if ( slaveIfPaired && _conn->type() == ConnectionString::SET )
             return ((DBClientReplicaSet*)_conn)->slaveConn();
         return *_conn;
+    }
+
+    bool Tool::isMaster() {
+        if ( hasParam("dbpath") ) {
+            return true;
+        }
+        
+        BSONObj info;
+        bool isMaster;
+        bool ok = conn().isMaster(isMaster, &info);
+        
+        if (ok && !isMaster) {
+            cerr << "ERROR: trying to write to non-master " << conn().toString() << endl;
+            cerr << "isMaster info: " << info << endl;
+            return false;
+        }
+        
+        return true;
     }
 
     void Tool::addFieldOptions(){
@@ -414,5 +435,5 @@ namespace mongo {
             
 
 
-    void setupSignals(){}
+    void setupSignals( bool inFork ){}
 }

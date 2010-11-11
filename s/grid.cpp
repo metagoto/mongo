@@ -19,9 +19,9 @@
 #include "pch.h"
 
 #include <iomanip>
-
 #include "../client/connpool.h"
 #include "../util/stringutils.h"
+#include "../util/unittest.h"
 
 #include "grid.h"
 #include "shard.h"
@@ -138,8 +138,18 @@ namespace mongo {
                 return false;
             }
 
+            BSONObj resIsMongos;
+            bool ok = newShardConn->runCommand( "admin" , BSON( "isdbgrid" << 1 ) , resIsMongos );
+
+            // should return ok=0, cmd not found if it's a normal mongod
+            if ( ok ) {
+                errMsg = "can't add a mongos process as a shard";
+                newShardConn.done();
+                return false;
+            }
+            
             BSONObj resIsMaster;
-            bool ok =  newShardConn->runCommand( "admin" , BSON( "isMaster" << 1 ) , resIsMaster );
+            ok =  newShardConn->runCommand( "admin" , BSON( "isMaster" << 1 ) , resIsMaster );
             if ( !ok ){
                 ostringstream ss;
                 ss << "failed running isMaster: " << resIsMaster;
@@ -178,6 +188,12 @@ namespace mongo {
                 while ( iter.more() ){
                     hostSet.insert( iter.next().String() ); // host:port
                 }
+                if ( resIsMaster["passives"].isABSONObj() ){
+                    BSONObjIterator piter( resIsMaster["passives"].Obj() );
+                    while ( piter.more() ){
+                        hostSet.insert( piter.next().String() ); // host:port
+                    }
+                }
 
                 vector<HostAndPort> hosts = servers.getServers();
                 for ( size_t i = 0 ; i < hosts.size() ; i++ ){
@@ -191,7 +207,7 @@ namespace mongo {
             }
             if ( ! foundAll ){
                 ostringstream ss;
-                ss << "host " << offendingHost << " does not belong to replica set " << setName;;
+                ss << "host " << offendingHost << " does not belong to replica set as a non-passive member" << setName;;
                 errMsg = ss.str();
                 newShardConn.done();
                 return false;
@@ -337,9 +353,69 @@ namespace mongo {
         ShardConnection conn( configServer.getPrimary() , "" );
 
         // look for the stop balancer marker
-        BSONObj stopMarker = conn->findOne( ShardNS::settings, BSON( "_id" << "balancer" << "stopped" << true ) );
+        BSONObj balancerDoc = conn->findOne( ShardNS::settings, BSON( "_id" << "balancer" ) );
         conn.done();
-        return stopMarker.isEmpty();
+
+        boost::posix_time::ptime now = boost::posix_time::second_clock::local_time();
+        if ( _balancerStopped( balancerDoc ) || ! _inBalancingWindow( balancerDoc , now ) ) {
+            return false;
+        }
+
+        return true;
+    }
+
+    bool Grid::_balancerStopped( const BSONObj& balancerDoc ) { 
+        // check the 'stopped' marker maker
+        // if present, it is a simple bool
+        BSONElement stoppedElem = balancerDoc["stopped"];
+        if ( ! stoppedElem.eoo() && stoppedElem.isBoolean() ) {
+            return stoppedElem.boolean();
+        }
+        return false;
+    }
+
+    bool Grid::_inBalancingWindow( const BSONObj& balancerDoc , const boost::posix_time::ptime& now ) { 
+        // check the 'activeWindow' marker
+        // if present, it is an interval during the day when the balancer should be active
+        // { start: "08:00" , stop: "19:30" }, strftime format is %H:%M 
+        BSONElement windowElem = balancerDoc["activeWindow"];
+        if ( windowElem.eoo() ) {
+            return true;
+        }
+
+        // check if both 'start' and 'stop' are present
+        if ( ! windowElem.isABSONObj() ) {
+            log(1) << "'activeWindow' format is { start: \"hh:mm\" , stop: ... }" << balancerDoc << endl;
+            return true;
+        }
+        BSONObj intervalDoc = windowElem.Obj();
+        const string start = intervalDoc["start"].str();
+        const string stop = intervalDoc["stop"].str();
+        if ( start.empty() || stop.empty() ) {
+            log(1) << "must specify both start and end of balancing window: " << intervalDoc << endl;
+            return true;
+        }
+
+        // check that both 'start' and 'stop' are valid time-of-day
+        boost::posix_time::ptime startTime, stopTime;
+        if ( ! toPointInTime( start , &startTime ) || ! toPointInTime( stop , &stopTime ) ) {
+            log(1) << "cannot parse active window (use hh:mm 24hs format): " << intervalDoc << endl;
+            return true;
+        }
+        
+        // allow balancing if during the activeWindow
+        // note that a window may be open during the night
+        if ( stopTime > startTime ) {
+            if ( ( now >= startTime ) && ( now <= stopTime ) ) {
+                return true;
+            }
+        } else if ( startTime > stopTime ) {
+            if ( ( now >=startTime ) || ( now <= stopTime ) ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     unsigned long long Grid::getNextOpTime() const {
@@ -357,5 +433,46 @@ namespace mongo {
     }
 
     Grid grid;
+
+    // unit tests
+
+    class BalancingWindowUnitTest : public UnitTest {
+    public:
+        void run(){
+            // T0 < T1 < now < T2 < T3 and Error
+            const string T0 = "9:00";
+            const string T1 = "11:00";
+            boost::posix_time::ptime now( currentDate(), boost::posix_time::hours( 13 ) + boost::posix_time::minutes( 48 ) );
+            const string T2 = "17:00";
+            const string T3 = "21:30";
+            const string E = "28:35";
+            
+            BSONObj w1 = BSON( "activeWindow" << BSON( "start" << T0 << "stop" << T1 ) ); // closed in the past
+            BSONObj w2 = BSON( "activeWindow" << BSON( "start" << T2 << "stop" << T3 ) ); // not opened until the future
+            BSONObj w3 = BSON( "activeWindow" << BSON( "start" << T1 << "stop" << T2 ) ); // open now
+            BSONObj w4 = BSON( "activeWindow" << BSON( "start" << T3 << "stop" << T2 ) ); // open since last day
+ 
+            assert( ! Grid::_inBalancingWindow( w1 , now ) );
+            assert( ! Grid::_inBalancingWindow( w2 , now ) );
+            assert( Grid::_inBalancingWindow( w3 , now ) );
+            assert( Grid::_inBalancingWindow( w4 , now ) );
+            
+            // bad input should not stop the balancer
+
+            BSONObj w5; // empty window
+            BSONObj w6 = BSON( "activeWindow" << BSON( "start" << 1 ) ); // missing stop
+            BSONObj w7 = BSON( "activeWindow" << BSON( "stop" << 1 ) ); // missing start
+            BSONObj w8 = BSON( "wrongMarker" << 1 << "start" << 1 << "stop" << 1 ); // active window marker missing
+            BSONObj w9 = BSON( "activeWindow" << BSON( "start" << T3 << "stop" << E ) ); // garbage in window
+ 
+            assert( Grid::_inBalancingWindow( w5 , now ) );
+            assert( Grid::_inBalancingWindow( w6 , now ) );
+            assert( Grid::_inBalancingWindow( w7 , now ) );
+            assert( Grid::_inBalancingWindow( w8 , now ) );
+            assert( Grid::_inBalancingWindow( w9 , now ) );
+
+            log(1) << "BalancingWidowObjTest passed" << endl;
+        }
+    } BalancingWindowObjTest;
 
 } 

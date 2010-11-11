@@ -31,7 +31,7 @@
 namespace mongo {
 
     const char* Mod::modNames[] = { "$inc", "$set", "$push", "$pushAll", "$pull", "$pullAll" , "$pop", "$unset" ,
-                                    "$bitand" , "$bitor" , "$bit" , "$addToSet" };
+                                    "$bitand" , "$bitor" , "$bit" , "$addToSet", "$rename", "$rename" };
     unsigned Mod::modNamesNum = sizeof(Mod::modNames)/sizeof(char*);
 
     bool Mod::_pullElementMatch( BSONElement& toMatch ) const {
@@ -40,6 +40,9 @@ namespace mongo {
             // if elt isn't an object, then comparison will work
             return toMatch.woCompare( elt , false ) == 0;
         }
+        
+        if ( matcherOnPrimitive )
+            return matcher->matches( toMatch.wrap( "" ) );
 
         if ( toMatch.type() != Object ){
             // looking for an object, so this can't match
@@ -64,8 +67,16 @@ namespace mongo {
             ms.inclong = elt.numberLong() + in.numberLong();
         }
         else {
-            ms.incType = NumberInt;
-            ms.incint = elt.numberInt() + in.numberInt();
+            int x = elt.numberInt() + in.numberInt();
+            if ( x < 0 && elt.numberInt() > 0 && in.numberInt() > 0 ){
+                // overflow
+                ms.incType = NumberLong;
+                ms.inclong = elt.numberLong() + in.numberLong();
+            }
+            else {
+                ms.incType = NumberInt;
+                ms.incint = elt.numberInt() + in.numberInt();
+            }
         }
         
         ms.appendIncValue( bb , false );
@@ -82,6 +93,10 @@ namespace mongo {
     
     template< class Builder >
     void Mod::apply( Builder& b , BSONElement in , ModState& ms ) const {
+        if ( ms.dontApply ) {
+            return;
+        }
+        
         switch ( op ){
         
         case INC: {
@@ -136,8 +151,13 @@ namespace mongo {
                     toadd.erase( cur );
                 }
                 
-                for ( BSONElementSet::iterator j=toadd.begin(); j!=toadd.end(); j++ ){
-                    bb.appendAs( *j , BSONObjBuilder::numStr( n++ ) );
+                {
+                    BSONObjIterator i( getEach() );
+                    while ( i.more() ){
+                        BSONElement e = i.next();
+                        if ( toadd.count(e) )
+                            bb.appendAs( e , BSONObjBuilder::numStr( n++ ) );
+                    }
                 }
 
             }
@@ -299,6 +319,15 @@ namespace mongo {
             break;
         }
 
+        case RENAME_FROM: {
+            break;
+        }
+
+        case RENAME_TO: {
+            ms.handleRename( b, shortFieldName );
+            break;
+        }
+                
         default:
             stringstream ss;
             ss << "Mod::apply can't handle type: " << op;
@@ -306,6 +335,25 @@ namespace mongo {
         }
     }
 
+    // -1 inside a non-object (non-object could be array)
+    // 0 missing
+    // 1 found
+    int validRenamePath( BSONObj obj, const char *path ) {
+        while( const char *p = strchr( path, '.' ) ) {
+            string left( path, p - path );
+            BSONElement e = obj.getField( left );
+            if ( e.eoo() ) {
+                return 0;
+            }
+            if ( e.type() != Object ) {
+                return -1;
+            }
+            obj = e.embeddedObject();
+            path = p + 1;
+        }
+        return !obj.getField( path ).eoo();
+    }
+    
     auto_ptr<ModSetState> ModSet::prepare(const BSONObj &obj) const {
         DEBUGUPDATE( "\t start prepare" );
         ModSetState * mss = new ModSetState( obj );
@@ -322,6 +370,28 @@ namespace mongo {
             ms.m = &m;
             ms.old = e;
 
+            if ( m.op == Mod::RENAME_FROM ) {
+                int source = validRenamePath( obj, m.fieldName );
+                uassert( 13489, "$rename source field invalid", source != -1 );
+                if ( source != 1 ) {
+                    ms.dontApply = true;
+                }
+                continue;
+            }
+            
+            if ( m.op == Mod::RENAME_TO ) {
+                int source = validRenamePath( obj, m.renameFrom() );
+                if ( source == 1 ) {
+                    int target = validRenamePath( obj, m.fieldName );
+                    uassert( 13490, "$rename target field invalid", target != -1 );
+                    ms.newVal = obj.getFieldDotted( m.renameFrom() );
+                    mss->amIInPlacePossible( false );
+                } else {
+                    ms.dontApply = true;
+                }
+                continue;                
+            }
+            
             if ( e.eoo() ) {
                 mss->amIInPlacePossible( m.op == Mod::UNSET );
                 continue;
@@ -335,6 +405,11 @@ namespace mongo {
                     if ( m.elt.type() != e.type() ){
                         // if i'm incrememnting with a double, then the storage has to be a double
                         mss->amIInPlacePossible( m.elt.type() != NumberDouble ); 
+                    }
+                    
+                    // check for overflow
+                    if ( e.type() == NumberInt && e.numberLong() + m.elt.numberLong() > numeric_limits<int>::max() ){
+                        mss->amIInPlacePossible( false );
                     }
                 }
                 break;
@@ -417,11 +492,30 @@ namespace mongo {
     }
 
     void ModState::appendForOpLog( BSONObjBuilder& b ) const {
+        if ( dontApply ) {
+            return;
+        }
+        
         if ( incType ){
             DEBUGUPDATE( "\t\t\t\t\t appendForOpLog inc fieldname: " << m->fieldName << " short:" << m->shortFieldName );
             BSONObjBuilder bb( b.subobjStart( "$set" ) );
             appendIncValue( bb , true );
             bb.done();
+            return;
+        }
+
+        if ( m->op == Mod::RENAME_FROM ) {
+            DEBUGUPDATE( "\t\t\t\t\t appendForOpLog RENAME_FROM fielName:" << m->fieldName );
+            BSONObjBuilder bb( b.subobjStart( "$unset" ) );
+            bb.append( m->fieldName, 1 );
+            bb.done();
+            return;
+        }
+        
+        if ( m->op == Mod::RENAME_TO ) {
+            DEBUGUPDATE( "\t\t\t\t\t appendForOpLog RENAME_TO fielName:" << m->fieldName );
+            BSONObjBuilder bb( b.subobjStart( "$set" ) );
+            bb.appendAs( newVal, m->fieldName );
             return;
         }
         
@@ -430,10 +524,11 @@ namespace mongo {
         DEBUGUPDATE( "\t\t\t\t\t appendForOpLog name:" << name << " fixed: " << fixed << " fn: " << m->fieldName );
 
         BSONObjBuilder bb( b.subobjStart( name ) );
-        if ( fixed )
+        if ( fixed ) {
             bb.appendAs( *fixed , m->fieldName );
-        else
+        } else {
             bb.appendAs( m->elt , m->fieldName );
+        }
         bb.done();
     }
 
@@ -446,29 +541,54 @@ namespace mongo {
         return ss.str();
     }
     
-    void ModSetState::applyModsInPlace() {
+    template< class Builder >
+    void ModState::handleRename( Builder &newObjBuilder, const char *shortFieldName ) {
+        newObjBuilder.appendAs( newVal , shortFieldName );
+        BSONObjBuilder b;
+        b.appendAs( newVal, shortFieldName );
+        assert( _objData.isEmpty() );
+        _objData = b.obj();
+        newVal = _objData.firstElement();            
+    }    
+
+    void ModSetState::applyModsInPlace( bool isOnDisk ) {
+        // TODO i think this assert means that we can get rid of the isOnDisk param
+        //      and just use isOwned as the determination
+        DEV assert( isOnDisk == ! _obj.isOwned() );
+
         for ( ModStateHolder::iterator i = _mods.begin(); i != _mods.end(); ++i ) {
-            ModState& m = i->second;
+            ModState& m = i->second;  
+            
+            if ( m.dontApply ) {
+                continue;
+            }
             
             switch ( m.m->op ){
             case Mod::UNSET:
             case Mod::PULL:
             case Mod::PULL_ALL:
             case Mod::ADDTOSET:
+            case Mod::RENAME_FROM:
+            case Mod::RENAME_TO:
                 // this should have been handled by prepare
                 break;
-
             // [dm] the BSONElementManipulator statements below are for replication (correct?)
             case Mod::INC:
-                m.m->incrementMe( m.old );
+                if ( isOnDisk )
+                    m.m->IncrementMe( m.old );
+                else
+                    m.m->incrementMe( m.old );
                 m.fixedOpName = "$set";
                 m.fixed = &(m.old);
                 break;
             case Mod::SET:
-                BSONElementManipulator( m.old ).replaceTypeAndValue( m.m->elt );
+                if ( isOnDisk )
+                    BSONElementManipulator( m.old ).ReplaceTypeAndValue( m.m->elt );
+                else
+                    BSONElementManipulator( m.old ).replaceTypeAndValue( m.m->elt );
                 break;
             default:
-                uassert( 10144 ,  "can't apply mod in place - shouldn't have gotten here" , 0 );
+                uassert( 13478 ,  "can't apply mod in place - shouldn't have gotten here" , 0 );
             }
         }
     }
@@ -534,7 +654,7 @@ namespace mongo {
             switch ( cmp ){
                 
             case LEFT_SUBFIELD: { // Mod is embeddeed under this element
-                uassert( 10145 ,  "LEFT_SUBFIELD only supports Object" , e.type() == Object || e.type() == Array );
+                uassert( 10145 ,  str::stream() << "LEFT_SUBFIELD only supports Object: " << field << " not: " << e.type() , e.type() == Object || e.type() == Array );
                 if ( onedownseen.count( e.fieldName() ) == 0 ){
                     onedownseen.insert( e.fieldName() );
                     if ( e.type() == Object ) {
@@ -602,7 +722,7 @@ namespace mongo {
     BSONObj ModSetState::createNewFromMods() {
         BSONObjBuilder b( (int)(_obj.objsize() * 1.1) );
         createNewFromMods( "" , b , _obj );
-        return b.obj();
+        return _newFromMods = b.obj();
     }
 
     string ModSetState::toString() const {
@@ -639,7 +759,7 @@ namespace mongo {
         auto_ptr<ModSetState> mss = prepare( newObj );
 
         if ( mss->canApplyInPlace() )
-            mss->applyModsInPlace();
+            mss->applyModsInPlace( false );
         else
             newObj = mss->createNewFromMods();
         
@@ -686,17 +806,44 @@ namespace mongo {
                 uassert( 10152 ,  "Modifier $inc allowed for numbers only", f.isNumber() || op != Mod::INC );
                 uassert( 10153 ,  "Modifier $pushAll/pullAll allowed for arrays only", f.type() == Array || ( op != Mod::PUSH_ALL && op != Mod::PULL_ALL ) );
                 
+                if ( op == Mod::RENAME_TO ) {
+                    uassert( 13494, "$rename target must be a string", f.type() == String );
+                    const char *target = f.valuestr();
+                    uassert( 13495, "$rename source must differ from target", strcmp( fieldName, target ) != 0 );
+                    uassert( 13496, "invalid mod field name, source may not be empty", fieldName[0] );
+                    uassert( 13479, "invalid mod field name, target may not be empty", target[0] );
+                    uassert( 13480, "invalid mod field name, source may not begin or end in period", fieldName[0] != '.' && fieldName[ strlen( fieldName ) - 1 ] != '.' );
+                    uassert( 13481, "invalid mod field name, target may not begin or end in period", target[0] != '.' && target[ strlen( target ) - 1 ] != '.' );
+                    uassert( 13482, "$rename affecting _id not allowed", !( fieldName[0] == '_' && fieldName[1] == 'i' && fieldName[2] == 'd' && ( !fieldName[3] || fieldName[3] == '.' ) ) );
+                    uassert( 13483, "$rename affecting _id not allowed", !( target[0] == '_' && target[1] == 'i' && target[2] == 'd' && ( !target[3] || target[3] == '.' ) ) );
+                    uassert( 13484, "field name duplication not allowed with $rename target", !haveModForField( target ) );
+                    uassert( 13485, "conflicting mods not allowed with $rename target", !haveConflictingMod( target ) );
+                    uassert( 13486, "$rename target may not be a parent of source", !( strncmp( fieldName, target, strlen( target ) ) == 0 && fieldName[ strlen( target ) ] == '.' ) );
+                    uassert( 13487, "$rename source may not be dynamic array", strstr( fieldName , ".$" ) == 0 );
+                    uassert( 13488, "$rename target may not be dynamic array", strstr( target , ".$" ) == 0 );
+
+                    Mod from;
+                    from.init( Mod::RENAME_FROM, f );
+                    from.setFieldName( fieldName );
+                    updateIsIndexed( from, idxKeys, backgroundKeys );
+                    _mods[ from.fieldName ] = from;
+
+                    Mod to;
+                    to.init( Mod::RENAME_TO, f );
+                    to.setFieldName( target );
+                    updateIsIndexed( to, idxKeys, backgroundKeys );
+                    _mods[ to.fieldName ] = to;
+                    
+                    DEBUGUPDATE( "\t\t " << fieldName << "\t" << from.fieldName << "\t" << to.fieldName );
+                    continue;
+                }
+                
                 _hasDynamicArray = _hasDynamicArray || strstr( fieldName , ".$" ) > 0;
                 
                 Mod m;
                 m.init( op , f );
                 m.setFieldName( f.fieldName() );
-                
-                if ( m.isIndexed( idxKeys ) ||
-                    (backgroundKeys && m.isIndexed(*backgroundKeys)) ) {
-                    _isIndexed++;
-                }
-
+                updateIsIndexed( m, idxKeys, backgroundKeys );
                 _mods[m.fieldName] = m;
 
                 DEBUGUPDATE( "\t\t " << fieldName << "\t" << m.fieldName << "\t" << _hasDynamicArray );
@@ -793,7 +940,7 @@ namespace mongo {
     };
 
     static void checkTooLarge(const BSONObj& newObj) {
-        uassert( 12522 , "$ operator made object too large" , newObj.objsize() <= ( 4 * 1024 * 1024 ) );
+        uassert( 12522 , "$ operator made object too large" , newObj.objsize() <= BSONObjMaxUserSize );
     }
 
     /* note: this is only (as-is) called for 
@@ -827,7 +974,7 @@ namespace mongo {
             auto_ptr<ModSetState> mss = mods->prepare( onDisk );
                     
             if( mss->canApplyInPlace() ) {
-                mss->applyModsInPlace();                    
+                mss->applyModsInPlace(true);
                 DEBUGUPDATE( "\t\t\t updateById doing in place update" );
                 /*if ( profile )
                     ss << " fastmod "; */
@@ -1019,7 +1166,7 @@ namespace mongo {
                 }
                     
                 if ( modsIsIndexed <= 0 && mss->canApplyInPlace() ){
-                    mss->applyModsInPlace();// const_cast<BSONObj&>(onDisk) );
+                    mss->applyModsInPlace( true );// const_cast<BSONObj&>(onDisk) );
                     
                     DEBUGUPDATE( "\t\t\t doing in place update" );
                     if ( profile )

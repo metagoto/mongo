@@ -44,7 +44,7 @@ namespace mongo {
     list<HostAndPort> ReplSetConfig::otherMemberHostnames() const { 
         list<HostAndPort> L;
         for( vector<MemberCfg>::const_iterator i = members.begin(); i != members.end(); i++ ) {
-            if( !ListeningSockets::listeningOn(i->h) )
+            if( !i->h.isSelf() )
                 L.push_back(i->h);
         }
         return L;
@@ -93,6 +93,13 @@ namespace mongo {
         if( arbiterOnly ) b << "arbiterOnly" << true;
         if( slaveDelay ) b << "slaveDelay" << slaveDelay;
         if( hidden ) b << "hidden" << hidden;
+        if( !buildIndexes ) b << "buildIndexes" << buildIndexes;
+        if( !tags.empty() ) { 
+            BSONArrayBuilder a;
+            for( set<string>::const_iterator i = tags.begin(); i != tags.end(); i++ )
+                a.append(*i);
+            b.appendArray("tags", a.done());
+        }
         return b.obj();
     }
 
@@ -103,8 +110,8 @@ namespace mongo {
             bob settings;
             if( !ho.isDefault() )
                 settings << "heartbeatConnRetries " << ho.heartbeatConnRetries  << 
-                             "heartbeatSleep" << ho.heartbeatSleepMillis / 1000 << 
-                             "heartbeatTimeout" << ho.heartbeatTimeoutMillis / 1000;
+                             "heartbeatSleep" << ho.heartbeatSleepMillis / 1000.0 << 
+                             "heartbeatTimeout" << ho.heartbeatTimeoutMillis / 1000.0;
             if( !getLastErrorDefaults.isEmpty() )
                 settings << "getLastErrorDefaults" << getLastErrorDefaults;
             b << "settings" << settings.obj();
@@ -130,12 +137,14 @@ namespace mongo {
         uassert(13437, "slaveDelay requires priority be zero", slaveDelay == 0 || priority == 0);
         uassert(13438, "bad slaveDelay value", slaveDelay >= 0 && slaveDelay <= 3600 * 24 * 366);
         uassert(13439, "priority must be 0 when hidden=true", priority == 0 || !hidden);
+        uassert(13477, "priority must be 0 when buildIndexes=false", priority == 0 || !hidden);
     }
 
     /** @param o old config
         @param n new config 
         */
-    /*static*/ bool ReplSetConfig::legalChange(const ReplSetConfig& o, const ReplSetConfig& n, string& errmsg) { 
+    /*static*/ 
+    bool ReplSetConfig::legalChange(const ReplSetConfig& o, const ReplSetConfig& n, string& errmsg) { 
         assert( theReplSet );
 
         if( o._id != n._id ) { 
@@ -159,12 +168,23 @@ namespace mongo {
         for( vector<ReplSetConfig::MemberCfg>::const_iterator i = n.members.begin(); i != n.members.end(); i++ ) { 
             const ReplSetConfig::MemberCfg& m = *i;
             if( old.count(m.h) ) { 
-                if( old[m.h]->_id != m._id ) { 
+                const ReplSetConfig::MemberCfg& oldCfg = *old[m.h];
+                if( oldCfg._id != m._id ) { 
                     log() << "replSet reconfig error with member: " << m.h.toString() << rsLog;
                     uasserted(13432, "_id may not change for members");
                 }
+                if( oldCfg.buildIndexes != m.buildIndexes ) { 
+                    log() << "replSet reconfig error with member: " << m.h.toString() << rsLog;
+                    uasserted(13476, "buildIndexes may not change for members");
+                }
+                /* are transitions to and from arbiterOnly guaranteed safe?  if not, we should disallow here.
+                   there is a test at replsets/replsetarb3.js */
+                if( oldCfg.arbiterOnly != m.arbiterOnly ) { 
+                    log() << "replSet reconfig error with member: " << m.h.toString() << " arbiterOnly cannot change. remove and readd the member instead " << rsLog;
+                    uasserted(13510, "arbiterOnly may not change for members");
+                }
             }
-            if( ListeningSockets::listeningOn(m.h) ) 
+            if( m.h.isSelf() ) 
                 me++;
         }
 
@@ -231,8 +251,8 @@ namespace mongo {
             BSONObj mobj = members[i].Obj();
             MemberCfg m;
             try {
-                static const string legal[] = {"_id","votes","priority","host","hidden","slaveDelay","arbiterOnly"};
-                static const set<string> legals(legal, legal + 7);
+                static const string legal[] = {"_id","votes","priority","host","hidden","slaveDelay","arbiterOnly","buildIndexes","tags"};
+                static const set<string> legals(legal, legal + 8);
                 assertOnlyHas(mobj, legals);
 
                 try { 
@@ -255,10 +275,17 @@ namespace mongo {
                 m.slaveDelay = mobj["slaveDelay"].numberInt();
                 if( mobj.hasElement("hidden") )
                     m.hidden = mobj.getBoolField("hidden");
+                if( mobj.hasElement("buildIndexes") ) 
+                    m.buildIndexes = mobj.getBoolField("buildIndexes");
                 if( mobj.hasElement("priority") )
                     m.priority = mobj["priority"].Number();
                 if( mobj.hasElement("votes") )
                     m.votes = (unsigned) mobj["votes"].Number();
+                if( mobj.hasElement("tags") ) {
+                    vector<BSONElement> v = mobj["tags"].Array();
+                    for( unsigned i = 0; i < v.size(); i++ )
+                        m.tags.insert( v[i].String() );
+                }
                 m.check();
             }
             catch( const char * p ) { 
@@ -302,12 +329,11 @@ namespace mongo {
         clear();
         int level = 2;
         DEV level = 0;
-        //log(0) << "replSet load config from: " << h.toString() << rsLog;
 
-        auto_ptr<DBClientCursor> c;
+        BSONObj cfg;
         int v = -5;
         try {
-            if( ListeningSockets::listeningOn(h) ) {
+            if( h.isSelf() ) {
                 ;
             }
             else {
@@ -337,13 +363,28 @@ namespace mongo {
             }
 
             v = -4;
-            ScopedConn conn(h.toString());
-            v = -3;
-            c = conn->query(rsConfigNs);
-            if( c.get() == 0 ) {
-                version = v; return;
+            unsigned long long count = 0;
+            try {
+                ScopedConn conn(h.toString());
+                v = -3;
+                cfg = conn.findOne(rsConfigNs, Query()).getOwned();
+                count = conn.count(rsConfigNs);
             }
-            if( !c->more() ) {
+            catch ( DBException& ) {
+                if ( !h.isSelf() ) {
+                    throw;
+                }
+
+                // on startup, socket is not listening yet
+                DBDirectClient cli;
+                cfg = cli.findOne( rsConfigNs, Query() ).getOwned();
+                count = cli.count(rsConfigNs);
+            }
+
+            if( count > 1 )
+                uasserted(13109, str::stream() << "multiple rows in " << rsConfigNs << " not supported host: " << h.toString());
+            
+            if( cfg.isEmpty() ) {
                 version = EMPTYCONFIG;
                 return;
             }
@@ -355,12 +396,10 @@ namespace mongo {
             return;
         }
 
-        BSONObj o = c->nextSafe();
-        uassert(13109, "multiple rows in " + rsConfigNs + " not supported", !c->more());
-        from(o);
+        from(cfg);
         checkRsConfig();
         _ok = true;
-        log(level) << "replSet load config ok from " << (ListeningSockets::listeningOn(h) ? "self" : h.toString()) << rsLog;
+        log(level) << "replSet load config ok from " << (h.isSelf() ? "self" : h.toString()) << rsLog;
     }
 
 }

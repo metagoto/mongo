@@ -19,23 +19,14 @@
 #include "../../client/dbclient.h"
 #include "rs.h"
 #include "../repl.h"
-
+#include "connections.h"
 namespace mongo {
 
     using namespace bson;
-
     extern unsigned replSetForceInitialSyncFailure;
 
-    void startSyncThread() { 
-        Client::initThread("rs_sync");
-        cc().iAmSyncThread();
-        theReplSet->syncThread();
-        cc().shutdown();
-    }
-
+    /* apply the log op that is in param o */
     void ReplSetImpl::syncApply(const BSONObj &o) {
-        //const char *op = o.getStringField("op");
-        
         char db[MaxDatabaseNameLen];
         const char *ns = o.getStringField("ns");
         nsToDatabase(ns, db);
@@ -54,23 +45,34 @@ namespace mongo {
         applyOperation_inlock(o);
     }
 
+    /* initial oplog application, during initial sync, after cloning. 
+       @return false on failure.  
+       this method returns an error and doesn't throw exceptions (i think).
+    */
     bool ReplSetImpl::initialSyncOplogApplication(
-        string hn, 
-        const Member *primary,
+        const Member *source,
         OpTime applyGTE,
         OpTime minValid)
     { 
-        if( primary == 0 ) return false;
+        if( source == 0 ) return false;
 
+        const string hn = source->h().toString();
         OpTime ts;
         try {
             OplogReader r;
             if( !r.connect(hn) ) { 
-                log(2) << "replSet can't connect to " << hn << " to read operations" << rsLog;
+                log() << "replSet initial sync error can't connect to " << hn << " to read " << rsoplog << rsLog;
                 return false;
             }
 
-            r.query(rsoplog, bo());
+            {
+                BSONObjBuilder q;
+                q.appendDate("$gte", applyGTE.asDate());
+                BSONObjBuilder query;
+                query.append("ts", q.done());
+                BSONObj queryObj = query.done();
+                r.query(rsoplog, queryObj);
+            }
             assert( r.haveCursor() );
 
             /* we lock outside the loop to avoid the overhead of locking on every operation.  server isn't usable yet anyway! */
@@ -79,14 +81,23 @@ namespace mongo {
             {
                 if( !r.more() ) { 
                     sethbmsg("replSet initial sync error reading remote oplog");
+                    log() << "replSet initial sync error remote oplog (" << rsoplog << ") on host " << hn << " is empty?" << rsLog;
                     return false;
                 }
                 bo op = r.next();
                 OpTime t = op["ts"]._opTime();
                 r.putBack(op);
-                assert( !t.isNull() );
+
+                if( op.firstElement().fieldName() == string("$err") ) { 
+                    log() << "replSet initial sync error querying " << rsoplog << " on " << hn << " : " << op.toString() << rsLog;
+                    return false;
+                }
+
+                uassert( 13508 , str::stream() << "no 'ts' in first op in oplog: " << op , !t.isNull() );
                 if( t > applyGTE ) {
                     sethbmsg(str::stream() << "error " << hn << " oplog wrapped during initial sync");
+                    log() << "replSet initial sync expected first optime of " << applyGTE << rsLog;
+                    log() << "replSet initial sync but received a first optime of " << t << " from " << hn << rsLog;
                     return false;
                 }
             }
@@ -99,22 +110,22 @@ namespace mongo {
                     break;
                 BSONObj o = r.nextSafe(); /* note we might get "not master" at some point */
                 {
-                    //writelock lk("");
-
                     ts = o["ts"]._opTime();
 
                     /* if we have become primary, we dont' want to apply things from elsewhere
                         anymore. assumePrimary is in the db lock so we are safe as long as 
                         we check after we locked above. */
-					const Member *p1 = box.getPrimary();
-                    if( p1 != primary || replSetForceInitialSyncFailure ) {
+                    if( (source->state() != MemberState::RS_PRIMARY &&
+                         source->state() != MemberState::RS_SECONDARY) ||
+                        replSetForceInitialSyncFailure ) {
+                        
                         int f = replSetForceInitialSyncFailure;
                         if( f > 0 ) {
                             replSetForceInitialSyncFailure = f-1;
                             log() << "replSet test code invoked, replSetForceInitialSyncFailure" << rsLog;
+                            throw DBException("forced error",0);
                         }
-                        log() << "replSet primary was:" << primary->fullName() << " now:" << 
-                            (p1 != 0 ? p1->fullName() : "none") << rsLog;
+                        log() << "replSet we are now primary" << rsLog;
                         throw DBException("primary changed",0);
                     }
 
@@ -195,6 +206,7 @@ namespace mongo {
                 log() << "replSet oldest at " << hn << " : " << ts.toStringLong() << rsLog;
                 log() << "replSet See http://www.mongodb.org/display/DOCS/Resyncing+a+Very+Stale+Replica+Set+Member" << rsLog;
                 sethbmsg("error RS102 too stale to catch up");
+                changeState(MemberState::RS_RECOVERING);
                 sleepsecs(120);
                 return;
             }
@@ -243,11 +255,8 @@ namespace mongo {
             OpTime ts = o["ts"]._opTime();
             long long h = o["h"].numberLong();
             if( ts != lastOpTimeWritten || h != lastH ) { 
-                log(1) << "TEMP our last op time written: " << lastOpTimeWritten.toStringPretty() << endl;
-                log(1) << "TEMP primary's GTE: " << ts.toStringPretty() << endl;
-                /*
-                }*/
-
+                log() << "replSet our last op time written: " << lastOpTimeWritten.toStringPretty() << endl;
+                log() << "replset primary's GTE: " << ts.toStringPretty() << endl;
                 syncRollback(r);
                 return;
             }
@@ -287,23 +296,11 @@ namespace mongo {
                     break;
                 { 
                     BSONObj o = r.nextSafe(); /* note we might get "not master" at some point */
-                    {
-                        writelock lk("");
 
-                        /* if we have become primary, we dont' want to apply things from elsewhere
-                           anymore. assumePrimary is in the db lock so we are safe as long as 
-                           we check after we locked above. */
-                        if( box.getPrimary() != primary ) {
-                            if( box.getState().primary() )
-                                log(0) << "replSet stopping syncTail we are now primary" << rsLog;
-                            return;
-                        }
-
-                        syncApply(o);
-                        _logOpObjRS(o);   /* with repl sets we write the ops to our oplog too: */                   
-                    }
                     int sd = myConfig().slaveDelay;
-                    if( sd ) { 
+                    // ignore slaveDelay if the box is still initializing. once
+                    // it becomes secondary we can worry about it.
+                    if( sd && box.getState().secondary() ) { 
                         const OpTime ts = o["ts"]._opTime();
                         long long a = ts.getSecs();
                         long long b = time(0);
@@ -329,6 +326,23 @@ namespace mongo {
                                 }
                             }
                         }
+                        
+                    }
+
+                    {
+                        writelock lk("");
+
+                        /* if we have become primary, we dont' want to apply things from elsewhere
+                           anymore. assumePrimary is in the db lock so we are safe as long as 
+                           we check after we locked above. */
+                        if( box.getPrimary() != primary ) {
+                            if( box.getState().primary() )
+                                log(0) << "replSet stopping syncTail we are now primary" << rsLog;
+                            return;
+                        }
+
+                        syncApply(o);
+                        _logOpObjRS(o);   /* with repl sets we write the ops to our oplog too: */                   
                     }
                 }
             }
@@ -356,8 +370,9 @@ namespace mongo {
         }
 
         /* later, we can sync from up secondaries if we want. tbd. */
-        if( sp.primary == 0 )
+        if( sp.primary == 0 ) {
             return;
+        }
 
         /* do we have anything at all? */
         if( lastOpTimeWritten.isNull() ) {
@@ -370,9 +385,27 @@ namespace mongo {
     }
 
     void ReplSetImpl::syncThread() {
-        if( myConfig().arbiterOnly )
-            return;
-        while( 1 ) { 
+        /* test here was to force a receive timeout
+        ScopedConn c("localhost");
+        bo info;
+        try {
+            log() << "this is temp" << endl;
+            c.runCommand("admin", BSON("sleep"<<120), info);
+            log() << info.toString() << endl;
+            c.runCommand("admin", BSON("sleep"<<120), info);
+            log() << "temp" << endl;
+        }
+        catch( DBException& e ) { 
+            log() << e.toString() << endl;
+            c.runCommand("admin", BSON("sleep"<<120), info);
+            log() << "temp" << endl;
+        }
+        */
+
+        while( 1 ) {
+            if( myConfig().arbiterOnly )
+                return;
+            
             try {
                 _syncThread();
             }
@@ -382,11 +415,31 @@ namespace mongo {
             }
             catch(...) { 
                 sethbmsg("unexpected exception in syncThread()");
-                // TODO : SET NOT SECONDARY here.
+                // TODO : SET NOT SECONDARY here?
                 sleepsecs(60);
             }
             sleepsecs(1);
+
+            /* normally msgCheckNewState gets called periodically, but in a single node repl set there 
+               are no heartbeat threads, so we do it here to be sure.  this is relevant if the singleton 
+               member has done a stepDown() and needs to come back up. 
+               */
+            OCCASIONALLY mgr->send( boost::bind(&Manager::msgCheckNewState, theReplSet->mgr) );
         }
+    }
+
+    void startSyncThread() {
+        static int n;
+        if( n != 0 ) {
+            log() << "replSet ERROR : more than one sync thread?" << rsLog;
+            assert( n == 0 );
+        }
+        n++;
+
+        Client::initThread("replica set sync");
+        cc().iAmSyncThread();
+        theReplSet->syncThread();
+        cc().shutdown();
     }
 
 }

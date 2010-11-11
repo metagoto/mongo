@@ -27,9 +27,14 @@
 #include <errno.h>
 #include "../db/cmdline.h"
 #include "../client/dbclient.h"
+#include "../util/time_support.h"
 
 #ifndef _WIN32
-#include <sys/resource.h>
+# ifndef __sunos__
+#  include <ifaddrs.h>
+# endif
+# include <sys/resource.h>
+# include <sys/stat.h>
 #else
 
 // errno doesn't work for winsock.
@@ -140,6 +145,16 @@ namespace mongo {
                 return;
             }
 
+#if !defined(_WIN32)
+            if (me.getType() == AF_UNIX){
+                if (chmod(me.getAddr().c_str(), 0777) == -1){
+                    log() << "couldn't chmod socket file " << me << errnoWithDescription() << endl;
+                }
+
+                ListeningSockets::get()->addPath( me.getAddr() );
+            }
+#endif
+
             if ( ::listen(sock, 128) != 0 ) {
                 log() << "listen(): listen() failed " << errnoWithDescription() << endl;
                 closesocket(sock);
@@ -152,9 +167,6 @@ namespace mongo {
             if (sock > maxfd)
                 maxfd = sock;
         }
-        
-        if (this->primaryListener())
-            ListeningSockets::get()->setReady();
 
         static long connNumber = 0;
         struct timeval maxSelectTime;
@@ -299,12 +311,12 @@ namespace mongo {
         ports.closeAll(mask);
     }
 
-    MessagingPort::MessagingPort(int _sock, const SockAddr& _far) : sock(_sock), piggyBackData(0), farEnd(_far), _timeout(), tag(0) {
+    MessagingPort::MessagingPort(int _sock, const SockAddr& _far) : sock(_sock), piggyBackData(0), _bytesIn(0), _bytesOut(0), farEnd(_far), _timeout(), tag(0) {
         _logLevel = 0;
         ports.insert(this);
     }
 
-    MessagingPort::MessagingPort( double timeout, int ll ) : tag(0) {
+    MessagingPort::MessagingPort( double timeout, int ll ) : _bytesIn(0), _bytesOut(0), tag(0) {
         _logLevel = ll;
         ports.insert(this);
         sock = -1;
@@ -328,14 +340,16 @@ namespace mongo {
 
     class ConnectBG : public BackgroundJob {
     public:
-        int sock;
-        int res;
-        SockAddr farEnd;
-        ConnectBG() { nameThread = false; }
-        void run() {
-            res = ::connect(sock, farEnd.raw(), farEnd.addressSize);
-        }
-        string name() { return "ConnectBG"; }
+        ConnectBG(int sock, SockAddr farEnd) : _sock(sock), _farEnd(farEnd) { }
+
+        void run() { _res = ::connect(_sock, _farEnd.raw(), _farEnd.addressSize); }
+        string name() const { return ""; /* too short lived to need to name */ }
+        int inError() const { return _res; }
+        
+    private:
+        int _sock;
+        int _res;
+        SockAddr _farEnd;
     };
 
     bool MessagingPort::connect(SockAddr& _far)
@@ -352,13 +366,10 @@ namespace mongo {
             setSockTimeouts( sock, _timeout );
         }
                 
-        ConnectBG bg;
-        bg.sock = sock;
-        bg.farEnd = farEnd;
+        ConnectBG bg(sock, farEnd);
         bg.go();
-
         if ( bg.wait(5000) ) {
-            if ( bg.res ) {
+            if ( bg.inError() ) {
                 closesocket(sock);
                 sock = -1;
                 return false;
@@ -441,6 +452,7 @@ namespace mongo {
                 throw;
             }
             
+            _bytesIn += len;
             m.setData(md, true);
             return true;
             
@@ -508,12 +520,17 @@ namespace mongo {
 
     // sends all data or throws an exception    
     void MessagingPort::send( const char * data , int len, const char *context ) {
+        _bytesOut += len;
         while( len > 0 ) {
             int ret = ::send( sock , data , len , portSendFlags );
             if ( ret == -1 ) {
                 if ( errno != EAGAIN || _timeout == 0 ) {
+                    SocketException::Type t = SocketException::SEND_ERROR;
+#if defined(_WINDOWS)
+                    if( e == WSAETIMEDOUT ) t = SocketException::SEND_TIMEOUT;
+#endif
                     log(_logLevel) << "MessagingPort " << context << " send() " << errnoWithDescription() << ' ' << farEnd.toString() << endl;
-                    throw SocketException( SocketException::SEND_ERROR );                    
+                    throw SocketException( t );                    
                 } else {
                     if ( !serverAlive( farEnd.toString() ) ) {
                         log(_logLevel) << "MessagingPort " << context << " send() remote dead " << farEnd.toString() << endl;
@@ -600,9 +617,15 @@ namespace mongo {
                     }
                 }
 #endif
-                if ( e != EAGAIN || _timeout == 0 ) {                
+                if ( e != EAGAIN || _timeout == 0 ) {
+                    SocketException::Type t = SocketException::RECV_ERROR;
+#if defined(_WINDOWS)
+                    if( e == WSAETIMEDOUT ) t = SocketException::RECV_TIMEOUT;
+#else
+                    /* todo: what is the error code on an SO_RCVTIMEO on linux? EGAIN? EWOULDBLOCK? */
+#endif
                     log(_logLevel) << "MessagingPort recv() " << errnoWithDescription(e) << " " << farEnd.toString() <<endl;
-                    throw SocketException( SocketException::RECV_ERROR );
+                    throw SocketException(t);
                 } else {
                     if ( !serverAlive( farEnd.toString() ) ) {
                         log(_logLevel) << "MessagingPort recv() remote dead " << farEnd.toString() << endl;
@@ -651,7 +674,6 @@ namespace mongo {
 
 
     MSGID NextMsgId;
-    bool usingClientIds = 0;
     ThreadLocalValue<int> clientId;
 
     struct MsgStart {
@@ -663,12 +685,6 @@ namespace mongo {
     
     MSGID nextMessageId(){
         MSGID msgid = NextMsgId++;
-        
-        if ( usingClientIds ){
-            msgid = msgid & 0xFFFF;
-            msgid = msgid | clientId.get();
-        }
-
         return msgid;
     }
 
@@ -677,9 +693,6 @@ namespace mongo {
     }
     
     void setClientId( int id ){
-        usingClientIds = true;
-        id = id & 0xFFFF0000;
-        massert( 10445 ,  "invalid id" , id );
         clientId.set( id );
     }
     

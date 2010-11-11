@@ -23,7 +23,7 @@
 #include "pch.h"
 #include "db.h"
 #include "client.h"
-#include "curop.h"
+#include "curop-inl.h"
 #include "json.h"
 #include "security.h"
 #include "commands.h"
@@ -126,6 +126,9 @@ namespace mongo {
         {
             scoped_lock bl(clientsMutex);
             clients.erase(this);
+            if ( isSyncThread() ) {
+                syncThread = 0;
+            }
         }
 
         bool didAnything = false;
@@ -212,7 +215,9 @@ namespace mongo {
         default: {
             string errmsg;
             if ( ! shardVersionOk( _ns , lockState > 0 , errmsg ) ){
-                msgasserted( StaleConfigInContextCode , (string)"[" + _ns + "] shard version not ok in Client::Context: " + errmsg );
+                ostringstream os;
+                os << "[" << _ns << "] shard version not ok in Client::Context: " << errmsg;
+                msgassertedNoTrace( StaleConfigInContextCode , os.str().c_str() );
             }
         }
         }
@@ -256,29 +261,63 @@ namespace mongo {
         return c->toString();
     }
     
-    void curopWaitingForLock( int type ){
+    Client* curopWaitingForLock( int type ){
         Client * c = currentClient.get();
         assert( c );
         CurOp * co = c->curop();
         if ( co ){
             co->waitingForLock( type );
         }
+        return c;
     }
-    void curopGotLock(){
-        Client * c = currentClient.get();
+    void curopGotLock(Client *c){
         assert(c);
         CurOp * co = c->curop();
-        if ( co ){
+        if ( co ) 
             co->gotLock();
+    }
+
+    void KillCurrentOp::interruptJs( AtomicUInt *op ) {
+        if ( !globalScriptEngine )
+            return;
+        if ( !op ) {
+            globalScriptEngine->interruptAll();
+        } else {
+            globalScriptEngine->interrupt( *op );
         }
     }
 
+    void KillCurrentOp::killAll() {
+        _globalKill = true;
+        interruptJs( 0 );
+    }
+
+    void KillCurrentOp::kill(AtomicUInt i) {
+        bool found = false;
+        {
+            scoped_lock l( Client::clientsMutex );
+            for( set< Client* >::const_iterator j = Client::clients.begin(); !found && j != Client::clients.end(); ++j ) {
+                for( CurOp *k = ( *j )->curop(); !found && k; k = k->parent() ) {
+                    if ( k->opNum() == i ) {
+                        k->kill();
+                        for( CurOp *l = ( *j )->curop(); l != k; l = l->parent() ) {
+                            l->kill();
+                        }
+                        found = true;
+                    }                        
+                }
+            }
+        }
+        if ( found ) {
+            interruptJs( &i );
+        }
+    }
+        
     CurOp::~CurOp(){
         if ( _wrapped ){
             scoped_lock bl(Client::clientsMutex);
             _client->_curOp = _wrapped;
         }
-        
         _client = 0;
     }
 
@@ -401,7 +440,7 @@ namespace mongo {
                     tablecell( ss , co.getOp() );
                     tablecell( ss , co.getNS() );
                     if ( co.haveQuery() ){
-                        tablecell( ss , co.query( true ) );
+                        tablecell( ss , co.query() );
                     }
                     else
                         tablecell( ss , "" );
@@ -442,10 +481,38 @@ namespace mongo {
             *writers = w;
         if ( readers )
             *readers = r;
+        
+        int time = r * 100;
+        time += r * 500;
+        
+        time = min( time , 1000000 );
 
-        if ( num > 50 )
-            num = 50;
+        // there has been a kill request for this op - we should yield to allow the op to stop
+        if ( killCurrentOp.checkForInterruptNoAssert( false ) ) {
+            return 100;
+        }
+        
+        return time;
+    }
 
-        return num * 100;
+    int Client::getActiveClientCount( int& writers, int& readers ){
+        writers = 0;
+        readers = 0;
+        
+        scoped_lock bl(clientsMutex);
+        for ( set<Client*>::iterator i=clients.begin(); i!=clients.end(); ++i ){
+            Client* c = *i;
+            if ( ! c->curop()->active() )
+                continue;
+            
+            int l = c->curop()->getLockType();
+            if ( l > 0 )
+                writers++;
+            else if ( l < 0 )
+                readers++;
+            
+        }
+
+        return writers + readers;
     }
 }

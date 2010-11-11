@@ -21,6 +21,7 @@
 #include "../jsobj.h"
 #include "../../util/message.h"
 #include "../../util/processinfo.h"
+#include "../../util/concurrency/spin_lock.h"
 
 namespace mongo {
 
@@ -61,6 +62,8 @@ namespace mongo {
     };
     
     extern OpCounters globalOpCounters;
+    extern OpCounters replOpCounters;
+
 
     class IndexCounters {
     public:
@@ -130,4 +133,21 @@ namespace mongo {
         map<string,long long> _counts; // TODO: replace with thread safe map
         mongo::mutex _mutex;
     };
+
+    class NetworkCounter {
+    public:
+        NetworkCounter() : _bytesIn(0), _bytesOut(0), _requests(0), _overflows(0){}
+        void hit( long long bytesIn , long long bytesOut );
+        void append( BSONObjBuilder& b );
+    private:
+        long long _bytesIn;
+        long long _bytesOut;
+        long long _requests;
+
+        long long _overflows;
+
+        SpinLock _lock;
+    };
+    
+    extern NetworkCounter networkCounter;
 }

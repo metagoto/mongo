@@ -111,7 +111,7 @@ namespace mongo {
         }
 
         /** append an element but with a new name */
-        BSONObjBuilder&  appendAs(const BSONElement& e, const StringData& fieldName) {
+        BSONObjBuilder& appendAs(const BSONElement& e, const StringData& fieldName) {
             assert( !e.eoo() ); // do not append eoo, that would corrupt us. the builder auto appends when done() is called.
             _b.appendNum((char) e.type());
             _b.appendStr(fieldName);
@@ -511,7 +511,11 @@ namespace mongo {
         template < class T >
         BSONObjBuilder& append( const StringData& fieldName, const list< T >& vals );
 
-        /** The returned BSONObj will free the buffer when it is finished. */
+        /** 
+         * destructive
+         * The returned BSONObj will free the buffer when it is finished. 
+         * @return owned BSONObj
+        */
         BSONObj obj() {
             bool own = owned();
             massert( 10335 , "builder does not own memory", own );
@@ -608,6 +612,8 @@ namespace mongo {
         bool owned() const { return &_b == &_buf; }
 
         BSONObjIterator iterator() const ;
+
+        int len() const { return _b.len(); }
         
     private:
         char* _done() {
@@ -639,10 +645,11 @@ namespace mongo {
     public:
         BSONArrayBuilder() : _i(0), _b() {}
         BSONArrayBuilder( BufBuilder &_b ) : _i(0), _b(_b) {}
+        BSONArrayBuilder( int initialSize ) : _i(0), _b(initialSize) {}
 
         template <typename T>
         BSONArrayBuilder& append(const T& x){
-            _b.append(num().c_str(), x);
+            _b.append(num(), x);
             return *this;
         }
 
@@ -657,9 +664,13 @@ namespace mongo {
         }
         
         void appendNull() {
-            _b.appendNull(num().c_str());
+            _b.appendNull(num());
         }
-
+        
+        /**
+         * destructive - ownership moves to returned BSONArray
+         * @return owned BSONArray
+         */
         BSONArray arr(){ return BSONArray(_b.obj()); }
         
         BSONObj done() { return _b.done(); }
@@ -688,11 +699,13 @@ namespace mongo {
             _b.appendArray( num(), subObj );
         }
         
-        void appendAs( const BSONElement &e, const char *name ) {
+        void appendAs( const BSONElement &e, const char *name) {
             fill( name );
             append( e );
         }
         
+        int len() const { return _b.len(); }
+
     private:
         void fill( const StringData& name ) {
             char *r;

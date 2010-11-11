@@ -10,6 +10,8 @@
 #      scons --distname=0.8 s3dist
 #      all s3 pushes require settings.py and simples3
 
+EnsureSConsVersion(0, 98, 4) # this is a common version known to work
+
 import os
 import sys
 import imp
@@ -420,7 +422,7 @@ if GetOption( "full" ):
 # ------    SOURCE FILE SETUP -----------
 
 commonFiles = Split( "pch.cpp buildinfo.cpp db/common.cpp db/jsobj.cpp db/json.cpp db/lasterror.cpp db/nonce.cpp db/queryutil.cpp shell/mongo.cpp" )
-commonFiles += [ "util/background.cpp" , "util/mmap.cpp" , "util/ramstore.cpp", "util/sock.cpp" ,  "util/util.cpp" , "util/message.cpp" , 
+commonFiles += [ "util/background.cpp" , "util/mmap.cpp" , "util/sock.cpp" ,  "util/util.cpp" , "util/message.cpp" , 
                  "util/assert_util.cpp" , "util/log.cpp" , "util/httpclient.cpp" , "util/md5main.cpp" , "util/base64.cpp", "util/concurrency/vars.cpp", "util/concurrency/task.cpp", "util/debug_util.cpp",
                  "util/concurrency/thread_pool.cpp", "util/password.cpp", "util/version.cpp", "util/signal_handlers.cpp",  
                  "util/histogram.cpp", "util/concurrency/spin_lock.cpp", "util/text.cpp" , "util/stringutils.cpp" , "util/processinfo.cpp" ,
@@ -451,15 +453,16 @@ coreServerFiles = [ "util/message_server_port.cpp" ,
 if GetOption( "asio" ) != None:
     coreServerFiles += [ "util/message_server_asio.cpp" ]
 
-serverOnlyFiles = Split( "db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/repl/rs.cpp db/repl/consensus.cpp db/repl/rs_initiate.cpp db/repl/replset_commands.cpp db/repl/manager.cpp db/repl/health.cpp db/repl/heartbeat.cpp db/repl/rs_config.cpp db/repl/rs_rollback.cpp db/repl/rs_sync.cpp db/repl/rs_initialsync.cpp db/oplog.cpp db/repl_block.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/cap.cpp db/matcher_covered.cpp db/dbeval.cpp db/restapi.cpp db/dbhelpers.cpp db/instance.cpp db/client.cpp db/database.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/security.cpp db/storage.cpp db/queryoptimizer.cpp db/extsort.cpp db/mr.cpp s/d_util.cpp db/cmdline.cpp" )
+serverOnlyFiles = Split( "util/logfile.cpp db/mongommf.cpp db/dur.cpp db/dur_journal.cpp db/query.cpp db/update.cpp db/introspect.cpp db/btree.cpp db/clientcursor.cpp db/tests.cpp db/repl.cpp db/repl/rs.cpp db/repl/consensus.cpp db/repl/rs_initiate.cpp db/repl/replset_commands.cpp db/repl/manager.cpp db/repl/health.cpp db/repl/heartbeat.cpp db/repl/rs_config.cpp db/repl/rs_rollback.cpp db/repl/rs_sync.cpp db/repl/rs_initialsync.cpp db/oplog.cpp db/repl_block.cpp db/btreecursor.cpp db/cloner.cpp db/namespace.cpp db/cap.cpp db/matcher_covered.cpp db/dbeval.cpp db/restapi.cpp db/dbhelpers.cpp db/instance.cpp db/client.cpp db/database.cpp db/pdfile.cpp db/cursor.cpp db/security_commands.cpp db/security.cpp db/queryoptimizer.cpp db/extsort.cpp db/cmdline.cpp" )
 
 serverOnlyFiles += [ "db/index.cpp" ] + Glob( "db/geo/*.cpp" )
 
 serverOnlyFiles += [ "db/dbcommands.cpp" , "db/dbcommands_admin.cpp" ]
+serverOnlyFiles += Glob( "db/commands/*.cpp" )
 coreServerFiles += Glob( "db/stats/*.cpp" )
 serverOnlyFiles += [ "db/driverHelpers.cpp" ]
 
-scriptingFiles = [ "scripting/engine.cpp" , "scripting/utils.cpp" ]
+scriptingFiles = [ "scripting/engine.cpp" , "scripting/utils.cpp" , "scripting/bench.cpp" ]
 
 if usesm:
     scriptingFiles += [ "scripting/engine_spidermonkey.cpp" ]
@@ -471,8 +474,8 @@ else:
 coreServerFiles += scriptingFiles
 
 coreShardFiles = [ "s/config.cpp" , "s/grid.cpp" , "s/chunk.cpp" , "s/shard.cpp" , "s/shardkey.cpp" ]
-shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" ,  "s/cursors.cpp" ,  "s/server.cpp" , "s/config_migrate.cpp" , "s/s_only.cpp" , "s/stats.cpp" , "s/balance.cpp" , "s/balancer_policy.cpp" , "db/cmdline.cpp" ]
-serverOnlyFiles += coreShardFiles + [ "s/d_logic.cpp" , "s/d_writeback.cpp" , "s/d_migrate.cpp" , "s/d_state.cpp" , "s/d_split.cpp" , "client/distlock_test.cpp" ]
+shardServerFiles = coreShardFiles + Glob( "s/strategy*.cpp" ) + [ "s/commands_admin.cpp" , "s/commands_public.cpp" , "s/request.cpp" ,  "s/cursors.cpp" ,  "s/server.cpp" , "s/config_migrate.cpp" , "s/s_only.cpp" , "s/stats.cpp" , "s/balance.cpp" , "s/balancer_policy.cpp" , "db/cmdline.cpp" , "s/writeback_listener.cpp" , "s/shard_version.cpp" ]
+serverOnlyFiles += coreShardFiles + [ "s/d_logic.cpp" , "s/d_writeback.cpp" , "s/d_migrate.cpp" , "s/d_state.cpp" , "s/d_split.cpp" , "client/distlock_test.cpp" , "s/d_background_splitter.cpp" ]
 
 serverOnlyFiles += [ "db/module.cpp" ] + Glob( "db/modules/*.cpp" )
 
@@ -490,7 +493,7 @@ for x in os.listdir( "db/modules/" ):
     if os.path.exists( modBuildFile ):
         modules += [ imp.load_module( "module_" + x , open( modBuildFile , "r" ) , modBuildFile , ( ".py" , "r" , imp.PY_SOURCE  ) ) ]
 
-allClientFiles = commonFiles + coreDbFiles + [ "client/clientOnly.cpp" , "client/gridfs.cpp" , "s/d_util.cpp" ];
+allClientFiles = commonFiles + coreDbFiles + [ "client/clientOnly.cpp" , "client/gridfs.cpp" ];
 
 # ---- other build setup -----
 
@@ -783,6 +786,11 @@ if nix:
         env['ENV']['GLIBCXX_FORCE_NEW'] = 1; # play nice with valgrind
     else:
         env.Append( CPPFLAGS=" -O3" )
+        #env.Append( CPPFLAGS=" -fprofile-generate" )
+        #env.Append( LINKFLAGS=" -fprofile-generate" )
+        # then:
+        #env.Append( CPPFLAGS=" -fprofile-use" )
+        #env.Append( LINKFLAGS=" -fprofile-use" )        
 
     if debugLogging:
         env.Append( CPPFLAGS=" -D_DEBUG" );
@@ -1341,7 +1349,7 @@ if not onlyServer and not noshell:
     addSmoketest( "smokeClone", [ "mongo", "mongod" ] )
     addSmoketest( "smokeRepl", [ "mongo", "mongod", "mongobridge" ] )
     addSmoketest( "smokeReplSets", [ "mongo", "mongod", "mongobridge" ] )
-    addSmoketest( "smokeDisk", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
+    addSmoketest( "smokeDisk", [ add_exe( "mongo" ), add_exe( "mongod" ), add_exe( "mongodump" ), add_exe( "mongorestore" ) ] )
     addSmoketest( "smokeAuth", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
     addSmoketest( "smokeParallel", [ add_exe( "mongo" ), add_exe( "mongod" ) ] )
     addSmoketest( "smokeSharding", [ "mongo", "mongod", "mongos" ] )

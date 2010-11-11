@@ -20,7 +20,7 @@
 #include "btree.h"
 #include "pdfile.h"
 #include "jsobj.h"
-#include "curop.h"
+#include "curop-inl.h"
 
 namespace mongo {
 
@@ -31,47 +31,47 @@ namespace mongo {
             d(_d), idxNo(_idxNo), 
             startKey( _startKey ),
             endKey( _endKey ),
-            endKeyInclusive_( endKeyInclusive ),
-            multikey( d->isMultikey( idxNo ) ),
+            _endKeyInclusive( endKeyInclusive ),
+            _multikey( d->isMultikey( idxNo ) ),
             indexDetails( _id ),
-            order( _id.keyPattern() ),
-            _ordering( Ordering::make( order ) ),
-            direction( _direction ),
+            _order( _id.keyPattern() ),
+            _ordering( Ordering::make( _order ) ),
+            _direction( _direction ),
             _spec( _id.getSpec() ),
             _independentFieldRanges( false ),
             _nscanned( 0 )
     {
         audit();
         init();
-        DEV assert( dups.size() == 0 );
+        dassert( _dups.size() == 0 );
     }
 
     BtreeCursor::BtreeCursor( NamespaceDetails *_d, int _idxNo, const IndexDetails& _id, const shared_ptr< FieldRangeVector > &_bounds, int _direction )
         :
             d(_d), idxNo(_idxNo), 
-            endKeyInclusive_( true ),
-            multikey( d->isMultikey( idxNo ) ),
+            _endKeyInclusive( true ),
+            _multikey( d->isMultikey( idxNo ) ),
             indexDetails( _id ),
-            order( _id.keyPattern() ),
-            _ordering( Ordering::make( order ) ),
-            direction( _direction ),
-            bounds_( ( assert( _bounds.get() ), _bounds ) ),
-            _boundsIterator( new FieldRangeVector::Iterator( *bounds_  ) ),
+            _order( _id.keyPattern() ),
+            _ordering( Ordering::make( _order ) ),
+            _direction( _direction ),
+            _bounds( ( assert( _bounds.get() ), _bounds ) ),
+            _boundsIterator( new FieldRangeVector::Iterator( *_bounds  ) ),
             _spec( _id.getSpec() ),
             _independentFieldRanges( true ),
             _nscanned( 0 )
     {
         massert( 13384, "BtreeCursor FieldRangeVector constructor doesn't accept special indexes", !_spec.getType() );
         audit();
-        startKey = bounds_->startKey();
+        startKey = _bounds->startKey();
         _boundsIterator->advance( startKey ); // handles initialization
         _boundsIterator->prepDive();
         pair< DiskLoc, int > noBestParent;
         bucket = indexDetails.head;
         keyOfs = 0;
-        indexDetails.head.btree()->customLocate( bucket, keyOfs, startKey, 0, false, _boundsIterator->cmp(), _boundsIterator->inc(), _ordering, direction, noBestParent );
+        indexDetails.head.btree()->customLocate( bucket, keyOfs, startKey, 0, false, _boundsIterator->cmp(), _boundsIterator->inc(), _ordering, _direction, noBestParent );
         skipAndCheck();
-        DEV assert( dups.size() == 0 );
+        dassert( _dups.size() == 0 );
     }
 
     void BtreeCursor::audit() {
@@ -80,7 +80,7 @@ namespace mongo {
         if ( otherTraceLevel >= 12 ) {
             if ( otherTraceLevel >= 200 ) {
                 out() << "::BtreeCursor() qtl>200.  validating entire index." << endl;
-                indexDetails.head.btree()->fullValidate(indexDetails.head, order);
+                indexDetails.head.btree()->fullValidate(indexDetails.head, _order);
             }
             else {
                 out() << "BTreeCursor(). dumping head bucket" << endl;
@@ -96,7 +96,7 @@ namespace mongo {
         }
         bool found;
         bucket = indexDetails.head.btree()->
-            locate(indexDetails, indexDetails.head, startKey, _ordering, keyOfs, found, direction > 0 ? minDiskLoc : maxDiskLoc, direction);
+            locate(indexDetails, indexDetails.head, startKey, _ordering, keyOfs, found, _direction > 0 ? minDiskLoc : maxDiskLoc, _direction);
         if ( ok() ) {
             _nscanned = 1;
         }        
@@ -140,11 +140,11 @@ namespace mongo {
         while ( 1 ) {
             if ( !ok() )
                 break;
-            BtreeBucket *b = bucket.btree();
-            _KeyNode& kn = b->k(keyOfs);
+            const BtreeBucket *b = bucket.btree();
+            const _KeyNode& kn = b->k(keyOfs);
             if ( kn.isUsed() )
                 break;
-            bucket = b->advance(bucket, keyOfs, direction, "skipUnusedKeys");
+            bucket = b->advance(bucket, keyOfs, _direction, "skipUnusedKeys");
             u++;
             //don't include unused keys in nscanned
             //++_nscanned;
@@ -169,15 +169,15 @@ namespace mongo {
         if ( bucket.isNull() )
             return;
         if ( !endKey.isEmpty() ) {
-            int cmp = sgn( endKey.woCompare( currKey(), order ) );
-            if ( ( cmp != 0 && cmp != direction ) ||
-                ( cmp == 0 && !endKeyInclusive_ ) )
+            int cmp = sgn( endKey.woCompare( currKey(), _order ) );
+            if ( ( cmp != 0 && cmp != _direction ) ||
+                ( cmp == 0 && !_endKeyInclusive ) )
                 bucket = DiskLoc();
         }
     }
     
     void BtreeCursor::advanceTo( const BSONObj &keyBegin, int keyBeginLen, bool afterKey, const vector< const BSONElement * > &keyEnd, const vector< bool > &keyEndInclusive) {
-        bucket.btree()->advanceTo( bucket, keyOfs, keyBegin, keyBeginLen, afterKey, keyEnd, keyEndInclusive, _ordering, direction );
+        bucket.btree()->advanceTo( bucket, keyOfs, keyBegin, keyBeginLen, afterKey, keyEnd, keyEndInclusive, _ordering, _direction );
     }
     
     bool BtreeCursor::advance() {
@@ -185,7 +185,7 @@ namespace mongo {
         if ( bucket.isNull() )
             return false;
 
-        bucket = bucket.btree()->advance(bucket, keyOfs, direction, "BtreeCursor::advance");
+        bucket = bucket.btree()->advance(bucket, keyOfs, _direction, "BtreeCursor::advance");
         
         if ( !_independentFieldRanges ) {
             skipUnusedKeys( false );
@@ -220,10 +220,10 @@ namespace mongo {
         if ( eof() )
             return;
 
-        multikey = d->isMultikey(idxNo);
+        _multikey = d->isMultikey(idxNo);
 
         if ( keyOfs >= 0 ) {
-            BtreeBucket *b = bucket.btree();
+            const BtreeBucket *b = bucket.btree();
 
             assert( !keyAtKeyOfs.isEmpty() );
 
@@ -258,7 +258,7 @@ namespace mongo {
         bool found;
 
         /* TODO: Switch to keep indexdetails and do idx.head! */
-        bucket = indexDetails.head.btree()->locate(indexDetails, indexDetails.head, keyAtKeyOfs, _ordering, keyOfs, found, locAtKeyOfs, direction);
+        bucket = indexDetails.head.btree()->locate(indexDetails, indexDetails.head, keyAtKeyOfs, _ordering, keyOfs, found, locAtKeyOfs, _direction);
         RARELY log() << "  key seems to have moved in the index, refinding. found:" << found << endl;
         if ( ! bucket.isNull() )
             skipUnusedKeys( false );
