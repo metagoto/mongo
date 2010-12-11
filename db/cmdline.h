@@ -17,6 +17,7 @@
 #pragma once
 
 #include "../pch.h"
+#include "jsobj.h"
 
 namespace mongo {
     
@@ -26,8 +27,12 @@ namespace mongo {
     struct CmdLine { 
         CmdLine() : 
             port(DefaultDBPort), rest(false), jsonp(false), quiet(false), noTableScan(false), prealloc(true), smallfiles(false),
-            quota(false), quotaFiles(8), cpu(false), oplogSize(0), defaultProfile(0), slowMS(100), pretouch(0), moveParanoia( true )
-        { } 
+            quota(false), quotaFiles(8), cpu(false), durTrace(0), oplogSize(0), defaultProfile(0), slowMS(100), pretouch(0), moveParanoia( true ), 
+            syncdelay(60)
+        { 
+            // default may change for this later.
+            dur = false;
+        } 
         
         string binaryName;     // mongod or mongos
 
@@ -41,7 +46,7 @@ namespace mongo {
 
         string bind_ip;        // --bind_ip
         bool rest;             // --rest
-        bool jsonp;             // --jsonp
+        bool jsonp;            // --jsonp
 
         string _replSet;       // --replSet[/<seedlist>]
         string ourSetName() const { 
@@ -53,17 +58,30 @@ namespace mongo {
         }
         bool usingReplSets() const { return !_replSet.empty(); }
 
+        // for master/slave replication
         string source;         // --source
         string only;           // --only
         
         bool quiet;            // --quiet
-        bool noTableScan;      // --notablescan
-        bool prealloc;         // --noprealloc
-        bool smallfiles;       // --smallfiles
+        bool noTableScan;      // --notablescan no table scans allowed
+        bool prealloc;         // --noprealloc no preallocation of data files
+        bool smallfiles;       // --smallfiles allocate smaller data files
         
         bool quota;            // --quota
         int quotaFiles;        // --quotaFiles
         bool cpu;              // --cpu show cpu time periodically
+
+        bool dur;              // --dur durability
+
+        /** --durTrace 7      dump journal and terminate without doing anything further 
+            --durTrace 4      recover and terminate without listening
+        */
+        enum { // bits to be ORed
+            DurDumpJournal = 1,   // dump diagnostics on the journal during recovery
+            DurScanOnly = 2,      // don't do any real work, just scan and dump if dump specified
+            DurRecoverOnly = 4    // terminate after recovery step
+        };
+        int durTrace;          // --durTrace <n> for debugging
 
         long long oplogSize;   // --oplogSize
         int defaultProfile;    // --profile
@@ -71,7 +89,8 @@ namespace mongo {
 
         int pretouch;          // --pretouch for replication application (experimental)
         bool moveParanoia;     // for move chunk paranoia 
-        
+        double syncdelay;      // seconds between fsyncs
+
         static void addGlobalOptions( boost::program_options::options_description& general , 
                                       boost::program_options::options_description& hidden );
 
@@ -90,6 +109,33 @@ namespace mongo {
     };
     
     extern CmdLine cmdLine;
-    
+
     void setupCoreSignals();
+
+    string prettyHostName();
+
+
+    /**
+     * used for setParameter
+     * so you can write validation code that lives with code using it
+     * rather than all in the command place
+     * also lets you have mongos or mongod specific code
+     * without pulling it all sorts of things
+     */
+    class ParameterValidator {
+    public:
+        ParameterValidator( const string& name );
+        virtual ~ParameterValidator(){}
+
+        virtual bool isValid( BSONElement e , string& errmsg ) = 0;
+
+        static ParameterValidator * get( const string& name );
+
+    private:
+        string _name;
+        
+        // don't need to lock since this is all done in static init
+        static map<string,ParameterValidator*> * _all; 
+    };
+    
 }

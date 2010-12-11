@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "concurrency/rwlock.h"
+
 namespace mongo {
     
     /* the administrative-ish stuff here */
@@ -25,7 +27,7 @@ namespace mongo {
         /** Flushable has to fail nicely if the underlying object gets killed */
         class Flushable {
         public:
-            virtual ~Flushable(){}
+            virtual ~Flushable() {}
             virtual void flush() = 0;
         };
         
@@ -36,14 +38,25 @@ namespace mongo {
             READONLY = 2    // not contractually guaranteed, but if specified the impl has option to fault writes
         };
 
+        /** @param fun is called for each MongoFile. 
+            calledl from within a mutex that MongoFile uses. so be careful not to deadlock. 
+        */
+        template < class F >
+        static void forEach( F fun );
+
+        static set<MongoFile*>& getAllFiles()  { return mmfiles; }
+
         static int flushAll( bool sync ); // returns n flushed
         static long long totalMappedLength();
         static void closeAllFiles( stringstream &message );
 
         // Locking allows writes. Reads are always allowed
-        static void lockAll();
-        static void unlockAll();
+        static void markAllWritable();
+        static void unmarkAllWritable();
+
         static bool exists(boost::filesystem::path p) { return boost::filesystem::exists(p); }
+
+        virtual bool isMongoMMF() { return false; }
 
     protected:
         virtual void close() = 0;
@@ -62,20 +75,23 @@ namespace mongo {
         // only supporting on posix mmap
         virtual void _lock() {}
         virtual void _unlock() {}
+
+        static set<MongoFile*> mmfiles;
+        static RWLock mmmutex;
     };
 
-#ifndef _DEBUG
+#if !defined(_DEBUG) || defined(_TESTINTENT)
     // no-ops in production
-    inline void MongoFile::lockAll() {}
-    inline void MongoFile::unlockAll() {}
+    inline void MongoFile::markAllWritable() {}
+    inline void MongoFile::unmarkAllWritable() {}
 #endif
 
     struct MongoFileAllowWrites {
         MongoFileAllowWrites(){
-            MongoFile::lockAll();
+            MongoFile::markAllWritable();
         }
         ~MongoFileAllowWrites(){
-            MongoFile::unlockAll();
+            MongoFile::unmarkAllWritable();
         }
     };
 
@@ -112,10 +128,11 @@ namespace mongo {
         unsigned long long length() const { return len; }
         string filename() const           { return _filename; }
 
+        /** create a new view with the specified properties. 
+            automatically cleaned up upon close/destruction of the MemoryMappedFile object. 
+            */
         void* createReadOnlyMap();
-
-        void* testGetCopyOnWriteView();
-        void  testCloseCopyOnWriteView(void *);
+        void* createPrivateMap();
 
     private:
         static void updateLength( const char *filename, unsigned long long &length );
@@ -129,15 +146,26 @@ namespace mongo {
 #ifdef _WIN32
         boost::shared_ptr<mutex> _flushMutex;
 #endif
+
     protected:
         // only posix mmap implementations will support this
         virtual void _lock();
         virtual void _unlock();
 
+        /** close the current private view and open a new replacement */
+        void* remapPrivateView(void *oldPrivateAddr);
     };
 
     void printMemInfo( const char * where );    
 
     typedef MemoryMappedFile MMF;
+
+    /** p is called from within a mutex that MongoFile uses.  so be careful not to deadlock. */
+    template < class F >
+    inline void MongoFile::forEach( F p ) { 
+        rwlock lk( mmmutex , false );
+        for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ )
+            p(*i);
+    }
 
 } // namespace mongo

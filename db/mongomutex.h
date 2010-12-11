@@ -20,12 +20,13 @@
 
 namespace mongo { 
 
-    /* the 'big lock' we use for most operations. a read/write lock.
-       there is one of these, dbMutex.  
-       generally if you need to declare a mutex use the right primitive class, not this.
+    /** the 'big lock' we use for most operations. a read/write lock.
+        there is one of these, dbMutex.
 
-       use readlock and writelock classes for scoped locks on this rather than direct 
-       manipulation.
+        generally if you need to declare a mutex use the right primitive class, not this.
+
+        use readlock and writelock classes for scoped locks on this rather than direct 
+        manipulation.
        */
     class MongoMutex {
     public:
@@ -46,11 +47,11 @@ namespace mongo {
             DEV assert( !_releasedEarly.get() );
         }
 
-        // write lock
+        // write lock.  use the writelock scoped lock class, not this directly.
         void lock() { 
             if ( _writeLockedAlready() )
                 return;
-            
+
             _state.set(1);
 
             Client *c = curopWaitingForLock( 1 ); // stats
@@ -59,7 +60,9 @@ namespace mongo {
 
             _minfo.entered();
 
-            MongoFile::lockAll(); // for _DEBUG validation -- a no op for release build
+            MongoFile::markAllWritable(); // for _DEBUG validation -- a no op for release build
+
+            _acquiredWriteLock();
         }
 
         // try write lock
@@ -71,10 +74,11 @@ namespace mongo {
             bool got = _m.lock_try( millis ); 
             curopGotLock(c);
             
-            if ( got ){
+            if ( got ) {
                 _minfo.entered();
                 _state.set(1);
-                MongoFile::lockAll();
+                MongoFile::markAllWritable(); // for _DEBUG validation -- a no op for release build
+                _acquiredWriteLock();
             }                
             
             return got;
@@ -84,7 +88,7 @@ namespace mongo {
         void unlock() { 
             int s = _state.get();
             if( s > 1 ) { 
-                _state.set(s-1);
+                _state.set(s-1); // recursive lock case
                 return;
             }
             if( s != 1 ) { 
@@ -94,11 +98,10 @@ namespace mongo {
                 }
                 massert( 12599, "internal error: attempt to unlock when wasn't in a write lock", false);
             }
-
-            MongoFile::unlockAll();
-
+            MongoFile::unmarkAllWritable(); // _DEBUG validation
             _state.set(0);
             _minfo.leaving();
+            _releasedWriteLock();
             _m.unlock(); 
         }
 
@@ -112,25 +115,25 @@ namespace mongo {
             unlock();
         }
 
-        // read lock
+        // read lock. don't call directly, use readlock.
         void lock_shared() { 
             int s = _state.get();
             if( s ) {
                 if( s > 0 ) { 
                     // already in write lock - just be recursive and stay write locked
                     _state.set(s+1);
-                    return;
                 }
                 else { 
                     // already in read lock - recurse
                     _state.set(s-1);
-                    return;
                 }
             }
-            _state.set(-1);
-            Client *c = curopWaitingForLock( -1 );
-            _m.lock_shared(); 
-            curopGotLock(c);
+            else {
+                _state.set(-1);
+                Client *c = curopWaitingForLock( -1 );
+                _m.lock_shared(); 
+                curopGotLock(c);
+            }
         }
         
         // try read lock
@@ -171,17 +174,11 @@ namespace mongo {
         MutexInfo& info() { return _minfo; }
 
     private:
+        void _acquiredWriteLock();
+        void _releasedWriteLock();
+
         /* @return true if was already write locked.  increments recursive lock count. */
-        bool _writeLockedAlready() {
-            dassert( haveClient() );                
-            int s = _state.get();
-            if( s > 0 ) {
-                _state.set(s+1);
-                return true;
-            }
-            massert( 10293 , (string)"internal error: locks are not upgradeable: " + sayClientState() , s == 0 );
-            return false;
-        }
+        bool _writeLockedAlready();
 
         RWLock _m;
 
@@ -192,6 +189,11 @@ namespace mongo {
 
         MutexInfo _minfo;
 
+    public:
+        // indicates we need to call dur::REMAPPRIVATEVIEW on the next write lock
+        bool _remapPrivateViewRequested;
+
+    private:
         /* See the releaseEarly() method.
            we use a separate TLS value for releasedEarly - that is ok as 
            our normal/common code path, we never even touch it */
@@ -204,5 +206,37 @@ namespace mongo {
     };
 
     extern MongoMutex &dbMutex;
+
+    namespace dur {
+        void REMAPPRIVATEVIEW();
+        void debugCheckLastDeclaredWrite();
+    }
+
+    inline void MongoMutex::_releasedWriteLock() { 
+#if defined(_DURABLE) && defined(_DEBUG)
+        getDur().debugCheckLastDeclaredWrite();
+#endif
+    }
+
+    inline void MongoMutex::_acquiredWriteLock() { 
+#if defined(_DURABLE)
+        if( _remapPrivateViewRequested ) { 
+            dur::REMAPPRIVATEVIEW();
+            dassert( !_remapPrivateViewRequested );
+        }
+#endif
+    }
+
+    /* @return true if was already write locked.  increments recursive lock count. */
+    inline bool MongoMutex::_writeLockedAlready() {
+        dassert( haveClient() );                
+        int s = _state.get();
+        if( s > 0 ) {
+            _state.set(s+1);
+            return true;
+        }
+        massert( 10293 , string("internal error: locks are not upgradeable: ") + sayClientState() , s == 0 );
+        return false;
+    }
 
 }

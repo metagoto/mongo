@@ -137,7 +137,33 @@ namespace mongo {
         uassert(13437, "slaveDelay requires priority be zero", slaveDelay == 0 || priority == 0);
         uassert(13438, "bad slaveDelay value", slaveDelay >= 0 && slaveDelay <= 3600 * 24 * 366);
         uassert(13439, "priority must be 0 when hidden=true", priority == 0 || !hidden);
-        uassert(13477, "priority must be 0 when buildIndexes=false", priority == 0 || !hidden);
+        uassert(13477, "priority must be 0 when buildIndexes=false", buildIndexes || priority == 0);
+
+        if (!initialSync.isEmpty()) {
+            static const string legal[] = {"state", "name", "_id","optime"};
+            static const set<string> legals(legal, legal + 4);
+            assertOnlyHas(initialSync, legals);
+            
+            if (initialSync.hasElement("state")) {
+                uassert(13525, "initialSync source state must be 1 or 2",
+                        initialSync["state"].isNumber() &&
+                        (initialSync["state"].Number() == 1 ||
+                         initialSync["state"].Number() == 2));
+            }
+            if (initialSync.hasElement("name")) {
+                uassert(13526, "initialSync source name must be a string",
+                        initialSync["name"].type() == mongo::String);
+            }
+            if (initialSync.hasElement("_id")) {
+                uassert(13527, "initialSync source _id must be a number",
+                        initialSync["_id"].isNumber());
+            }
+            if (initialSync.hasElement("optime")) {
+                uassert(13528, "initialSync source optime must be a timestamp",
+                        initialSync["optime"].type() == mongo::Timestamp ||
+                        initialSync["optime"].type() == mongo::Date);
+            }
+        }
     }
 
     /** @param o old config
@@ -192,7 +218,7 @@ namespace mongo {
 
         /* TODO : MORE CHECKS HERE */
 
-        log() << "replSet TODO : don't allow removal of a node until we handle it at the removed node end?" << endl;
+        DEV log() << "replSet TODO : don't allow removal of a node until we handle it at the removed node end?" << endl;
         // we could change its votes to zero perhaps instead as a short term...
 
         return true;
@@ -251,8 +277,10 @@ namespace mongo {
             BSONObj mobj = members[i].Obj();
             MemberCfg m;
             try {
-                static const string legal[] = {"_id","votes","priority","host","hidden","slaveDelay","arbiterOnly","buildIndexes","tags"};
-                static const set<string> legals(legal, legal + 8);
+                static const string legal[] =
+                    {"_id","votes","priority","host", "hidden","slaveDelay",
+                     "arbiterOnly","buildIndexes","tags","initialSync"};
+                static const set<string> legals(legal, legal + 10);
                 assertOnlyHas(mobj, legals);
 
                 try { 
@@ -285,6 +313,9 @@ namespace mongo {
                     vector<BSONElement> v = mobj["tags"].Array();
                     for( unsigned i = 0; i < v.size(); i++ )
                         m.tags.insert( v[i].String() );
+                }
+                if( mobj.hasElement("initialSync")) {
+                    m.initialSync = mobj["initialSync"].Obj();
                 }
                 m.check();
             }
@@ -342,6 +373,7 @@ namespace mongo {
                 BSONObj cmd = BSON( "replSetHeartbeat" << setname );
                 int theirVersion;
                 BSONObj info;
+                log() << "trying to contact " << h.toString() << rsLog;
                 bool ok = requestHeartbeat(setname, "", h.toString(), info, -2, theirVersion);
                 if( info["rs"].trueValue() ) { 
                     // yes, it is a replicate set, although perhaps not yet initialized

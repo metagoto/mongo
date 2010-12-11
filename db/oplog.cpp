@@ -241,7 +241,7 @@ namespace mongo {
 
         {
             const int size2 = obj.objsize() + 1 + 2;
-            char *p = (char *) dur::writingPtr(r->data, size2+posz);
+            char *p = (char *) getDur().writingPtr(r->data, size2+posz);
             memcpy(p, partial.objdata(), posz);
             *((unsigned *)p) += size2;
             p += posz - 1;
@@ -398,7 +398,7 @@ namespace mongo {
     void pretouchN(vector<BSONObj>& v, unsigned a, unsigned b) {
         DEV assert( !dbMutex.isWriteLocked() );
 
-        Client *c = &cc();
+        Client *c = currentClient.get();
         if( c == 0 ) { 
             Client::initThread("pretouchN");
             c = &cc();
@@ -604,8 +604,17 @@ namespace mongo {
                 applyOperation_inlock( e.Obj() , false );
                 num++;
             }
-
+            
             result.append( "applied" , num );
+
+            if ( ! fromRepl ){
+                // We want this applied atomically on slaves
+                // so we re-wrap without the pre-condition for speed
+                
+                string tempNS = str::stream() << dbname << ".$cmd";
+                
+                logOp( "c" , tempNS.c_str() , cmdObj.firstElement().wrap() );
+            }
 
             return true;
         }

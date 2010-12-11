@@ -31,21 +31,21 @@ namespace mongo {
             if( 0 && debug ) {
                 try { 
                     LogFile f("logfile_test");
-		    void *p = malloc(16384);
+                    void *p = malloc(16384);
                     char *buf = (char*) p;
-		    buf += 4095;
-		    buf = (char*) (((size_t)buf)&(~0xfff));
+                    buf += 4095;
+                    buf = (char*) (((size_t)buf)&(~0xfff));
                     memset(buf, 'z', 8192);
                     buf[8190] = '\n';
                     buf[8191] = 'B';
                     buf[0] = 'A';
                     f.synchronousAppend(buf, 8192);
                     f.synchronousAppend(buf, 8192);
-		    free(p);
+                    free(p);
                 }
                 catch(DBException& e ) { 
-		    log() << "logfile.cpp test failed : " << e.what() << endl;
-		    throw;
+                    log() << "logfile.cpp test failed : " << e.what() << endl;
+                    throw;
                 }
             }
         }
@@ -62,7 +62,7 @@ namespace mongo {
             GENERIC_WRITE,
             FILE_SHARE_READ,
             NULL, 
-            OPEN_ALWAYS,
+            CREATE_NEW, //OPEN_ALWAYS,
             FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
             NULL);
         if( _fd == INVALID_HANDLE_VALUE ) {
@@ -77,12 +77,15 @@ namespace mongo {
             CloseHandle(_fd);
     }
 
-    void LogFile::synchronousAppend(void *buf, size_t len) { 
+    void LogFile::synchronousAppend(const void *buf, size_t len) { 
         assert(_fd);
         DWORD written;
         if( !WriteFile(_fd, buf, len, &written, NULL) ) { 
             DWORD e = GetLastError();
-            uasserted(13517, str::stream() << "error appending to file " << errnoWithDescription(e));
+            if( e == 87 )
+                massert(13519, "error appending to file - misaligned direct write?", false);
+            else
+                uasserted(13517, str::stream() << "error appending to file " << errnoWithDescription(e));
         }
         else { 
             dassert( written == len );
@@ -102,7 +105,8 @@ namespace mongo {
     LogFile::LogFile(string name) {
         _fd = open(name.c_str(), 
                      O_APPEND 
-                   | O_CREAT | O_RDWR
+                   | O_CREAT | O_EXCL
+                   | O_RDWR
 #if defined(O_DIRECT)
                    | O_DIRECT
 #endif
@@ -118,28 +122,31 @@ namespace mongo {
         if( _fd < 0 ) {
             uasserted(13516, str::stream() << "couldn't open file " << name << " for writing " << errnoWithDescription());
         }
-	//	log() << "\nWRITE TEST: " << write(_fd, "abc", 3) << ' ' << errno << endl;
+        // log() << "\nWRITE TEST: " << write(_fd, "abc", 3) << ' ' << errno << endl;
     }
 
     LogFile::~LogFile() { 
         if( _fd >= 0 )
             close(_fd);
-	_fd = -1;
+        _fd = -1;
     }
 
-    void LogFile::synchronousAppend(void *b, size_t len) {
-        char *buf = (char *) b;
+    void LogFile::synchronousAppend(const void *b, size_t len) {
+        const char *buf = (char *) b;
         assert(_fd);
-	assert(((size_t)buf)%4096==0); // aligned
-	assert(len % 4096 == 0);
+        assert(((size_t)buf)%4096==0); // aligned
+        if( len % 4096 != 0 ) { 
+            log() << len << ' ' << len % 4096 << endl;
+            assert(false);
+        }
         ssize_t written = write(_fd, buf, len);
         if( written != (ssize_t) len ) { 
-  	    log() << "write fails written:" << written << " len:" << len << " errno:" << errno << endl;
-  	    uasserted(13515, str::stream() << "error appending to file " << _fd << errnoWithDescription());
+            log() << "write fails written:" << written << " len:" << len << " errno:" << errno << endl;
+            uasserted(13515, str::stream() << "error appending to file " << _fd << errnoWithDescription());
         }
 #if !defined(O_SYNC)
         if( fdatasync(_fd) < 0 ) { 
-  	    uasserted(13514, str::stream() << "error appending to file on fsync " << errnoWithDescription());
+            uasserted(13514, str::stream() << "error appending to file on fsync " << errnoWithDescription());
         }
 #endif
     }

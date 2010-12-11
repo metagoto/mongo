@@ -66,25 +66,49 @@ namespace mongo {
         }
     } cmdBuildInfo;
 
+    /** experimental. either remove or add support in repl sets also.  in a repl set, getting this setting from the 
+        repl set config could make sense. 
+        */
+    unsigned replApplyBatchSize = 1;
+
     class CmdGet : public Command {
     public:
-        CmdGet() : Command( "get" ) { }
+        CmdGet() : Command( "getParameter" ) { }
         virtual bool slaveOk() const { return true; }
         virtual bool adminOnly() const { return true; }
         virtual LockType locktype() const { return NONE; } 
         virtual void help( stringstream &help ) const {
             help << "get administrative option(s)\nexample:\n";
-            help << "{ get:1, notablescan:1 }\n";
+            help << "{ getParameter:1, notablescan:1 }\n";
             help << "supported so far:\n";
+            help << "  quiet\n";
             help << "  notablescan\n";
-            help << "{ get:'*' } to get everything\n";
+            help << "  logLevel\n";
+            help << "  syncdelay\n";
+            help << "{ getParameter:'*' } to get everything\n";
         }
         bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
-            bool all = cmdObj.firstElement().valuestrsafe();
+            bool all = *cmdObj.firstElement().valuestrsafe() == '*';
+            
+            int before = result.len();
+            
+            if( all || cmdObj.hasElement("quiet") ) {
+                result.append("quiet", cmdLine.quiet );
+            }
             if( all || cmdObj.hasElement("notablescan") ) {
                 result.append("notablescan", cmdLine.noTableScan);
             }
-            else {
+            if( all || cmdObj.hasElement("logLevel") ) {
+                result.append("logLevel", logLevel);
+            }
+            if( all || cmdObj.hasElement("syncdelay") ) {
+                result.append("syncdelay", cmdLine.syncdelay);
+            }
+            if( all || cmdObj.hasElement("replApplyBatchSize") ) {
+                result.append("replApplyBatchSize", replApplyBatchSize);
+            }           
+
+            if ( before == result.len() ) {
                 errmsg = "no option found to get";
                 return false;
             }
@@ -94,25 +118,56 @@ namespace mongo {
 
     class CmdSet : public Command {
     public:
-        CmdSet() : Command( "set" ) { }
+        CmdSet() : Command( "setParameter" ) { }
         virtual bool slaveOk() const { return true; }
         virtual bool adminOnly() const { return true; }
         virtual LockType locktype() const { return NONE; } 
         virtual void help( stringstream &help ) const {
             help << "set administrative option(s)\nexample:\n";
-            help << "{ set:1, notablescan:true }\n";
+            help << "{ setParameter:1, notablescan:true }\n";
             help << "supported so far:\n";
             help << "  notablescan\n";
+            help << "  logLevel\n";
+            help << "  quiet\n";
         }
         bool run(const string& dbname, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl ){
+            int s = 0;
             if( cmdObj.hasElement("notablescan") ) {
                 result.append("was", cmdLine.noTableScan);
                 cmdLine.noTableScan = cmdObj["notablescan"].Bool();
+                s++;
             }
-            else {
-                errmsg = "no option found to set";
+            if( cmdObj.hasElement("quiet") ) {
+                result.append("was", cmdLine.quiet );
+                cmdLine.quiet = cmdObj["quiet"].Bool();
+                s++;
+            }
+            if( cmdObj.hasElement("syncdelay") ) {
+                result.append("was", cmdLine.syncdelay );
+                cmdLine.syncdelay = cmdObj["syncdelay"].Number();
+                s++;
+            }
+            if( cmdObj.hasElement( "logLevel" ) ) {
+                result.append("was", logLevel );
+                logLevel = cmdObj["logLevel"].numberInt();
+                s++;
+            }
+            if( cmdObj.hasElement( "replApplyBatchSize" ) ) {
+                result.append("was", replApplyBatchSize );
+                BSONElement e = cmdObj["replApplyBatchSize"];
+                ParameterValidator * v = ParameterValidator::get( e.fieldName() );
+                assert( v );
+                if ( ! v->isValid( e , errmsg ) )
+                    return false;
+                replApplyBatchSize = e.numberInt();
+                s++;
+            }
+
+            if( s == 0 ) {
+                errmsg = "no option found to set, use '*' to get all ";
                 return false;
             }
+
             return true;
         }
     } cmdSet;
@@ -136,7 +191,7 @@ namespace mongo {
         void help(stringstream& h) const { h << "return build level feature settings"; }
         virtual bool slaveOk() const { return true; }
         virtual bool readOnly(){ return true; }
-        virtual LockType locktype() const { return READ; } 
+        virtual LockType locktype() const { return NONE; }
         virtual bool run(const string& ns, BSONObj& cmdObj, string& errmsg, BSONObjBuilder& result, bool fromRepl){
             if ( globalScriptEngine ){
                 BSONObjBuilder bb( result.subobjStart( "js" ) );
@@ -144,10 +199,10 @@ namespace mongo {
                 bb.done();
             }
             if ( cmdObj["oidReset"].trueValue() ){
-                result.append( "oidMachineOld" , OID::staticMachine() );
-                OID::newState();
+                result.append( "oidMachineOld" , OID::getMachineId() );
+                OID::regenMachineId();
             }
-            result.append( "oidMachine" , OID::staticMachine() );
+            result.append( "oidMachine" , OID::getMachineId() );
             return true;
         }
         

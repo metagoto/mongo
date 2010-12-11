@@ -44,17 +44,18 @@ namespace mongo {
 
         int numAvailable() const { return (int)_pool.size(); }
 
-        void createdOne(){ _created++; }
+        void createdOne( DBClientBase * base);
         long long numCreated() const { return _created; }
 
-        
+        ConnectionString::ConnectionType type() const { assert(_created); return _type; }
+
         /** 
          * gets a connection or return NULL
          */
         DBClientBase * get();
-
+        
         void done( DBClientBase * c );
-
+        
         void flush();
     private:
         
@@ -69,6 +70,7 @@ namespace mongo {
 
         std::stack<StoredConnection> _pool;
         long long _created;
+        ConnectionString::ConnectionType _type;
     };
     
     class DBConnectionHook {
@@ -134,10 +136,19 @@ namespace mongo {
 
     class AScopedConnection : boost::noncopyable {
     public:
-        virtual ~AScopedConnection(){}
+        AScopedConnection() { _numConnections++; }
+        virtual ~AScopedConnection() { _numConnections--; }
         virtual DBClientBase* get() = 0;
         virtual void done() = 0;
         virtual string getHost() const = 0;
+
+        /**
+         * @return total number of current instances of AScopedConnection
+         */
+        static int getNumConnections() { return _numConnections; }
+
+    private:
+        static AtomicUInt _numConnections;
     };
 
     /** Use to get a connection from the pool.  On exceptions things
@@ -167,19 +178,19 @@ namespace mongo {
 
         /** get the associated connection object */
         DBClientBase* operator->(){ 
-            uassert( 11004 ,  "did you call done already" , _conn );
+            uassert( 11004 ,  "connection was returned to the pool already" , _conn );
             return _conn; 
         }
         
         /** get the associated connection object */
         DBClientBase& conn() {
-            uassert( 11005 ,  "did you call done already" , _conn );
+            uassert( 11005 ,  "connection was returned to the pool already" , _conn );
             return *_conn;
         }
 
         /** get the associated connection object */
         DBClientBase* get() {
-            uassert( 13102 ,  "did you call done already" , _conn );
+            uassert( 13102 ,  "connection was returned to the pool already" , _conn );
             return _conn;
         }
         

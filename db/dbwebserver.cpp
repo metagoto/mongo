@@ -503,7 +503,7 @@ namespace mongo {
             
             responseCode = 200;
             
-            string j = result.done().jsonString(JS, text );
+            string j = result.done().jsonString(Strict, text );
             responseMsg = j;
             
             if( text ){
@@ -519,14 +519,6 @@ namespace mongo {
     } commandsHandler;
 
     // --- external ----
-
-    string prettyHostName() { 
-        stringstream s;
-        s << getHostName();
-        if( mongo::cmdLine.port != CmdLine::DefaultDBPort ) 
-            s << ':' << mongo::cmdLine.port;
-        return s.str();
-    }
 
     void webServerThread(const AdminAccess* adminAccess) {
         boost::scoped_ptr<const AdminAccess> adminAccessPtr(adminAccess); // adminAccess is owned here 

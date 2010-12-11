@@ -39,6 +39,7 @@ jmp_buf jbuf;
 #include "../util/password.h"
 #include "../util/version.h"
 #include "../util/goodies.h"
+#include "../db/repl/rs_member.h"
 
 using namespace std;
 using namespace boost::filesystem;
@@ -55,7 +56,12 @@ bool autoKillOp = false;
 #define CTRLC_HANDLE
 #endif
 
-mongo::Scope * shellMainScope;
+namespace mongo {
+
+    Scope * shellMainScope;
+
+    extern bool dbexitCalled;
+}
 
 void generateCompletions( const string& prefix , vector<string>& all ){
     if ( prefix.find( '"' ) != string::npos )
@@ -197,7 +203,7 @@ void killOps() {
 }
 
 void quitNicely( int sig ){
-    mongo::goingAway = true;
+    mongo::dbexitCalled = true;
     if ( sig == SIGINT && inMultiLine ){
         gotInterrupted = 1;
         return;
@@ -210,7 +216,7 @@ void quitNicely( int sig ){
 }
 #else
 void quitNicely( int sig ){
-    mongo::goingAway = true;
+    mongo::dbexitCalled = true;
     //killOps();
     shellHistoryDone();
     exit(0);
@@ -218,6 +224,7 @@ void quitNicely( int sig ){
 #endif
 
 char * shellReadline( const char * prompt , int handlesigint = 0 ){
+
     atPrompt = true;
 #ifdef USE_READLINE
 
@@ -330,9 +337,18 @@ string fixHost( string url , string host , string port ){
     return newurl;
 }
 
+static string OpSymbols = "~!%^&*-+=|:,<>/?";
+
+bool isOpSymbol( char c ){
+    for ( size_t i = 0; i < OpSymbols.size(); i++ )
+        if ( OpSymbols[i] == c ) return true;
+    return false;
+}
+
 bool isBalanced( string code ){
     int brackets = 0;
     int parens = 0;
+    bool danglingOp = false;
 
     for ( size_t i=0; i<code.size(); i++ ){
         switch( code[i] ){
@@ -356,11 +372,21 @@ bool isBalanced( string code ){
             break;
         case '\\':
             if ( i+1 < code.size() && code[i+1] == '/') i++;
-            continue;
+            break;
+        case '+':
+        case '-':
+            if ( i+1 < code.size() && code[i+1] == code[i]) {
+                i++;
+                continue; // postfix op (++/--) can't be a dangling op
+            }
+            break;
         }
+
+        if ( isOpSymbol( code[i] )) danglingOp = true;
+        else if (! std::isspace( code[i] )) danglingOp = false;
     }
 
-    return brackets == 0 && parens == 0;
+    return brackets == 0 && parens == 0 && !danglingOp;
 }
 
 using mongo::asserted;
@@ -378,7 +404,12 @@ public:
         assert( ! isBalanced( "\"//\" {" ) );
         assert( isBalanced( "{x:/x\\//}" ) );
         assert( ! isBalanced( "{ \\/// }" ) );
-
+        assert( isBalanced( "x = 5 + y ") );
+        assert( ! isBalanced( "x = ") );
+        assert( ! isBalanced( "x = // hello") );
+        assert( ! isBalanced( "x = 5 +") );
+        assert( isBalanced( " x ++") );
+        assert( isBalanced( "-- x") );
     }
 } balnaced_test;
 
@@ -427,6 +458,36 @@ bool fileExists( string file ){
 
 namespace mongo {
     extern bool isShell;
+    extern DBClientWithCommands *latestConn;
+}
+
+string stateToString(MemberState s) { 
+    if( s.s == MemberState::RS_STARTUP ) return "STARTUP";
+    if( s.s == MemberState::RS_PRIMARY ) return "PRIMARY";
+    if( s.s == MemberState::RS_SECONDARY ) return "SECONDARY";
+    if( s.s == MemberState::RS_RECOVERING ) return "RECOVERING";
+    if( s.s == MemberState::RS_FATAL ) return "FATAL";
+    if( s.s == MemberState::RS_STARTUP2 ) return "STARTUP2";
+    if( s.s == MemberState::RS_ARBITER ) return "ARBITER";
+    if( s.s == MemberState::RS_DOWN ) return "DOWN";
+    if( s.s == MemberState::RS_ROLLBACK ) return "ROLLBACK";
+    return "";
+}
+string sayReplSetMemberState() { 
+    try {
+        if( latestConn ) { 
+            BSONObj info;
+            if( latestConn->simpleCommand("admin", &info, "replSetGetStatus") ) { 
+                stringstream ss;
+                ss << info["set"].String() << ':';
+                int s = info["myState"].Int();
+                MemberState ms(s);
+                ss << stateToString(ms);
+                return ss.str();
+            }
+        }
+    } catch(...) { }
+    return "";
 }
 
 int _main(int argc, char* argv[]) {
@@ -632,7 +693,12 @@ int _main(int argc, char* argv[]) {
         while ( 1 ){
             inMultiLine = 0;
             gotInterrupted = 0;
-            char * line = shellReadline( "> " );
+//            shellMainScope->localConnect;
+            //DBClientWithCommands *c = getConnection( JSContext *cx, JSObject *obj );
+
+            string prompt(sayReplSetMemberState()+"> ");
+
+            char * line = shellReadline( prompt.c_str() );
 
             if ( line ){
                 while (startsWith(line, "> "))
@@ -695,14 +761,13 @@ int _main(int argc, char* argv[]) {
                 }
             }
 
-
             shellHistoryAdd( line );
         }
 
         shellHistoryDone();
     }
 
-    mongo::goingAway = true;
+    mongo::dbexitCalled = true;
     return 0;
 }
 

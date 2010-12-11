@@ -61,7 +61,7 @@ namespace mongo {
         friend class DataFileMgr;
         friend class BasicCursor;
     public:
-        MongoDataFile(int fn) : fileNo(fn) { }
+        MongoDataFile(int fn) : _mb(0), fileNo(fn) { }
         void open(const char *filename, int requestedDataSize = 0, bool preallocateOnly = false);
 
         /* allocate a new extent from this datafile. 
@@ -89,11 +89,11 @@ namespace mongo {
         Record* makeRecord(DiskLoc dl, int size);
 		void grow(DiskLoc dl, int size);
 
-        char* p() { return (char *) _mb.p; }
-        DataFileHeader* header() { return (DataFileHeader*) _mb.p; }
+        char* p() { return (char *) _mb; }
+        DataFileHeader* header() { return (DataFileHeader*) _mb; }
 
         MongoMMF mmf;
-        MoveableBuffer _mb;
+        void *_mb; // the memory mapped view
         int fileNo;
     };
 
@@ -177,7 +177,10 @@ namespace mongo {
         int extentOfs;
         int nextOfs;
         int prevOfs;
+
+        /** be careful when referencing this that your write intent was correct */
         char data[4];
+
         int netLength() {
             return lengthWithHeaders - HeaderSize;
         }
@@ -267,6 +270,9 @@ namespace mongo {
             DiskLoc firstRecord;
             DiskLoc lastRecord;
         };
+        /** often we want to update just the firstRecord and lastRecord fields. 
+            this helper is for that -- for use with getDur().writing() method
+        */
         FL* fl() { return (FL*) &firstRecord; }
     private:
         DiskLoc _reuse(const char *nsname);
@@ -298,7 +304,7 @@ namespace mongo {
 
         enum { HeaderSize = 8192 };
 
-        bool currentVersion() const { return ( version == VERSION ) && ( versionMinor == VERSION_MINOR ); }
+        bool isCurrentVersion() const { return ( version == VERSION ) && ( versionMinor == VERSION_MINOR ); }
 
         bool uninitialized() const { return version == 0; }
 
@@ -306,7 +312,7 @@ namespace mongo {
             if ( uninitialized() ) {
                 assert(filelength > 32768 );
                 assert( HeaderSize == 8192 );
-                DataFileHeader *h = dur::writing(this);
+                DataFileHeader *h = getDur().writing(this);
                 h->fileLength = filelength;
                 h->version = VERSION;
                 h->versionMinor = VERSION_MINOR;

@@ -22,13 +22,15 @@
 
 namespace mongo {
 
+    set<MongoFile*> MongoFile::mmfiles;
+
     /* Create. Must not exist. 
     @param zero fill file with zeros when true
     */
     void* MemoryMappedFile::create(string filename, unsigned long long len, bool zero) {
         uassert( 13468, string("can't create file already exists ") + filename, !exists(filename) );
         void *p = map(filename.c_str(), len);
-        if( p ) {
+        if( p && zero ) {
             size_t sz = (size_t) len;
             assert( len == sz );
             memset(p, 0, sz);
@@ -70,8 +72,7 @@ namespace mongo {
        this is the administrative stuff 
     */
 
-    static set<MongoFile*> mmfiles;
-    static RWLock mmmutex("rw:mmmutex");
+    RWLock MongoFile::mmmutex("rw:mmmutex");
 
     void MongoFile::destroyed() {
         rwlock lk( mmmutex , true );
@@ -153,9 +154,9 @@ namespace mongo {
         mmfiles.insert(this);
     }
 
-#ifdef _DEBUG
+#if defined(_DEBUG) && !defined(_TESTINTENT)
 
-    void MongoFile::lockAll() {
+    void MongoFile::markAllWritable() {
         rwlock lk( mmmutex , false );
         for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
             MongoFile * mmf = *i;
@@ -163,7 +164,7 @@ namespace mongo {
         }
     }
 
-    void MongoFile::unlockAll() {
+    void MongoFile::unmarkAllWritable() {
         rwlock lk( mmmutex , false );
         for ( set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++ ){
             MongoFile * mmf = *i;

@@ -202,8 +202,16 @@ namespace mongo {
             // units, but experiments suggest 8bit units expected.  We allocate
             // enough memory that either will work.
 
-            if ( !JS_EncodeCharacters( _context , s , srclen , dst , &len) )
-                uasserted( 13498, str::stream() << "Not proper UTF-16: " << s);
+            if ( !JS_EncodeCharacters( _context , s , srclen , dst , &len) ){
+                StringBuilder temp;
+                temp << "Not proper UTF-16: ";
+                for ( size_t i=0; i<srclen; i++ ){
+                    if ( i > 0 )
+                        temp << ",";
+                    temp << s[i];
+                }
+                uasserted( 13498 , temp.str() );
+            }
 
             string ss( dst , len );
             free( dst );
@@ -391,8 +399,11 @@ namespace mongo {
             if ( hasJSReturn( code ) )
                 return false;
 
-            if ( code.find( ";" ) != string::npos &&
-                 code.find( ";" ) != code.rfind( ";" ) )
+            if ( code.find( ';' ) != string::npos &&
+                 code.find( ';' ) != code.rfind( ';' ) )
+                return false;
+            
+            if ( code.find( '\n') != string::npos )
                 return false;
 
             if ( code.find( "for(" ) != string::npos ||
@@ -417,9 +428,9 @@ namespace mongo {
             if ( ! assoc )
                 assoc = JS_GetGlobalObject( _context );
 
-            while (isspace(*raw)) {
-                raw++;
-            }
+            raw = jsSkipWhiteSpace( raw );
+
+            //cout << "RAW\n---\n" << raw << "\n---" << endl;
 
             stringstream fname;
             fname << "cf_";
@@ -1378,7 +1389,6 @@ namespace mongo {
         static JSBool interrupt( JSContext *cx, JSScript *script ){
             return _interrupt( cx );
         }
-
 
         void installInterrupt( int timeoutMs ) {
             if ( timeoutMs != 0 || ScriptEngine::haveCheckInterruptCallback() ) {

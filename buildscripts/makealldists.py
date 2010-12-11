@@ -188,11 +188,12 @@ def __main__():
              ("ubuntu", "10.4"),
              ("ubuntu", "9.10"),
              ("ubuntu", "9.4"),
-             ("ubuntu", "8.10"),
+             #("ubuntu", "8.10"),
              ("debian", "5.0"),
              ("centos", "5.4"),
-             ("fedora", "12"),
-             ("fedora", "13"))
+             #("fedora", "12"),
+             ("fedora", "13"),
+             ("fedora", "14"))
     arches = ("x86", "x86_64")
 #    mongos = branches.split(',')
     # Run a makedist for each distro/version/architecture tuple above.
@@ -203,7 +204,7 @@ def __main__():
     procs = []
     count = 0
     for ((distro, distro_version), arch, spec) in gen([dists, arches, [branches]]):
-        # FIXME: now x86 fedoras on RackSpace circa 04/10.
+        # FIXME: no x86 fedoras on RackSpace circa 04/10.
         if distro == "fedora" and arch == "x86":
             continue
         count+=1

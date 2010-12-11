@@ -19,10 +19,33 @@
 #pragma once
 
 namespace mongo {
+    class AlignedBuilder;
+
     namespace dur {
 
-        /** call at init.  uasserts on failure.  if fails, you likely want to terminate. */
-        void openJournal();
+        /** true if ok to cleanup journal files at termination. otherwise, files journal will be retained. 
+        */
+        extern bool okToCleanUp;
+
+        /** at termination after db files closed & fsynced */
+        void journalCleanup();
+
+        /** assure journal/ dir exists. throws */
+        void journalMakeDir();
+
+        /** check if time to rotate files; assure a file is open. 
+            done separately from the journal() call as we can do this part
+            outside of lock.
+         */
+        void journalRotate();
+
+        /** write/append to journal */
+        void journal(const AlignedBuilder& b);
+
+        /** flag that something has gone wrong during writing to the journal
+            (not for recovery mode) 
+        */
+        void journalingFailure(const char *msg);
 
     }
 }

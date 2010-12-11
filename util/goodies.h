@@ -69,9 +69,6 @@ namespace mongo {
     inline void printStackTrace( ostream &o = cout ) { }
 #endif
 
-    /* set to TRUE if we are exiting */
-    extern bool goingAway;
-
     bool isPrime(int n);
     int nextPrime(int n);
 
@@ -184,6 +181,7 @@ namespace mongo {
 #if !defined(_WIN32)
     typedef int HANDLE;
     inline void strcpy_s(char *dst, unsigned len, const char *src) {
+        assert( strlen(src) < len );
         strcpy(dst, src);
     }
 #else
@@ -224,7 +222,7 @@ namespace mongo {
 
     class ProgressMeter : boost::noncopyable {
     public:
-        ProgressMeter( long long total , int secondsBetween = 3 , int checkInterval = 100 ){
+        ProgressMeter( unsigned long long total , int secondsBetween = 3 , int checkInterval = 100 ){
             reset( total , secondsBetween , checkInterval );
         }
 
@@ -232,7 +230,7 @@ namespace mongo {
             _active = 0;
         }
         
-        void reset( long long total , int secondsBetween = 3 , int checkInterval = 100 ){
+        void reset( unsigned long long total , int secondsBetween = 3 , int checkInterval = 100 ){
             _total = total;
             _secondsBetween = secondsBetween;
             _checkInterval = checkInterval;
@@ -252,9 +250,13 @@ namespace mongo {
             return _active;
         }
         
+        /**
+         * @return if row was printed
+         */
         bool hit( int n = 1 ){
             if ( ! _active ){
                 cout << "warning: hit on in-active ProgressMeter" << endl;
+                return false;
             }
 
             _done += n;
@@ -274,11 +276,11 @@ namespace mongo {
             return true;
         }
 
-        long long done(){
+        unsigned long long done(){
             return _done;
         }
         
-        long long hits(){
+        unsigned long long hits(){
             return _hits;
         }
 
@@ -297,12 +299,12 @@ namespace mongo {
 
         bool _active;
         
-        long long _total;
+        unsigned long long _total;
         int _secondsBetween;
         int _checkInterval;
 
-        long long _done;
-        long long _hits;
+        unsigned long long _done;
+        unsigned long long _hits;
         int _lastTime;
     };
 

@@ -128,7 +128,8 @@ namespace mongo {
         DiskLoc deletedList[Buckets];
         // ofs 168 (8 byte aligned)
         struct Stats {
-            long long datasize; //datasize and nrecords MUST Be adjacent code assumes!
+            // datasize and nrecords MUST Be adjacent code assumes!
+            long long datasize; // this includes padding, but not record headers
             long long nrecords;
         } stats;
         int lastExtentSize;
@@ -265,13 +266,13 @@ namespace mongo {
             dassert( i < NIndexesMax );
             unsigned long long x = ((unsigned long long) 1) << i;
             if( multiKeyIndexBits & x ) return;
-            *dur::writing(&multiKeyIndexBits) |= x;
+            *getDur().writing(&multiKeyIndexBits) |= x;
         }
         void clearIndexIsMultikey(int i) { 
             dassert( i < NIndexesMax );
             unsigned long long x = ((unsigned long long) 1) << i;
             if( (multiKeyIndexBits & x) == 0 ) return;
-            *dur::writing(&multiKeyIndexBits) &= ~x;
+            *getDur().writing(&multiKeyIndexBits) &= ~x;
         }
 
         /* add a new index.  does not add to system.indexes etc. - just to NamespaceDetails.
@@ -287,12 +288,12 @@ namespace mongo {
         void paddingFits() {
             double x = paddingFactor - 0.01;
             if ( x >= 1.0 )
-                *dur::writingNoLog(&paddingFactor) = x;
+                *getDur().writingNoLog(&paddingFactor) = x;
         }
         void paddingTooSmall() {
             double x = paddingFactor + 0.6;
             if ( x <= 2.0 )
-                *dur::writingNoLog(&paddingFactor) = x;
+                *getDur().writingNoLog(&paddingFactor) = x;
         }
 
         // @return offset in indexes[]

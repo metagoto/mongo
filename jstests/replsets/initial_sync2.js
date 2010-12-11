@@ -18,6 +18,7 @@
 load("jstests/replsets/rslib.js");
 var basename = "jstests_initsync2";
 
+var doTest = function() {
 
 print("1. Bring up set");
 var replTest = new ReplSetTest( {name: basename, nodes: 2} );
@@ -25,6 +26,7 @@ var conns = replTest.startSet();
 replTest.initiate();
 
 var master = replTest.getMaster();
+var origMaster = master;
 var foo = master.getDB("foo");
 var admin = master.getDB("admin");
 
@@ -97,21 +99,27 @@ print("7. Kill #1 in the middle of syncing");
 replTest.stop(0);
 
 
-print("8. Check that #1 doesn't make it into secondary state for a while");
+print("8. Check that #3 doesn't make it into secondary state for a while");
 for (var i=0; i<100; i++) {
   var status = admin_s2.runCommand({replSetGetStatus:1});
+  occasionally(function() { printjson(status);}, 10);
   assert(status.members[2].state != 2);
+  if (status.members[2].state == 1) {
+    print("#3 completed its initial sync, we should just stop");
+    return;
+  }
   sleep(1000);
 }
 
 
-print("9. Bring #2 back up");
+print("9. Bring #1 back up");
 replTest.start(0, {}, true);
 reconnect(master);
 wait(function() {
     var status = admin.runCommand({replSetGetStatus:1});
     printjson(status);
-    return status.members && status.members[0].state == 1;
+    return status.members &&
+      (status.members[0].state == 1 || status.members[0].state == 2);
   });
 
 
@@ -119,18 +127,38 @@ print("10. Initial sync should succeed");
 wait(function() {
     var status = admin_s2.runCommand({replSetGetStatus:1});
     printjson(status);
-    return status.members[2].state == 2;
+    return status.members &&
+      status.members[2].state == 2 || status.members[2].state == 1;
   });
 
 
 print("11. Insert some stuff");
-master = replTest.getMaster();
+// ReplSetTest doesn't find master correctly unless all nodes are defined by
+// ReplSetTest
+for (var i = 0; i<30; i++) {
+  var result = admin.runCommand({isMaster : 1});
+  if (result.ismaster) {
+    break;
+  }
+  else if (result.primary) {
+    master = connect(result.primary+"/admin");
+    break;
+  }
+  sleep(1000);
+}
+
 for (var i=0; i<10000; i++) {
   foo.bar.insert({date : new Date(), x : i, str : "all the talk on the market"});
 }
 
 
 print("12. Everyone happy eventually");
+// if 3 is master...
+if (master+"" != origMaster+"") {
+  print("3 is master");
+  slave2 = origMaster;
+}
+
 wait(function() {
     var op1 = getLatestOp(master);
     var op2 = getLatestOp(slave1);
@@ -148,3 +176,6 @@ wait(function() {
   });
 
 replTest.stopSet();
+};
+
+doTest();

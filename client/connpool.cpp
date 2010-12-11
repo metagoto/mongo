@@ -79,6 +79,13 @@ namespace mongo {
         // if connection has been idle for an hour, kill it
         return ( now - when ) < 3600;
     }
+
+    void PoolForHost::createdOne( DBClientBase * base){
+        if ( _created == 0 )
+            _type = base->type();
+        _created++; 
+    }
+
     // ------ DBConnectionPool ------
 
     DBConnectionPool pool;
@@ -93,7 +100,7 @@ namespace mongo {
         {
             scoped_lock L(_mutex);
             PoolForHost& p = _pools[host];
-            p.createdOne();
+            p.createdOne( conn );
         }
 
         onCreate( conn );
@@ -167,16 +174,41 @@ namespace mongo {
     }
 
     void DBConnectionPool::appendInfo( BSONObjBuilder& b ){
-        scoped_lock lk( _mutex );
         BSONObjBuilder bb( b.subobjStart( "hosts" ) );
-        for ( map<string,PoolForHost>::iterator i=_pools.begin(); i!=_pools.end(); ++i ){
-            string s = i->first;
-            BSONObjBuilder temp( bb.subobjStart( s ) );
-            temp.append( "available" , i->second.numAvailable() );
-            temp.appendNumber( "created" , i->second.numCreated() );
-            temp.done();
+        int avail = 0;
+        long long created = 0;
+        
+        
+        map<ConnectionString::ConnectionType,long long> createdByType;
+
+        {
+            scoped_lock lk( _mutex );
+            for ( map<string,PoolForHost>::iterator i=_pools.begin(); i!=_pools.end(); ++i ){
+                string s = i->first;
+                BSONObjBuilder temp( bb.subobjStart( s ) );
+                temp.append( "available" , i->second.numAvailable() );
+                temp.appendNumber( "created" , i->second.numCreated() );
+                temp.done();
+
+                avail += i->second.numAvailable();
+                created += i->second.numCreated();
+
+                long long& x = createdByType[i->second.type()];
+                x += i->second.numCreated();
+            }
         }
         bb.done();
+        
+        {
+            BSONObjBuilder temp( bb.subobjStart( "createdByType" ) );
+            for ( map<ConnectionString::ConnectionType,long long>::iterator i=createdByType.begin(); i!=createdByType.end(); ++i ){
+                temp.appendNumber( ConnectionString::typeToString( i->first ) , i->second );
+            }
+            temp.done();
+        }
+
+        b.append( "totalAvailable" , avail );
+        b.appendNumber( "totalCreated" , created );
     }
 
     ScopedDbConnection * ScopedDbConnection::steal(){
@@ -227,6 +259,8 @@ namespace mongo {
         virtual LockType locktype() const { return NONE; }
         virtual bool run(const string&, mongo::BSONObj&, std::string&, mongo::BSONObjBuilder& result, bool){
             pool.appendInfo( result );
+            result.append( "numDBClientConnection" , DBClientConnection::getNumConnections() );
+            result.append( "numAScopedConnection" , AScopedConnection::getNumConnections() );
             return true;
         }
         virtual bool slaveOk() const {
@@ -235,5 +269,6 @@ namespace mongo {
 
     } poolStatsCmd;
 
+    AtomicUInt AScopedConnection::_numConnections;
 
 } // namespace mongo

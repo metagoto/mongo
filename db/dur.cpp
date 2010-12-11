@@ -22,12 +22,12 @@
      PREPLOGBUFFER 
        we will build an output buffer ourself and then use O_DIRECT
        we could be in read lock for this
-       for very large objects write directly to redo log in situ?  will be faster.
-     WRITETOREDOLOG 
+       for very large objects write directly to redo log in situ?
+     WRITETOJOURNAL
        we could be unlocked (the main db lock that is...) for this, with sufficient care, but there is some complexity
          have to handle falling behind which would use too much ram (going back into a read lock would suffice to stop that).
-         downgrading to (a perhaps upgradable) read lock would be a good start
-     CHECKPOINT
+         for now we are in read lock which is not ideal.
+     WRITETODATAFILES
        apply the writes back to the non-private MMF after they are for certain in redo log
      REMAPPRIVATEVIEW
        we could in a write lock quickly flip readers back to the main view, then stay in read lock and do our real 
@@ -39,69 +39,448 @@
 */
 
 #include "pch.h"
-
-#if !defined(_DURABLE)
-
-#else
-
+#include "cmdline.h"
+#include "client.h"
 #include "dur.h"
+#include "dur_journal.h"
+#include "dur_commitjob.h"
 #include "../util/mongoutils/hash.h"
+#include "../util/mongoutils/str.h"
+#include "../util/timer.h"
+
+using namespace mongoutils;
 
 namespace mongo { 
+    DurableInterface* DurableInterface::_impl = new NonDurableImpl();
 
-    void dbunlocking_write() {
-        // pending ...
+#if !defined(_DURABLE)
+    void enableDurability() {}
+#else
+
+
+    namespace { 
+        using namespace dur;
+
+        const bool DebugValidateMapsMatch = false;
+        const bool DebugCheckLastDeclaredWrite = false;
+
+        CommitJob commitJob;
     }
 
-    namespace dur { 
+    void enableDurability() { // TODO: merge with startup() ?
+        assert(typeid(*DurableInterface::_impl) == typeid(NonDurableImpl));
+        // lets NonDurableImpl instance leak, but its tiny and only happens once
+        DurableInterface::_impl = new DurableImpl();
+    }
 
-        struct WriteIntent { 
-            WriteIntent() : p(0) { }
-            WriteIntent(void *a, unsigned b) : p(a), len(b) { }
-            void *p;
-            unsigned len;
-        };
-
-        /* try to remember things we have already marked for journalling.  false negatives are ok if infrequent - 
-           we will just log them twice.
-           */
-        template<int Prime>
-        class Already {
-            enum { N = Prime }; // this should be small the idea is that it fits in the cpu cache easily
-            WriteIntent nodes[N];
-        public:
-            Already() { reset(); }
-            void reset() { memset(this, 0, sizeof(*this)); }
-            bool checkAndSet(const WriteIntent& w) {
-                mongoutils::hash(123);
-                unsigned x = mongoutils::hashPointer(w.p);
-                WriteIntent& n = nodes[x % N];
-                if( n.p != w.p || n.len < w.len ) {
-                    n = w;
-                    return false;
-                }
-                return true; // already done
-            }
-        };
-
-        static Already<127> alreadyNoted;
-        static vector<WriteIntent> writes;
-
-        void* writingPtr(void *x, size_t len) { 
-            //log() << "TEMP writing " << x << ' ' << len << endl;
-            WriteIntent w(x, len);
-            if( !alreadyNoted.checkAndSet(w) ) {
-                // remember, we will journal it in a bit
-                writes.push_back(w);
-                wassert( writes.size() <  2000000 );
-                assert(  writes.size() < 20000000 );
-            }
-            DEV return MongoMMF::switchToPrivateView(x);
-            return x;
+        /** Declare that a file has been created 
+            Normally writes are applied only after journalling, for safety.  But here the file 
+            is created first, and the journal will just replay the creation if the create didn't 
+            happen because of crashing.
+        */
+        void DurableImpl::createdFile(string filename, unsigned long long len) { 
+            shared_ptr<DurOp> op( new FileCreatedOp(filename, len) );
+            commitJob.noteOp(op);
         }
+
+        /** declare write intent.  when already in the write view if testIntent is true. */
+        void DurableImpl::declareWriteIntent(void *p, unsigned len) {
+            WriteIntent w(p, len);
+            commitJob.note(w);
+        }
+
+        string hexdump(const char *data, unsigned len);
+
+        void* DurableImpl::writingPtr(void *x, unsigned len) { 
+            void *p = x;
+            if( testIntent )
+                p = MongoMMF::switchToPrivateView(x);
+            declareWriteIntent(p, len);
+            return p;
+        }
+
+        /** declare intent to write
+            @param ofs offset within buf at which we will write
+            @param len the length at ofs we will write
+            @return new buffer pointer.  this is modified when testIntent is true.
+        */
+        void* DurableImpl::writingAtOffset(void *buf, unsigned ofs, unsigned len) {
+            char *p = (char *) buf;
+            if( testIntent )
+                p = (char *) MongoMMF::switchToPrivateView(buf);
+            declareWriteIntent(p+ofs, len);
+            return p;
+        }
+
+        /** Used in _DEBUG builds to check that we didn't overwrite the last intent
+            that was declared.  called just before writelock release.  we check a few
+            bytes after the declared region to see if they changed.
+
+            @see MongoMutex::_releasedWriteLock
+
+            SLOW
+        */
+        void DurableImpl::debugCheckLastDeclaredWrite() { 
+            if( !DebugCheckLastDeclaredWrite )
+                return;
+
+            if( testIntent )
+                return;
+
+            static int n;
+            ++n;
+
+            assert(debug && cmdLine.dur);
+            vector<WriteIntent>& w = commitJob.writes();
+            if( w.size() == 0 ) 
+                return;
+            const WriteIntent &i = w[w.size()-1];
+            size_t ofs;
+            MongoMMF *mmf = privateViews.find(i.p, ofs);
+            if( mmf == 0 ) 
+                return;
+            size_t past = ofs + i.len;
+            if( mmf->length() < past + 8 ) 
+                return; // too close to end of view
+            char *priv = (char *) mmf->getView();
+            char *writ = (char *) mmf->view_write();
+            unsigned long long *a = (unsigned long long *) (priv+past);
+            unsigned long long *b = (unsigned long long *) (writ+past);
+            if( *a != *b ) { 
+                for( unsigned z = 0; z < w.size() - 1; z++ ) { 
+                    const WriteIntent& wi = w[z];
+                    char *r1 = (char*) wi.p;
+                    char *r2 = r1 + wi.len;
+                    if( r1 <= (((char*)a)+8) && r2 > (char*)a ) { 
+                        //log() << "it's ok " << wi.p << ' ' << wi.len << endl;
+                        return;
+                    }
+                }
+                log() << "dur data after write area " << i.p << " does not agree" << endl;
+                log() << " was:  " << ((void*)b) << "  " << hexdump((char*)b, 8) << endl;
+                log() << " now:  " << ((void*)a) << "  " << hexdump((char*)a, 8) << endl;
+                log() << " n:    " << n << endl;
+                log() << endl;
+            }
+        }
+
+    namespace dur {
+        /** we will build an output buffer ourself and then use O_DIRECT
+            we could be in read lock for this
+            caller handles locking 
+            */
+        static void PREPLOGBUFFER() { 
+            assert( cmdLine.dur );
+            AlignedBuilder& bb = commitJob._ab;
+            bb.reset();
+
+            unsigned lenOfs;
+            // JSectHeader
+            {
+                bb.appendStr("\nHH\n", false);
+                lenOfs = bb.skip(4);
+            }
+
+            // ops other than basic writes
+            {
+                for( vector< shared_ptr<DurOp> >::iterator i = commitJob.ops().begin(); i != commitJob.ops().end(); ++i ) { 
+                    (*i)->serialize(bb);
+                }
+            }
+
+            // write intents
+            {
+                scoped_lock lk(privateViews._mutex());
+                string lastFilePath;
+                for( vector<WriteIntent>::iterator i = commitJob.writes().begin(); i != commitJob.writes().end(); i++ ) {
+                    size_t ofs;
+                    MongoMMF *mmf = privateViews._find(i->p, ofs);
+                    if( mmf == 0 ) {
+                        string s = str::stream() << "view pointer cannot be resolved " << (size_t) i->p;
+                        journalingFailure(s.c_str()); // asserts
+                        return;
+                    }
+
+                    if( !mmf->willNeedRemap() ) {
+                        mmf->willNeedRemap() = true; // usually it will already be dirty so don't bother writing then
+                    }
+                    //size_t ofs = ((char *)i->p) - ((char*)mmf->getView().p);
+                    i->w_ptr = ((char*)mmf->view_write()) + ofs;
+                    if( mmf->filePath() != lastFilePath ) { 
+                        lastFilePath = mmf->filePath();
+                        JDbContext c;
+                        bb.appendStruct(c);
+                        bb.appendStr(lastFilePath);
+                    }
+                    JEntry e;
+                    e.len = i->len;
+                    assert( ofs <= 0x80000000 );
+                    e.ofs = (unsigned) ofs;
+                    e.fileNo = mmf->fileSuffixNo();
+                    bb.appendStruct(e);
+                    bb.appendBuf(i->p, i->len);
+                }
+            }
+
+            {
+                JSectFooter f(bb.buf(), bb.len());
+                bb.appendStruct(f);
+            }
+
+            {
+                assert( 0xffffe000 == (~(Alignment-1)) );
+                unsigned L = (bb.len() + Alignment-1) & (~(Alignment-1)); // fill to alignment
+                dassert( L >= (unsigned) bb.len() );
+                *((unsigned*)bb.atOfs(lenOfs)) = L;
+                unsigned padding = L - bb.len();
+                bb.skip(padding);
+                dassert( bb.len() % Alignment == 0 );
+            }
+
+            return;
+        }
+
+        /** write the buffer we have built to the journal and fsync it.
+            outside of lock as that could be slow.
+        */
+        static void WRITETOJOURNAL(AlignedBuilder& ab) { 
+            journal(ab);
+        }
+
+        /** (SLOW) diagnostic to check that the private view and the non-private view are in sync.
+        */
+        static void debugValidateMapsMatch() {
+            if( !DebugValidateMapsMatch ) 
+                 return;
+
+            Timer t;
+            set<MongoFile*>& files = MongoFile::getAllFiles();
+            for( set<MongoFile*>::iterator i = files.begin(); i != files.end(); i++ ) { 
+                MongoFile *mf = *i;
+                if( mf->isMongoMMF() ) { 
+                    MongoMMF *mmf = (MongoMMF*) mf;
+                    const char *p = (const char *) mmf->getView();
+                    const char *w = (const char *) mmf->view_write();
+                    unsigned low = 0xffffffff;
+                    unsigned high = 0;
+                    for( unsigned i = 0; i < mmf->length(); i++ ) {
+                        if( p[i] != w[i] ) { 
+                            log() << i << '\t' << (int) p[i] << '\t' << (int) w[i] << endl;
+                            if( i < low ) low = i;
+                            if( i > high ) high = i;
+                        }
+                    }
+                    if( low != 0xffffffff ) { 
+                        std::stringstream ss;
+                        ss << "dur error warning views mismatch " << mmf->filename() << ' ' << (hex) << low << ".." << high << " len:" << high-low+1;
+                        log() << ss.str() << endl;
+                        log() << "priv loc: " << (void*)(p+low) << endl;
+                        vector<WriteIntent>& w = commitJob.writes();
+                        (void)w; // mark as unused. Useful for inspection in debugger
+
+                        breakpoint();
+                    }
+                }
+            }
+            log() << "debugValidateMapsMatch " << t.millis() << "ms " << endl;
+        }
+
+        /** apply the writes back to the non-private MMF after they are for certain in redo log 
+
+            (1) todo we don't need to write back everything every group commit.  we MUST write back
+            that which is going to be a remapped on its private view - but that might not be all 
+            views.
+
+            (2) todo should we do this using N threads?  would be quite easy
+                see Hackenberg paper table 5 and 6.  2 threads might be a good balance.
+
+            locking: in read lock when called
+        */
+        static void WRITETODATAFILES() { 
+            /* we go backwards as what is at the end is most likely in the cpu cache.  it won't be much, but we'll take it. */
+            for( int i = commitJob.writes().size() - 1; i >= 0; i-- ) {
+                const WriteIntent& intent = commitJob.writes()[i];
+                char *dst = (char *) (intent.w_ptr);
+                memcpy(dst, intent.p, intent.len);
+            }
+
+            debugValidateMapsMatch();
+        }
+
+        /** We need to remap the private views periodically. otherwise they would become very large.
+            Call within write lock.
+        */
+        void REMAPPRIVATEVIEW() { 
+            static unsigned startAt;
+            static unsigned long long lastRemap;
+
+            dbMutex.assertWriteLocked();
+            dbMutex._remapPrivateViewRequested = false;
+            assert( !commitJob.hasWritten() );
+
+            if( 0 ) { 
+                log() << "TEMP remapprivateview disabled for testing - will eventually run oom in this mode if db bigger than ram" << endl;
+                return;
+            }
+
+            // we want to remap all private views about every 2 seconds.  there could be ~1000 views so 
+            // we do a little each pass; beyond the remap time, more significantly, there will be copy on write 
+            // faults after remapping, so doing a little bit at a time will avoid big load spikes on 
+            // remapping.
+            unsigned long long now = curTimeMicros64();
+            double fraction = (now-lastRemap)/20000000.0;
+
+            set<MongoFile*>& files = MongoFile::getAllFiles();
+            unsigned sz = files.size();
+            if( sz == 0 ) 
+                return;
+
+            unsigned ntodo = (unsigned) (sz * fraction);
+            if( ntodo < 1 ) ntodo = 1;
+            if( ntodo > sz ) ntodo = sz;
+
+            const set<MongoFile*>::iterator b = files.begin();
+            const set<MongoFile*>::iterator e = files.end();
+            set<MongoFile*>::iterator i = b;
+            // skip to our starting position
+            for( unsigned x = 0; x < startAt; x++ ) {
+                i++;
+                if( i == e ) i = b;
+            }
+            startAt = (startAt + ntodo) % sz; // mark where to start next time
+
+            for( unsigned x = 0; x < ntodo; x++ ) {
+                dassert( i != e );
+                if( (*i)->isMongoMMF() ) {
+                    MongoMMF *mmf = (MongoMMF*) *i;
+                    assert(mmf);
+                    if( mmf->willNeedRemap() ) {
+                        mmf->willNeedRemap() = false;
+                        mmf->remapThePrivateView();
+                    }
+                    i++;
+                    if( i == e ) i = b;
+                }
+            }
+        }
+
+        /** locking in read lock when called 
+            @see MongoMMF::close()
+        */
+        void _go() {
+            dbMutex.assertAtLeastReadLocked();
+
+            if( !commitJob.hasWritten() )
+                return;
+
+            PREPLOGBUFFER();
+
+            WRITETOJOURNAL(commitJob._ab);
+
+            // write the noted write intent entries to the data files.
+            // this has to come after writing to the journal, obviously...
+            MongoFile::markAllWritable(); // for _DEBUG. normally we don't write in a read lock
+            WRITETODATAFILES();
+            if (!dbMutex.isWriteLocked())
+                MongoFile::unmarkAllWritable();
+
+            commitJob.reset();
+
+            // REMAPPRIVATEVIEW
+            // 
+            // remapping private views must occur after WRITETODATAFILES otherwise 
+            // we wouldn't see newly written data on reads.
+            // 
+            DEV assert( !commitJob.hasWritten() );
+            if( !dbMutex.isWriteLocked() ) { 
+                // this needs done in a write lock thus we do it on the next acquisition of that 
+                // instead of here (there is no rush if you aren't writing anyway -- but it must happen, 
+                // if it is done, before any uncommitted writes occur).
+                //
+                dbMutex._remapPrivateViewRequested = true;
+            }
+            else { 
+                // however, if we are already write locked, we must do it now -- up the call tree someone 
+                // may do a write without a new lock acquisition.  this can happen when MongoMMF::close() calls
+                // this method when a file (and its views) is about to go away.
+                //
+                REMAPPRIVATEVIEW();
+            }
+        }
+
+        static void go() {
+            if( !commitJob.hasWritten() )
+                return;
+
+            {
+                readlocktry lk("", 1000);
+                if( lk.got() ) {
+                    _go();
+                    return;
+                }
+            }
+
+            // starvation on read locks could occur.  so if read lock acquisition is slow, try to get a 
+            // write lock instead.  otherwise writes could use too much RAM.
+            writelock lk;
+            _go();
+        }
+
+        /** called when a MongoMMF is closing -- we need to go ahead and group commit in that case before its 
+            views disappear 
+        */
+        void closingFileNotification() {
+            if( dbMutex.atLeastReadLocked() ) {
+                _go(); 
+            }
+            else {
+                assert( inShutdown() );
+                if( commitJob.hasWritten() ) { 
+                    log() << "dur warning files are closing outside locks with writes pending" << endl;
+                }
+            }
+        }
+
+        static void durThread() { 
+            Client::initThread("dur");
+            const int HowOftenToGroupCommitMs = 100;
+            while( 1 ) { 
+                try {
+                    int millis = HowOftenToGroupCommitMs;
+                    {
+                        Timer t;
+                        journalRotate(); // note we do this part outside of mongomutex
+                        millis -= t.millis();
+                        if( millis < 5 || millis > HowOftenToGroupCommitMs )
+                            millis = 5;
+                    }
+                    sleepmillis(millis);
+                    go();
+                }
+                catch(std::exception& e) { 
+                    log() << "exception in durThread " << e.what() << endl;
+                }
+            }
+        }
+
+        void unlinkThread();
+        void recover();
 
     } // namespace dur
 
-} // namespace mongo
+
+    void DurableImpl::startup() {
+        if( !cmdLine.dur )
+            return;
+        if( testIntent )
+            return;
+        recover();
+        journalMakeDir();
+        boost::thread t(durThread);
+        boost::thread t2(unlinkThread);
+    }
 
 #endif
+
+} // namespace mongo
+

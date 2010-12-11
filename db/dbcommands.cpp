@@ -306,6 +306,7 @@ namespace mongo {
 
 			bool authed = cc().getAuthenticationInfo()->isAuthorizedReads("admin");
 
+            result.append( "host" , prettyHostName() );
             result.append("version", versionString);
             result.append("uptime",(double) (time(0)-started));
             result.append("uptimeEstimate",(double) (start/1000));
@@ -538,7 +539,7 @@ namespace mongo {
 
         BackgroundOperation::assertNoBgOpInProgForNs(ns);
 
-        d = dur::writing(d);
+        d = getDur().writing(d);
         d->aboutToDeleteAnIndex();
 
         /* there may be pointers pointing at keys in the btree(s).  kill them. */
@@ -1485,6 +1486,7 @@ namespace mongo {
             colls.sort();
             
             result.appendNumber( "numCollections" , (long long)colls.size() );
+            result.append( "host" , prettyHostName() );
             
             md5_state_t globalState;
             md5_init(&globalState);

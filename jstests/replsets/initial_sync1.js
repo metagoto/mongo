@@ -95,7 +95,7 @@ replTest.stop(1);
 
 print("8. Eventually it should become a secondary");
 print("if initial sync has started, this will cause it to fail and sleep for 5 minutes");
-sleep(5*3600*1000);
+sleep(5*60*1000);
 wait(function() {
     var status = admin_s2.runCommand({replSetGetStatus:1});
     occasionally(function() { printjson(status); });
@@ -109,8 +109,8 @@ reconnect(slave1);
 wait(function() {
     var status = admin_s1.runCommand({replSetGetStatus:1});
     printjson(status);
-    return status.members[1].state == 2 ||
-      status.members[1].state == 1;
+    return status.ok == 1 && 'members' in status &&
+      status.members[1].state == 2 || status.members[1].state == 1;
   });
 
 

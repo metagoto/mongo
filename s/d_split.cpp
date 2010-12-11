@@ -238,14 +238,15 @@ namespace mongo {
                 return true;
             }
 
+            log() << "request split points lookup for chunk " << ns << " " << min << " -->> " << max << endl;
+ 
             // We'll use the average object size and number of object to find approximately how many keys
             // each chunk should have. We'll split at half the maxChunkSize or maxChunkObjects, if 
             // provided.
             const long long avgRecSize = dataSize / recCount;
             long long keyCount = maxChunkSize / (2 * avgRecSize);
             if ( maxChunkObjects && ( maxChunkObjects < keyCount ) ) {
-                log() << "limiting split vector to " << maxChunkObjects << " (from " << keyCount << ") objects for chunk "
-                      << ns << " " << min << "-->>" << max << endl;
+                log() << "limiting split vector to " << maxChunkObjects << " (from " << keyCount << ") objects " << endl;
                 keyCount = maxChunkObjects;
             }
 
@@ -295,8 +296,8 @@ namespace mongo {
 
                 // Stop if we have enough split points.
                 if ( maxSplitPoints && ( numChunks >= maxSplitPoints ) ){
-                    log(1) << "max number of requested split points reached (" << numChunks 
-                           << ") before the end of chunk " << ns << " " << min << "-->>" << max 
+                    log() << "max number of requested split points reached (" << numChunks 
+                           << ") before the end of chunk " << ns << " " << min << " -->> " << max 
                            << endl;
                     break;
                 }
@@ -304,7 +305,10 @@ namespace mongo {
                 if ( ! cc->yieldSometimes() ){
                     // we were near and and got pushed to the end
                     // i think returning the splits we've already found is fine
-                    bc = NULL; // defensive
+
+                    // don't use the btree cursor pointer to acces keys beyond this point but ok
+                    // to use it for format the keys we've got already
+
                     break;
                 }
             }
@@ -335,6 +339,7 @@ namespace mongo {
             // 4MB work of 'result' size. This should be okay for now.
 
             result.append( "splitKeys" , splitKeys );
+
             return true;
 
         }
@@ -432,7 +437,8 @@ namespace mongo {
             }
 
             // It is possible that this is the first sharded command this mongod is asked to perform. If so,
-            // start sharding apparatus.
+            // start sharding apparatus. We'd still be missing some more shard-related info but we'll get it 
+            // in step 2. below.
             if ( ! shardingState.enabled() ){
                 if ( cmdObj["configdb"].type() != String ){
                     errmsg = "sharding not enabled";
@@ -442,6 +448,8 @@ namespace mongo {
                 shardingState.enable( configdb );
                 configServer.init( configdb );
             }
+
+            log() << "got splitchunk: " << cmdObj << endl;
 
             //
             // 2. lock the collection's metadata and get highest version for the current shard
@@ -495,6 +503,13 @@ namespace mongo {
                 origChunk.max = currMax.getOwned();
                 origChunk.lastmod = currChunk["lastmod"];
 
+                // since this could be the first call that enable sharding we also make sure to have the chunk manager up to date
+                shardingState.gotShardName( shard );
+                ShardChunkVersion shardVersion;
+                shardingState.trySetVersion( ns , shardVersion /* will return updated */ );
+
+                log() << "splitChunk accepted on version " << shardVersion << endl;
+
             }
 
             // 
@@ -508,7 +523,7 @@ namespace mongo {
 
             ShardChunkVersion myVersion = maxVersion;
             BSONObj startKey = min;
-            splitKeys.push_back( max ); // we need to update that chunk, too
+            splitKeys.push_back( max ); // makes it easier to have 'max' in the next loop. remove later.
 
             BSONObjBuilder cmdBuilder;
             BSONArrayBuilder updates( cmdBuilder.subarrayStart( "applyOps" ) );
@@ -566,7 +581,7 @@ namespace mongo {
             }
 
             // 
-            // 4. apply the batch of updates to metadata
+            // 4. apply the batch of updates to metadata and to the chunk manager
             //
 
             BSONObj cmd = cmdBuilder.obj();
@@ -585,8 +600,13 @@ namespace mongo {
                 stringstream ss;
                 ss << "saving chunks failed.  cmd: " << cmd << " result: " << cmdResult;
                 error() << ss.str() << endl;
-                msgasserted( 13327 , ss.str() );
+                msgasserted( 13593 , ss.str() ); // assert(13593)
             }
+
+            // install a chunk manager with knowledge about newly split chunks in this shard's state
+            splitKeys.pop_back(); // 'max' was used as sentinel
+            maxVersion.incMinor();
+            shardingState.splitChunk( ns , min , max , splitKeys , maxVersion );            
 
             //
             // 5. logChanges

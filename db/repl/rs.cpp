@@ -21,6 +21,7 @@
 #include "../../client/dbclient.h"
 #include "../dbhelpers.h"
 #include "rs.h"
+#include "connections.h"
 
 namespace mongo { 
 
@@ -362,6 +363,10 @@ namespace mongo {
                         newOnes.push_back(&m);
                     }
                 }
+                
+                // change timeout settings, if necessary
+                ScopedConn conn(m.h.toString());
+                conn.setTimeout(c.ho.heartbeatTimeoutMillis/1000.0);
             }
             if( me == 0 ) {
                 // log() << "replSet config : " << _cfg->toString() << rsLog;
@@ -543,7 +548,9 @@ namespace mongo {
                         startupStatus = EMPTYCONFIG;
                         startupStatusMsg = "can't get " + rsConfigNs + " config from self or any seed (EMPTYCONFIG)";
                         log() << "replSet can't get " << rsConfigNs << " config from self or any seed (EMPTYCONFIG)" << rsLog;
-                        log(1) << "replSet have you run replSetInitiate yet?" << rsLog;
+                        static unsigned once;
+                        if( ++once == 1 ) 
+                            log() << "replSet info you may need to run replSetInitiate -- rs.initiate() in the shell -- if that is not already done" << rsLog;
                         if( _seeds->size() == 0 )
                             log(1) << "replSet info no seed hosts were specified on the --replSet command line" << rsLog;
                     }
@@ -597,9 +604,13 @@ namespace mongo {
             initFromConfig(newConfig, true);
             log() << "replSet replSetReconfig new config saved locally" << rsLog;
         }
-        catch(DBException& e) { 
-            if( e.getCode() != 13497 /* removed from set */ ) 
-                log() << "replSet error unexpected exception in haveNewConfig() : " << e.toString() << rsLog;
+        catch(DBException& e) {
+            if( e.getCode() == 13497 /* removed from set */ ) {
+                cc().shutdown();
+                dbexit( EXIT_CLEAN , "removed from replica set" ); // never returns
+                assert(0);
+            }
+            log() << "replSet error unexpected exception in haveNewConfig() : " << e.toString() << rsLog;
             _fatal();
         }
         catch(...) { 

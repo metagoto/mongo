@@ -98,7 +98,7 @@
     <ClCompile>
       <Optimization>Disabled</Optimization>
       <AdditionalIncludeDirectories>..\..\js\src;..\pcre-7.4;c:\boost;\boost</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>_DURABLE,_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DURABLE;_UNICODE;UNICODE;SUPPORT_UCP;SUPPORT_UTF8;MONGO_EXPOSE_MACROS;OLDJS;STATIC_JS_API;XP_WIN;WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;HAVE_CONFIG_H;PCRE_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <MinimalRebuild>No</MinimalRebuild>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -196,6 +196,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\bson\oid.cpp" />
     <ClCompile Include="..\client\dbclientcursor.cpp" />
     <ClCompile Include="..\client\distlock.cpp" />
     <ClCompile Include="..\client\model.cpp" />
@@ -448,6 +449,7 @@
     </ClCompile>
     <ClCompile Include="..\s\chunk.cpp" />
     <ClCompile Include="..\s\config.cpp" />
+    <ClCompile Include="..\s\d_chunk_manager.cpp" />
     <ClCompile Include="..\s\d_migrate.cpp" />
     <ClCompile Include="..\s\d_split.cpp" />
     <ClCompile Include="..\s\d_state.cpp" />
@@ -456,11 +458,15 @@
     <ClCompile Include="..\s\shard.cpp" />
     <ClCompile Include="..\s\shardconnection.cpp" />
     <ClCompile Include="..\s\shardkey.cpp" />
+    <ClCompile Include="..\util\alignedbuilder.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\util\concurrency\spin_lock.cpp" />
     <ClCompile Include="..\util\concurrency\task.cpp" />
     <ClCompile Include="..\util\concurrency\thread_pool.cpp" />
     <ClCompile Include="..\util\concurrency\vars.cpp" />
     <ClCompile Include="..\util\log.cpp" />
+    <ClCompile Include="..\util\logfile.cpp" />
     <ClCompile Include="..\util\processinfo.cpp" />
     <ClCompile Include="..\util\stringutils.cpp" />
     <ClCompile Include="..\util\text.cpp" />
@@ -473,11 +479,14 @@
     <ClCompile Include="compact.cpp" />
     <ClCompile Include="dbcommands_generic.cpp" />
     <ClCompile Include="dur.cpp" />
+    <ClCompile Include="durop.cpp" />
     <ClCompile Include="dur_journal.cpp" />
+    <ClCompile Include="dur_recover.cpp" />
     <ClCompile Include="geo\2d.cpp" />
     <ClCompile Include="geo\haystack.cpp" />
     <ClCompile Include="mongommf.cpp" />
     <ClCompile Include="oplog.cpp" />
+    <ClCompile Include="projection.cpp" />
     <ClCompile Include="repl.cpp" />
     <ClCompile Include="repl\consensus.cpp" />
     <ClCompile Include="repl\heartbeat.cpp" />
@@ -580,6 +589,8 @@
     <ClCompile Include="repl\rs_config.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="..\jstests\dur\basic1.sh" />
+    <None Include="..\jstests\dur\dur1.js" />
     <None Include="..\jstests\replsets\replset1.js" />
     <None Include="..\jstests\replsets\replset2.js" />
     <None Include="..\jstests\replsets\replset3.js" />
@@ -616,12 +627,17 @@
     <ClInclude Include="..\util\concurrency\mvar.h" />
     <ClInclude Include="..\util\concurrency\task.h" />
     <ClInclude Include="..\util\concurrency\thread_pool.h" />
+    <ClInclude Include="..\util\logfile.h" />
     <ClInclude Include="..\util\mongoutils\checksum.h" />
     <ClInclude Include="..\util\mongoutils\html.h" />
     <ClInclude Include="..\util\mongoutils\str.h" />
     <ClInclude Include="..\util\ramlog.h" />
     <ClInclude Include="..\util\text.h" />
+    <ClInclude Include="..\util\time_support.h" />
+    <ClInclude Include="durop.h" />
+    <ClInclude Include="dur_commitjob.h" />
     <ClInclude Include="dur_journal.h" />
+    <ClInclude Include="dur_journalformat.h" />
     <ClInclude Include="geo\core.h" />
     <ClInclude Include="helpers\dblogger.h" />
     <ClInclude Include="instance.h" />
@@ -629,6 +645,7 @@
     <ClInclude Include="mongomutex.h" />
     <ClInclude Include="namespace-inl.h" />
     <ClInclude Include="oplogreader.h" />
+    <ClInclude Include="projection.h" />
     <ClInclude Include="repl.h" />
     <ClInclude Include="replpair.h" />
     <ClInclude Include="repl\connections.h" />

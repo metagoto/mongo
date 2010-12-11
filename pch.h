@@ -1,7 +1,7 @@
-// pch.h : include file for standard system include files,
-// or project specific include files that are used frequently, but
-// are changed infrequently
-//
+/** @file pch.h : include file for standard system include files,
+ *  or project specific include files that are used frequently, but
+ *  are changed infrequently
+ */
 
 /*    Copyright 2009 10gen Inc.
  *
@@ -31,15 +31,18 @@
 # define _CRT_SECURE_NO_WARNINGS
 #endif
 
+// [dm] i am not sure why we need this.
 #if defined(WIN32)
-
-#ifndef _WIN32
-#define _WIN32
-#endif
-
+# ifndef _WIN32
+# define _WIN32
+# endif
 #endif
 
 #if defined(_WIN32)
+
+// for rand_s() usage:
+#define _CRT_RAND_S
+
 # ifndef NOMINMAX
 #  define NOMINMAX
 # endif
@@ -69,6 +72,7 @@
 #include "limits.h"
 
 #include <boost/any.hpp>
+#include "boost/thread/once.hpp"
 #include <boost/archive/iterators/transform_width.hpp>
 #include <boost/filesystem/convenience.hpp>
 #include <boost/filesystem/exception.hpp>
@@ -93,14 +97,21 @@
 
 namespace mongo {
 
-    /* this likely goes away later. to facilitate testing for a while without impacting other things. */
+/** _DURABLE define - this likely goes away later. to facilitate testing for a while without impacting other things. */
 #if defined(_DURABLE)
-    const bool durable = true;
-#if !defined(_DEBUG)
-#error not done - do not use this yet
-#endif
+# if defined(_TESTINTENT)
+    /** Use _TESTINTENT to test write intent declarations by using a read only view for non-declared operations. 
+        We don't do journalling when _TESTINTENT is enabled.
+    */
+    const bool testIntent = true;
+# else
+    const bool testIntent = false;
+# endif
 #else
-    const bool durable = false;
+# if defined(_TESTINTENT)
+#  error _TESTINTENT requires _DURABLE
+# endif
+    const bool testIntent = false;
 #endif
 
     using namespace std;
@@ -146,9 +157,6 @@ namespace mongo {
     void exit( ExitCode returnCode );
     bool inShutdown();
     
-} // namespace mongo
-
-namespace mongo {
     using namespace boost::filesystem;
     void asserted(const char *msg, const char *file, unsigned line);
 }
@@ -165,10 +173,6 @@ namespace mongo {
 
     void sayDbContext(const char *msg = 0);
     void rawOut( const string &s );
-
-} // namespace mongo
-
-namespace mongo {
 
     typedef char _TCHAR;
 

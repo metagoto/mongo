@@ -148,8 +148,6 @@ namespace mongo {
         }
         
         DBClientBase* connect( string& errmsg ) const;
-
-        static ConnectionString parse( const string& url , string& errmsg );
         
         string getSetName() const{
             return _setName;
@@ -158,6 +156,10 @@ namespace mongo {
         vector<HostAndPort> getServers() const {
             return _servers;
         }
+
+        static ConnectionString parse( const string& url , string& errmsg );
+        
+        static string typeToString( ConnectionType type );
         
     private:
 
@@ -564,8 +566,8 @@ namespace mongo {
         */
         bool eval(const string &dbname, const string &jscode, BSONObj& info, BSONElement& retValue, BSONObj *args = 0);
 
-        /**
-           
+        /** validate a collection, checking for errors and reporting back statistics.
+            this operation is slow and blocking.
          */
         bool validate( const string &ns , bool scandata=true ){
             BSONObj cmd = BSON( "validate" << nsGetCollection( ns ) << "scandata" << scandata );
@@ -787,7 +789,13 @@ namespace mongo {
            Connect timeout is fixed, but short, at 5 seconds.
          */
         DBClientConnection(bool _autoReconnect=false, DBClientReplicaSet* cp=0, double so_timeout=0) :
-                clientSet(cp), failed(false), autoReconnect(_autoReconnect), lastReconnectTry(0), _so_timeout(so_timeout) { }
+            clientSet(cp), failed(false), autoReconnect(_autoReconnect), lastReconnectTry(0), _so_timeout(so_timeout) {
+            _numConnections++;
+        }
+
+        virtual ~DBClientConnection(){
+            _numConnections--;
+        }
 
         /** Connect to a Mongo database server.
 
@@ -875,6 +883,11 @@ namespace mongo {
         virtual ConnectionString::ConnectionType type() const { return ConnectionString::MASTER; }  
         virtual bool isMember( const DBConnector * conn ) const { return this == conn; };
         virtual void checkResponse( const char *data, int nReturned );
+        void setSoTimeout(double to) { _so_timeout = to; }
+        
+        static int getNumConnections(){
+            return _numConnections;
+        }
 
     protected:
         friend class SyncClusterConnection;
@@ -894,9 +907,11 @@ namespace mongo {
         // throws SocketException if in failed state and not reconnecting or if waiting to reconnect
         void checkConnection() { if( failed ) _checkConnection(); }
 
-		map< string, pair<string,string> > authCache;
-        const double _so_timeout;        
+        map< string, pair<string,string> > authCache;
+        double _so_timeout;        
         bool _connect( string& errmsg );
+
+        static AtomicUInt _numConnections;
     };
     
     /** Use this class to connect to a replica set of servers.  The class will manage

@@ -38,7 +38,7 @@ namespace mongo {
     Tool::Tool( string name , DBAccess access , string defaultDB , 
                 string defaultCollection , bool usesstdout ) :
         _name( name ) , _db( defaultDB ) , _coll( defaultCollection ) , 
-        _usesstdout(usesstdout), _noconnection(false), _autoreconnect(false), _conn(0), _paired(false) {
+        _usesstdout(usesstdout), _noconnection(false), _autoreconnect(false), _conn(0), _slaveConn(0), _paired(false) {
         
         _options = new po::options_description( "options" );
         _options->add_options()
@@ -240,8 +240,11 @@ namespace mongo {
     }
 
     DBClientBase& Tool::conn( bool slaveIfPaired ){
-        if ( slaveIfPaired && _conn->type() == ConnectionString::SET )
-            return ((DBClientReplicaSet*)_conn)->slaveConn();
+        if ( slaveIfPaired && _conn->type() == ConnectionString::SET ){
+            if (!_slaveConn)
+                _slaveConn = &((DBClientReplicaSet*)_conn)->slaveConn();
+            return *_slaveConn;
+        }
         return *_conn;
     }
 
@@ -355,19 +358,19 @@ namespace mongo {
     }
 
     long long BSONTool::processFile( const path& root ){
-        string fileString = root.string();
+        _fileName = root.string();
         
-        long long fileLength = file_size( root );
+        unsigned long long fileLength = file_size( root );
 
         if ( fileLength == 0 ) {
-            out() << "file " << fileString << " empty, skipping" << endl;
+            out() << "file " << _fileName << " empty, skipping" << endl;
             return 0;
         }
 
 
-        FILE* file = fopen( fileString.c_str() , "rb" );
+        FILE* file = fopen( _fileName.c_str() , "rb" );
         if ( ! file ){
-            log() << "error opening file: " << fileString << endl;
+            log() << "error opening file: " << _fileName << endl;
             return 0;
         }
 
@@ -377,9 +380,9 @@ namespace mongo {
 
         log(1) << "\t file size: " << fileLength << endl;
 
-        long long read = 0;
-        long long num = 0;
-        long long processed = 0;
+        unsigned long long read = 0;
+        unsigned long long num = 0;
+        unsigned long long processed = 0;
 
         const int BUF_SIZE = 1024 * 1024 * 5;
         boost::scoped_array<char> buf_holder(new char[BUF_SIZE]);

@@ -284,11 +284,14 @@ namespace mongo {
         case Code:
         case Symbol:
         case mongo::String: {
-            int x = valuestrsize();
-            if ( x > 0 && x < BSONObjMaxInternalSize && valuestr()[x-1] == 0 )
+            unsigned x = (unsigned) valuestrsize();
+            bool lenOk = x > 0 && x < (unsigned) BSONObjMaxInternalSize;
+            if( lenOk && valuestr()[x-1] == 0 )
                 return;
             StringBuilder buf;
-            buf <<  "Invalid dbref/code/string/symbol size: " << x << " strnlen:" << mongo::strnlen( valuestr() , x );
+            buf <<  "Invalid dbref/code/string/symbol size: " << x;
+            if( lenOk ) 
+                buf << " strnlen:" << mongo::strnlen( valuestr() , x );
             msgasserted( 10321 , buf.str() );
             break;
         }
@@ -610,6 +613,16 @@ namespace mongo {
     inline ostream& operator<<( ostream &s, const BSONElement &e ) {
         return s << e.toString();
     }
+
+    inline StringBuilder& operator<<( StringBuilder &s, const BSONObj &o ) {
+        o.toString( s );
+        return s;
+    }
+    inline StringBuilder& operator<<( StringBuilder &s, const BSONElement &e ) {
+        e.toString( s );
+        return s;
+    }
+
 
     inline void BSONElement::Val(BSONObj& v) const { v = Obj(); }
 

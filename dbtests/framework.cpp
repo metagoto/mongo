@@ -25,6 +25,7 @@
 
 #include "framework.h"
 #include "../util/file_allocator.h"
+#include "../db/dur.h"
 
 #ifndef _WIN32
 #include <cxxabi.h>
@@ -163,6 +164,7 @@ namespace mongo {
                 ("list,l", "list available test suites")
                 ("filter,f" , po::value<string>() , "string substring filter on test name" )
                 ("verbose,v", "verbose")
+                ("dur", "enable journaling")
                 ("seed", po::value<unsigned long long>(&seed), "random number seed")
                 ;
             
@@ -194,6 +196,11 @@ namespace mongo {
             if (params.count("help")) {
                 show_help_text(argv[0], shell_options);
                 return EXIT_CLEAN;
+            }
+
+            if( params.count("dur") ) { 
+                enableDurability();
+                cmdLine.dur = true;
             }
 
             if (params.count("debug") || params.count("verbose") ) {
@@ -249,6 +256,8 @@ namespace mongo {
             if ( params.count( "filter" ) ){
                 filter = params["filter"].as<string>();
             }
+
+            getDur().startup();
 
             int ret = run(suites,filter);
 

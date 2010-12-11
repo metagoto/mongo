@@ -26,6 +26,7 @@ namespace po = boost::program_options;
 namespace mongo {
 
     void setupSignals( bool inFork );
+    string getHostNameCached();
     BSONArray argvArray;
 
     void CmdLine::addGlobalOptions( boost::program_options::options_description& general , 
@@ -123,8 +124,9 @@ namespace mongo {
             po::notify(params);
         } 
         catch (po::error &e) {
-            cout << "ERROR: " << e.what() << endl << endl;
-            cout << visible << endl;
+            cout << "error command line: " << e.what() << endl;
+            cout << "use --help for help" << endl;
+            //cout << visible << endl;
             return false;
         }
 
@@ -254,4 +256,27 @@ namespace mongo {
         }
 
     } cmdGetCmdLineOpts;
+
+    string prettyHostName() { 
+        StringBuilder s(128);
+        s << getHostNameCached();
+        if( cmdLine.port != CmdLine::DefaultDBPort ) 
+            s << ':' << mongo::cmdLine.port;
+        return s.str();
+    }
+
+    ParameterValidator::ParameterValidator( const string& name ) : _name( name ){
+        if ( ! _all )
+            _all = new map<string,ParameterValidator*>();
+        (*_all)[_name] = this;
+    }
+
+    ParameterValidator * ParameterValidator::get( const string& name ){
+        map<string,ParameterValidator*>::iterator i = _all->find( name );
+        if ( i == _all->end() )
+            return NULL;
+        return i->second;
+    }
+    map<string,ParameterValidator*> * ParameterValidator::_all = 0;
+
 }

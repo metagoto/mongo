@@ -926,24 +926,6 @@ namespace QueryTests {
             
             cout << "HelperTest  slow:" << slow << " fast:" << fast << endl;
             
-            {
-                auto_ptr<CursorIterator> i = Helpers::find( ns() );
-                int n = 0;
-                while ( i->hasNext() ){
-                    BSONObj o = i->next();
-                    n++;
-                }
-                ASSERT_EQUALS( 50 , n );
-
-                i = Helpers::find( ns() , BSON( "_id" << 20 ) );
-                n = 0;
-                while ( i->hasNext() ){
-                    BSONObj o = i->next();
-                    n++;
-                }
-                ASSERT_EQUALS( 1 , n );
-            }
-            
         }
     };
 
@@ -1133,6 +1115,94 @@ namespace QueryTests {
         }
     };
 
+    namespace proj { // Projection tests
+
+        class T1 {
+        public:
+            void run(){
+                
+                Projection m;
+                m.init( BSON( "a" << 1 ) );
+                ASSERT_EQUALS( BSON( "a" << 5 ) , m.transform( BSON( "x" << 1 << "a" << 5 ) ) );
+            }
+        };
+
+        class K1 {
+        public:
+            void run(){
+                
+                Projection m;
+                m.init( BSON( "a" << 1 ) );
+
+                scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 ) ) );                
+                ASSERT( ! x );
+
+                x.reset( m.checkKey( BSON( "a" << 1  << "_id" << 1 ) ) );
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 5 << "_id" << 17 ) , 
+                               x->hydrate( BSON( "" << 5 << "" << 17 ) ) );
+
+                x.reset( m.checkKey( BSON( "a" << 1 << "x" << 1 << "_id" << 1 ) ) );
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 5 << "_id" << 17 ) ,
+                               x->hydrate( BSON( "" << 5 << "" << 123 << "" << 17 ) ) );
+
+            }
+        };
+
+        class K2 {
+        public:
+            void run(){
+                
+                Projection m;
+                m.init( BSON( "a" << 1 << "_id" << 0 ) );
+
+                scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 ) ) );                
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 17 ) , 
+                               x->hydrate( BSON( "" << 17 ) ) );
+
+                x.reset( m.checkKey( BSON( "x" << 1 << "a" << 1 << "_id" << 1 ) ) );
+                ASSERT( x );
+
+                ASSERT_EQUALS( BSON( "a" << 123 ) ,
+                               x->hydrate( BSON( "" << 5 << "" << 123 << "" << 17 ) ) );
+
+            }
+        };
+
+
+        class K3 {
+        public:
+            void run(){
+                
+                {
+                    Projection m;
+                    m.init( BSON( "a" << 1 << "_id" << 0 ) );
+                    
+                    scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 << "x.a" << 1 ) ) );                
+                    ASSERT( x );
+                }
+
+
+                {
+                    // TODO: this is temporary SERVER-2104
+                    Projection m;
+                    m.init( BSON( "x.a" << 1 << "_id" << 0 ) );
+                    
+                    scoped_ptr<Projection::KeyOnly> x( m.checkKey( BSON( "a" << 1 << "x.a" << 1 ) ) );                
+                    ASSERT( ! x );
+                }
+
+            }
+        };
+
+
+    }
+
     class All : public Suite {
     public:
         All() : Suite( "query" ) {
@@ -1189,6 +1259,11 @@ namespace QueryTests {
             add< queryobjecttests::names1 >();
 
             add< OrderingTest >();
+
+            add< proj::T1 >();
+            add< proj::K1 >();
+            add< proj::K2 >();
+            add< proj::K3 >();
         }
     } myall;
     

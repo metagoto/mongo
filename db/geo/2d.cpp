@@ -1053,20 +1053,22 @@ namespace mongo {
         }
 
         virtual void noteLocation() { 
-            assert(0);
+            // no-op since these are meant to be safe
         }
 
         /* called before query getmore block is iterated */
         virtual void checkLocation() {
-            assert(0);
+            // no-op since these are meant to be safe
         }
 
         virtual bool supportGetMore() { return false; }
         virtual bool supportYields() { return false; }
+        
+        virtual bool getsetdup(DiskLoc loc) { return false; }
+        virtual bool modifiedKeys() const { return true; }
+        virtual bool isMultiKey() const { return false; }
 
-        virtual bool getsetdup(DiskLoc loc){
-            return false;
-        }
+        
 
         const Geo2dType * _spec;
         const IndexDetails * _id;

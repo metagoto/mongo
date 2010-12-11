@@ -23,6 +23,8 @@ extern int do_md5_test(void);
 
 namespace mongo {
     
+    BOOST_STATIC_ASSERT( sizeof(nonce) == 8 );
+
 	Security::Security() {
 		static int n;
 		massert( 10352 , "Security is a singleton class", ++n == 1);
@@ -41,7 +43,6 @@ namespace mongo {
 #else
         srandomdev();
 #endif
-        assert( sizeof(nonce) == 8 );
         
 #ifndef NDEBUG
         if ( do_md5_test() )
@@ -62,7 +63,10 @@ namespace mongo {
         _devrandom->read((char*)&n, sizeof(n));
         massert( 10355 , "devrandom failed", !_devrandom->fail());
 #elif defined(_WIN32)
-        n = (((unsigned long long)rand())<<32) | rand();
+        unsigned a, b;
+        assert( rand_s(&a) == 0 );
+        assert( rand_s(&b) == 0 );
+        n = (((unsigned long long)a)<<32) | b;
 #else
         n = (((unsigned long long)random())<<32) | random();
 #endif

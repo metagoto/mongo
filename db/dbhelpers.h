@@ -33,20 +33,6 @@ namespace mongo {
     class Cursor;
     class CoveredIndexMatcher;
 
-    class CursorIterator {
-    public:
-        CursorIterator( shared_ptr<Cursor> c , BSONObj filter = BSONObj() );
-        BSONObj next();
-        bool hasNext();
-
-    private:
-        void _advance();
-
-        shared_ptr<Cursor> _cursor;
-        auto_ptr<CoveredIndexMatcher> _matcher;
-        BSONObj _o;
-    };
-
     /**
        all helpers assume locking is handled above them
      */
@@ -90,8 +76,6 @@ namespace mongo {
            @return null loc if not found */
         static DiskLoc findById(NamespaceDetails *d, BSONObj query);
 
-        static auto_ptr<CursorIterator> find( const char *ns , BSONObj query = BSONObj() , bool requireIndex = false );
-
         /** Get/put the first (or last) object from a collection.  Generally only useful if the collection
             only ever has a single object -- which is a "singleton collection".
 
@@ -115,7 +99,7 @@ namespace mongo {
         /** You do not need to set the database before calling.
             @return true if collection is empty.
         */
-        static bool isEmpty(const char *ns);
+        static bool isEmpty(const char *ns, bool doAuth=true);
 
         // TODO: this should be somewhere else probably
         static BSONObj toKeyFormat( const BSONObj& o , BSONObj& key );

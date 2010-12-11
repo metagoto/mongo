@@ -101,6 +101,7 @@ namespace mongo {
 
         string _db;
         string _coll;
+        string _fileName;
 
         string _username;
         string _password;
@@ -121,6 +122,7 @@ namespace mongo {
     protected:
 
         mongo::DBClientBase * _conn;
+        mongo::DBClientBase * _slaveConn;
         bool _paired;
 
         boost::program_options::options_description * _options;
